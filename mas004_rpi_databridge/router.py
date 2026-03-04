@@ -9,6 +9,7 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.protocol import normalize_pid
+from mas004_rpi_databridge.peers import peer_urls
 
 
 def _channel_for_ptype(ptype: str) -> str:
@@ -75,11 +76,17 @@ class Router:
         self.device_bridge = DeviceBridge(cfg, params, logs)
 
     def _enqueue_to_microtom(self, line: str, correlation: Optional[str] = None):
-        url = self.cfg.peer_base_url.rstrip("/") + "/api/inbox"
+        targets = peer_urls(self.cfg, "/api/inbox")
+        if not targets:
+            self.logs.log("raspi", "error", "no peer_base_url configured; cannot enqueue message to microtom")
+            return
+
         headers = {}
         if correlation:
             headers["X-Correlation-Id"] = correlation
-        self.outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
+
+        for url in targets:
+            self.outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
 
     def handle_microtom_line(self, line: str, correlation: Optional[str]) -> Optional[str]:
         parsed = _parse_line(line)

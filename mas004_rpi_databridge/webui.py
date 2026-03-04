@@ -21,6 +21,7 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_ip_info
 from mas004_rpi_databridge.protocol import normalize_pid
+from mas004_rpi_databridge.peers import peer_urls
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
@@ -34,6 +35,7 @@ def require_token(x_token: Optional[str], cfg: Settings):
 class ConfigUpdate(BaseModel):
     # Microtom
     peer_base_url: Optional[str] = None
+    peer_base_url_secondary: Optional[str] = None
     peer_watchdog_host: Optional[str] = None
     peer_health_path: Optional[str] = None
 
@@ -289,6 +291,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         <div><b>Outbox</b>: <span id="home_outbox">{outbox.count()}</span></div>
         <div><b>Inbox pending</b>: <span id="home_inbox">{inbox.count_pending()}</span></div>
         <div><b>Peer</b>: {cfg2.peer_base_url}</div>
+        <div><b>Peer (parallel)</b>: {(cfg2.peer_base_url_secondary or "-")}</div>
         <div><b>Watchdog host</b>: {cfg2.peer_watchdog_host}</div>
       </div>
     </div>
@@ -365,6 +368,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "outbox_count": outbox.count(),
             "inbox_pending": inbox.count_pending(),
             "peer_base_url": cfg2.peer_base_url,
+            "peer_base_url_secondary": getattr(cfg2, "peer_base_url_secondary", ""),
             "devices": {
                 "esp": {
                     "host": cfg2.esp_host,
@@ -480,9 +484,23 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_token(x_token, cfg2)
 
-        url = req.url if req.url else cfg2.peer_base_url.rstrip("/") + req.path
-        idem = outbox.enqueue(req.method, url, req.headers, req.body, req.idempotency_key)
-        return {"ok": True, "idempotency_key": idem}
+        if req.url:
+            targets = [req.url]
+        else:
+            targets = peer_urls(cfg2, req.path)
+            if not targets:
+                raise HTTPException(status_code=400, detail="No peer base URL configured")
+
+        items = []
+        for url in targets:
+            idem = outbox.enqueue(req.method, url, req.headers, req.body, req.idempotency_key)
+            items.append({"url": url, "idempotency_key": idem})
+        return {
+            "ok": True,
+            "count": len(items),
+            "items": items,
+            "idempotency_key": items[0]["idempotency_key"],
+        }
 
     # -----------------------------
     # Test helper API (manual simulation from UI windows)
@@ -495,7 +513,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         src = normalize_test_source(req.source)
         hint = req.ptype_hint if req.ptype_hint is not None else default_ptype_hint.get(src, "")
         lines = [normalize_test_line(part, hint) for part in split_test_messages(req.msg)]
-        url = cfg2.peer_base_url.rstrip("/") + "/api/inbox"
+        targets = peer_urls(cfg2, "/api/inbox")
+        if not targets:
+            raise HTTPException(status_code=400, detail="No peer base URL configured")
         headers = {}
         items = []
 
@@ -517,13 +537,17 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
             if src == "raspi":
                 logs.log("raspi", "out", f"manual->microtom: {line}")
-                idem = outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
+                idems = []
+                for url in targets:
+                    idem = outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
+                    idems.append({"url": url, "idempotency_key": idem})
                 items.append({
                     "source": src,
                     "line": line,
                     "route": "raspi->microtom",
                     "ack": "ACK_QUEUED",
-                    "idempotency_key": idem,
+                    "idempotency_key": idems[0]["idempotency_key"],
+                    "idempotency_keys": idems,
                     "persisted_local": persisted,
                     "persist_msg": persist_msg,
                 })
@@ -531,20 +555,24 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
             logs.log(src, "out", f"manual->raspi: {line}")
             logs.log("raspi", "in", f"{src}: {line}")
-            idem = outbox.enqueue(
-                "POST",
-                url,
-                headers,
-                {"msg": line, "source": "raspi", "origin": src},
-                None,
-            )
+            idems = []
+            for url in targets:
+                idem = outbox.enqueue(
+                    "POST",
+                    url,
+                    headers,
+                    {"msg": line, "source": "raspi", "origin": src},
+                    None,
+                )
+                idems.append({"url": url, "idempotency_key": idem})
             logs.log("raspi", "out", f"forward to microtom: {line}")
             items.append({
                 "source": src,
                 "line": line,
                 "route": f"{src}->raspi->microtom",
                 "ack": "ACK_QUEUED",
-                "idempotency_key": idem,
+                "idempotency_key": idems[0]["idempotency_key"],
+                "idempotency_keys": idems,
                 "persisted_local": persisted,
                 "persist_msg": persist_msg,
             })
@@ -1015,7 +1043,7 @@ load();
   .token-grid{grid-template-columns:minmax(320px,760px) auto;}
   .cols-4{grid-template-columns:220px 220px 110px 220px;}
   .cols-5{grid-template-columns:220px 220px 110px 220px 320px;}
-  .cols-3a{grid-template-columns:640px 220px 200px;}
+  .cols-3a{grid-template-columns:460px 460px 220px 200px;}
   .cols-3b{grid-template-columns:160px 160px 260px;}
   .cols-device{grid-template-columns:260px 130px 260px auto;}
   .cols-log{grid-template-columns:180px 180px 180px 180px;}
@@ -1162,9 +1190,11 @@ load();
     <legend>Databridge / Microtom</legend>
     <div class="grid cols-3a">
       <div class="field"><label>peer_base_url</label><input id="peer_base_url"/></div>
+      <div class="field"><label>peer_base_url_secondary (optional parallel)</label><input id="peer_base_url_secondary" placeholder="z.B. https://192.168.5.2:9090"/></div>
       <div class="field"><label>peer_watchdog_host</label><input id="peer_watchdog_host"/></div>
       <div class="field"><label>peer_health_path</label><input id="peer_health_path"/></div>
     </div>
+    <div class="muted">Wenn gesetzt, werden ausgehende Raspi-&gt;Microtom Nachrichten parallel an beide Endpunkte gesendet.</div>
     <div class="grid cols-3b">
       <div class="field"><label>http_timeout_s</label><input id="http_timeout_s"/></div>
       <div class="field"><label>tls_verify</label><input id="tls_verify" placeholder="true/false"/></div>
@@ -1354,6 +1384,7 @@ async function reloadAll(){
   const cfg = await api("/api/config");
   const c = cfg.config;
   document.getElementById("peer_base_url").value = c.peer_base_url || "";
+  document.getElementById("peer_base_url_secondary").value = c.peer_base_url_secondary || "";
   document.getElementById("peer_watchdog_host").value = c.peer_watchdog_host || "";
   document.getElementById("peer_health_path").value = c.peer_health_path || "";
   document.getElementById("http_timeout_s").value = c.http_timeout_s ?? "";
@@ -1458,6 +1489,7 @@ async function saveBridge(){
 
   const payload = {
     peer_base_url: document.getElementById("peer_base_url").value.trim(),
+    peer_base_url_secondary: document.getElementById("peer_base_url_secondary").value.trim(),
     peer_watchdog_host: document.getElementById("peer_watchdog_host").value.trim(),
     peer_health_path: document.getElementById("peer_health_path").value.trim(),
     http_timeout_s: Number(document.getElementById("http_timeout_s").value.trim()),

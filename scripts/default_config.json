@@ -12,6 +12,7 @@
   "eth1_dns": "",
   "eth0_source_ip": "192.168.1.100",
   "peer_base_url": "https://192.168.1.10",
+  "peer_base_url_secondary": "",
   "peer_watchdog_host": "192.168.1.10",
   "peer_health_path": "/health",
   "watchdog_interval_s": 2.0,

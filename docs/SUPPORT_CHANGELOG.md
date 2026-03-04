@@ -28,6 +28,15 @@
   - Local + Pi + Git are now fully synchronized for all 4 repositories.
   - All 4 systemd services on Pi are active.
 
+## 2026-03-04 (Parallel Microtom Target)
+- Added optional secondary Microtom target in config:
+  - `peer_base_url_secondary`
+- Extended outbound enqueue/routing to fan out to both configured targets:
+  - primary `peer_base_url`
+  - optional `peer_base_url_secondary`
+- Updated Settings UI (`/ui/settings`) to edit secondary peer URL.
+- Updated default/example config files and project context docs.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

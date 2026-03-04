@@ -16,6 +16,7 @@
   "eth0_source_ip": "",
 
   "peer_base_url": "http://192.168.1.64:9090",
+  "peer_base_url_secondary": "",
   "peer_watchdog_host": "192.168.1.64",
   "peer_health_path": "/health",
 

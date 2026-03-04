@@ -29,6 +29,7 @@ class Settings:
 
     # Peer (Microtom)
     peer_base_url: str = "http://127.0.0.1:9090"
+    peer_base_url_secondary: str = ""  # optional parallel target (e.g. local Microtom test tool via VPN/WireGuard)
     peer_watchdog_host: str = "127.0.0.1"
     peer_health_path: str = "/health"
 

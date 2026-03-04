@@ -18,6 +18,7 @@
 - Local API/UI endpoint: `https://<raspi-ip>:8080`
 - Main inbound endpoint for Microtom: `POST /api/inbox`
 - Main outbound callback target: `<peer_base_url>/api/inbox`
+- Optional parallel outbound callback target: `<peer_base_url_secondary>/api/inbox`
 - Health endpoint: `GET /health`
 
 ## Persistent Paths
