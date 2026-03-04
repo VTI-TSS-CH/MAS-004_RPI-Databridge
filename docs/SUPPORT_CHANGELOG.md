@@ -61,6 +61,8 @@
   - optional extra relay ports per device: `esp_forward_ports`, `vj3350_forward_ports`, `vj6530_forward_ports`
   - runtime worker: `mas004_rpi_databridge/tcp_forwarder.py`
   - started from `service.py` at app startup.
+- NTP robustness fix:
+  - `ntp_sync.py` now searches binaries also in `/usr/sbin`/`/sbin`, so `ntpdate` is detected in systemd service context.
 
 ## Maintenance Rule
 - Add one entry for every change that affects:

@@ -30,24 +30,38 @@ def _run(cmd: list[str], timeout_s: int = 30) -> Tuple[bool, str]:
     return False, msg
 
 
+def _find_cmd(name: str) -> str:
+    p = shutil.which(name)
+    if p:
+        return p
+    for base in ("/usr/sbin", "/sbin", "/usr/bin", "/bin"):
+        candidate = f"{base}/{name}"
+        if shutil.which(candidate):
+            return candidate
+    return ""
+
+
 def sync_once(server: str) -> Tuple[bool, str]:
     s = (server or "").strip()
     if not s:
         return False, "ntp_server empty"
 
-    if shutil.which("ntpdate"):
-        ok, msg = _run(["ntpdate", "-u", s], timeout_s=30)
+    ntpdate_cmd = _find_cmd("ntpdate")
+    if ntpdate_cmd:
+        ok, msg = _run([ntpdate_cmd, "-u", s], timeout_s=30)
         if ok:
             return True, f"ntpdate: {msg}"
 
-    if shutil.which("busybox"):
-        ok, msg = _run(["busybox", "ntpd", "-q", "-n", "-p", s], timeout_s=40)
+    busybox_cmd = _find_cmd("busybox")
+    if busybox_cmd:
+        ok, msg = _run([busybox_cmd, "ntpd", "-q", "-n", "-p", s], timeout_s=40)
         if ok:
             return True, f"busybox ntpd: {msg}"
 
-    if shutil.which("sntp"):
+    sntp_cmd = _find_cmd("sntp")
+    if sntp_cmd:
         # Platform dependent options; try conservative form.
-        ok, msg = _run(["sntp", "-sS", s], timeout_s=30)
+        ok, msg = _run([sntp_cmd, "-sS", s], timeout_s=30)
         if ok:
             return True, f"sntp: {msg}"
 
