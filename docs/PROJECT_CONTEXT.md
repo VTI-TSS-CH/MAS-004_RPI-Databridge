@@ -48,3 +48,12 @@
 ## Last Reviewed
 - Date: 2026-03-04
 - Local HEAD baseline during creation: `af82b02`
+
+## Current Sync Snapshot (2026-03-04)
+- Local git: all four repos clean and pushed.
+- Pi git:
+  - `MAS-004_RPI-Databridge` synced to latest main.
+  - `MAS-004_ESP32-PLC-Bridge` dirty and behind 1.
+  - `MAS-004_VJ3350-Ultimate-Bridge` dirty and behind 1.
+  - `MAS-004_VJ6530-ZBC-Bridge` dirty and behind 1.
+- Policy applied: no destructive overwrite of dirty Pi working trees.

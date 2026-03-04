@@ -10,6 +10,9 @@
   - `scripts/mas004_multirepo_sync.ps1`
 - Established policy: this repository is the main/orchestration project.
 - Baseline local HEAD during this entry: `af82b02`.
+- Added current sync snapshot:
+  - Main repo synced on Pi.
+  - Three Pi subproject repos still dirty and behind 1 (safe-skip mode).
 
 ## Maintenance Rule
 - Add one entry for every change that affects:
