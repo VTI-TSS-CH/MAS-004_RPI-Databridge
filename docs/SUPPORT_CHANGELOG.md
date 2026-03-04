@@ -14,6 +14,20 @@
   - Main repo synced on Pi.
   - Three Pi subproject repos still dirty and behind 1 (safe-skip mode).
 
+## 2026-03-04 (Pi Safe Cleanup + Full Sync)
+- Performed safe cleanup on Pi for all 3 subprojects:
+  - Created backup branches and committed tracked local changes before sync.
+  - Fast-forwarded `main` to `origin/main`.
+- Backup branches created on Pi:
+  - `MAS-004_ESP32-PLC-Bridge`: `backup/pi-pre-sync-mas-004_esp32-plc-bridge-20260304-083407`
+  - `MAS-004_VJ3350-Ultimate-Bridge`: `backup/pi-pre-sync-mas-004_vj3350-ultimate-bridge-20260304-083551`
+  - `MAS-004_VJ6530-ZBC-Bridge`: `backup/pi-pre-sync-mas-004_vj6530-zbc-bridge-20260304-083601`
+- Added local Git excludes on Pi subprojects for runtime artifacts:
+  - `.venv/`, `*.egg-info/`, `__pycache__/`, `**/__pycache__/`
+- Result:
+  - Local + Pi + Git are now fully synchronized for all 4 repositories.
+  - All 4 systemd services on Pi are active.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture
