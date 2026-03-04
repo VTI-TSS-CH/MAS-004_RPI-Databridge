@@ -30,6 +30,8 @@
   - `ssh pi@10.27.67.69 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
 - LIVE update (only if explicitly approved):
   - `ssh pi@192.168.1.20 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
+- Reinstall package safely after pull (prevents stale `build/` artifacts):
+  - `ssh pi@10.27.67.69 "cd /opt/MAS-004_RPI-Databridge && rm -rf build && ./.venv/bin/python -m pip install --no-cache-dir --force-reinstall ."`
 - Restart:
   - `ssh pi@10.27.67.69 "sudo systemctl restart mas004-rpi-databridge.service"`
 - Logs:

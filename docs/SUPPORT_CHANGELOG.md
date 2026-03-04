@@ -64,6 +64,24 @@
 - NTP robustness fix:
   - `ntp_sync.py` now searches binaries also in `/usr/sbin`/`/sbin`, so `ntpdate` is detected in systemd service context.
 
+## 2026-03-04 (TEST Raspi Setup Finalization + Deploy Hardening)
+- Finalized TEST Raspi setup on `10.27.67.69`:
+  - `eth0`: `10.27.67.69/24`, gateway `10.27.67.1`, DNS `10.28.193.4 10.27.30.201`
+  - `eth1`: `192.168.2.100/24` without gateway
+  - timezone set to `Europe/Zurich`
+- Root-cause fixed for "new code not active after pull/install":
+  - stale `build/` artifacts on Pi caused old package content to be reinstalled.
+  - verified by missing `/api/ui/status/public` and absent `[NTP]/[FWD]` runtime logs.
+- Deployment hardening:
+  - `scripts/mas004_multirepo_sync.ps1` now performs on remote (when `-RestartServices` is used):
+    - `rm -rf build`
+    - `.venv/bin/python -m pip install --no-cache-dir --force-reinstall .`
+    - service restart
+- Verified runtime after reinstall:
+  - endpoint `GET /api/ui/status/public` returns `200`
+  - forwarding listeners active (`3007`,`3008`,`3009`)
+  - NTP sync successful against `10.27.30.201`
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

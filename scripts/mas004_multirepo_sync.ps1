@@ -111,6 +111,21 @@ fi
     }
 
     if ($RestartServices) {
+        Invoke-Step "[PI/$Target] $($repo.Name): clean build + pip install" {
+            $installScript = @'
+set -e
+cd '__REMOTE_PATH__' || exit 2
+rm -rf build
+if [ -x .venv/bin/python ]; then
+  .venv/bin/python -m pip install --no-cache-dir --force-reinstall .
+else
+  python3 -m pip install --user --no-cache-dir --force-reinstall .
+fi
+'@
+            $installScript = $installScript.Replace("__REMOTE_PATH__", $repo.Remote)
+            ssh $resolvedSshHost $installScript | Out-Host
+        }
+
         Invoke-Step "[PI/$Target] $($repo.Name): restart $($repo.Service)" {
             ssh $resolvedSshHost "sudo systemctl restart $($repo.Service) && systemctl is-active $($repo.Service)" | Out-Host
         }
