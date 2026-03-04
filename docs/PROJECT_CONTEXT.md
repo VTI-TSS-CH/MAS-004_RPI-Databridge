@@ -10,6 +10,7 @@
 - Core app package: `mas004_rpi_databridge/`
 - Web/API: `mas004_rpi_databridge/webui.py`
 - Message reliability: `inbox.py`, `outbox.py`, `router.py`, `service.py`, `http_client.py`, `watchdog.py`
+- Background ops: `ntp_sync.py` (periodic time sync), `tcp_forwarder.py` (eth0->eth1 TCP relay)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
@@ -20,6 +21,9 @@
 - Main outbound callback target: `<peer_base_url>/api/inbox`
 - Optional parallel outbound callback target: `<peer_base_url_secondary>/api/inbox`
 - Health endpoint: `GET /health`
+- TCP relay endpoints on Raspi eth0:
+  - fixed ports: `3007` (VJ6530), `3008` (VJ3350), `3009` (ESP32)
+  - optional extra per-device ports from Settings UI (`*_forward_ports`)
 
 ## Deployment Topology
 - TEST Raspberry:

@@ -43,6 +43,8 @@ class ConfigUpdate(BaseModel):
     tls_verify: Optional[bool] = None
     http_timeout_s: Optional[float] = None
     eth0_source_ip: Optional[str] = None
+    ntp_server: Optional[str] = None
+    ntp_sync_interval_min: Optional[int] = None
 
     # webui
     webui_port: Optional[int] = None
@@ -57,9 +59,12 @@ class ConfigUpdate(BaseModel):
     vj3350_host: Optional[str] = None
     vj3350_port: Optional[int] = None
     vj3350_simulation: Optional[bool] = None
+    vj3350_forward_ports: Optional[str] = None
     vj6530_host: Optional[str] = None
     vj6530_port: Optional[int] = None
     vj6530_simulation: Optional[bool] = None
+    vj6530_forward_ports: Optional[str] = None
+    esp_forward_ports: Optional[str] = None
 
     # daily logfile retention
     logs_keep_days_all: Optional[int] = None
@@ -369,15 +374,30 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "inbox_pending": inbox.count_pending(),
             "peer_base_url": cfg2.peer_base_url,
             "peer_base_url_secondary": getattr(cfg2, "peer_base_url_secondary", ""),
+            "ntp": {
+                "server": getattr(cfg2, "ntp_server", ""),
+                "sync_interval_min": getattr(cfg2, "ntp_sync_interval_min", 60),
+            },
             "devices": {
                 "esp": {
                     "host": cfg2.esp_host,
                     "port": cfg2.esp_port,
                     "simulation": cfg2.esp_simulation,
                     "watchdog_host": cfg2.esp_watchdog_host,
+                    "forward_ports": getattr(cfg2, "esp_forward_ports", ""),
                 },
-                "vj3350": {"host": cfg2.vj3350_host, "port": cfg2.vj3350_port, "simulation": cfg2.vj3350_simulation},
-                "vj6530": {"host": cfg2.vj6530_host, "port": cfg2.vj6530_port, "simulation": cfg2.vj6530_simulation},
+                "vj3350": {
+                    "host": cfg2.vj3350_host,
+                    "port": cfg2.vj3350_port,
+                    "simulation": cfg2.vj3350_simulation,
+                    "forward_ports": getattr(cfg2, "vj3350_forward_ports", ""),
+                },
+                "vj6530": {
+                    "host": cfg2.vj6530_host,
+                    "port": cfg2.vj6530_port,
+                    "simulation": cfg2.vj6530_simulation,
+                    "forward_ports": getattr(cfg2, "vj6530_forward_ports", ""),
+                },
             }
         }
 
@@ -401,6 +421,22 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         for k, v in u.model_dump().items():
             if v is not None:
                 setattr(cfg2, k, v)
+
+        # basic normalization for runtime loops
+        try:
+            cfg2.ntp_sync_interval_min = int(getattr(cfg2, "ntp_sync_interval_min", 60) or 60)
+        except Exception:
+            cfg2.ntp_sync_interval_min = 60
+        cfg2.ntp_sync_interval_min = max(1, min(24 * 60, cfg2.ntp_sync_interval_min))
+
+        for k in ("esp_forward_ports", "vj3350_forward_ports", "vj6530_forward_ports"):
+            v = getattr(cfg2, k, "")
+            if v is None:
+                setattr(cfg2, k, "")
+            elif isinstance(v, str):
+                setattr(cfg2, k, v.strip())
+            else:
+                setattr(cfg2, k, str(v).strip())
 
         cfg2.save(cfg_path)
         # Restart service to apply
@@ -1045,7 +1081,8 @@ load();
   .cols-5{grid-template-columns:220px 220px 110px 220px 320px;}
   .cols-3a{grid-template-columns:460px 460px 220px 200px;}
   .cols-3b{grid-template-columns:160px 160px 260px;}
-  .cols-device{grid-template-columns:260px 130px 260px auto;}
+  .cols-ntp{grid-template-columns:420px 220px;}
+  .cols-device{grid-template-columns:230px 120px 280px 240px auto;}
   .cols-log{grid-template-columns:180px 180px 180px 180px;}
   .field{display:flex; flex-direction:column; gap:4px; min-width:0;}
   .field label{font-size:12px; color:var(--muted); font-weight:600;}
@@ -1122,12 +1159,12 @@ load();
     max-width:100%;
   }
   @media(max-width:1360px){
-    .token-grid,.cols-4,.cols-5,.cols-3a,.cols-3b,.cols-device,.cols-log{
+    .token-grid,.cols-4,.cols-5,.cols-3a,.cols-3b,.cols-ntp,.cols-device,.cols-log{
       grid-template-columns:repeat(2,minmax(220px,1fr));
     }
   }
   @media(max-width:1100px){
-    .token-grid,.cols-4,.cols-5,.cols-3a,.cols-3b,.cols-device,.cols-log{grid-template-columns:1fr;}
+    .token-grid,.cols-4,.cols-5,.cols-3a,.cols-3b,.cols-ntp,.cols-device,.cols-log{grid-template-columns:1fr;}
   }
   .topnav{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
   .navbtn{padding:8px 12px; border:1px solid #c2d2e4; border-radius:8px; background:#e8f0f8; color:#1f2933; text-decoration:none}
@@ -1200,6 +1237,11 @@ load();
       <div class="field"><label>tls_verify</label><input id="tls_verify" placeholder="true/false"/></div>
       <div class="field"><label>eth0_source_ip</label><input id="eth0_source_ip"/></div>
     </div>
+    <div class="grid cols-ntp">
+      <div class="field"><label>ntp_server</label><input id="ntp_server" placeholder="z.B. 10.27.30.201 oder pool.ntp.org"/></div>
+      <div class="field"><label>ntp_sync_interval_min</label><input id="ntp_sync_interval_min" type="number" min="1" max="1440"/></div>
+    </div>
+    <div class="muted">NTP: Raspi synchronisiert die Zeit zyklisch gegen den konfigurierten Server.</div>
     <div class="grid">
       <div class="field">
         <label>shared_secret</label>
@@ -1218,21 +1260,25 @@ load();
 
   <fieldset>
     <legend>Device Endpoints (ESP / VJ3350 / VJ6530)</legend>
+    <div class="muted">TCP Forwarding: Ports 3007 (VJ6530), 3008 (VJ3350), 3009 (ESP32) werden auf die jeweilige eth1 Ziel-IP 1:1 weitergeleitet. Zusaetzliche Ports hier als Liste (Komma/Semikolon/Leerzeichen) eintragen.</div>
     <div class="grid cols-device">
       <div class="field"><label>ESP host</label><input id="esp_host"/></div>
       <div class="field"><label>ESP port</label><input id="esp_port"/></div>
+      <div class="field"><label>ESP extra routed ports</label><input id="esp_forward_ports" placeholder="z.B. 3010, 3011"/></div>
       <div class="field"><label>ESP watchdog host</label><input id="esp_watchdog_host" placeholder="leer = esp_host"/></div>
       <label class="checkline"><input type="checkbox" id="esp_simulation"/>Simulation</label>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>VJ3350 host</label><input id="vj3350_host"/></div>
       <div class="field"><label>VJ3350 port</label><input id="vj3350_port"/></div>
+      <div class="field"><label>VJ3350 extra routed ports</label><input id="vj3350_forward_ports" placeholder="z.B. 3020, 3021"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled/></div>
       <label class="checkline"><input type="checkbox" id="vj3350_simulation"/>Simulation</label>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>VJ6530 host</label><input id="vj6530_host"/></div>
       <div class="field"><label>VJ6530 port</label><input id="vj6530_port"/></div>
+      <div class="field"><label>VJ6530 extra routed ports</label><input id="vj6530_forward_ports" placeholder="z.B. 3030, 3031"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled/></div>
       <label class="checkline"><input type="checkbox" id="vj6530_simulation"/>Simulation</label>
     </div>
@@ -1390,6 +1436,8 @@ async function reloadAll(){
   document.getElementById("http_timeout_s").value = c.http_timeout_s ?? "";
   document.getElementById("tls_verify").value = String(c.tls_verify ?? false);
   document.getElementById("eth0_source_ip").value = c.eth0_source_ip || "";
+  document.getElementById("ntp_server").value = c.ntp_server || "";
+  document.getElementById("ntp_sync_interval_min").value = c.ntp_sync_interval_min ?? 60;
   const secEl = document.getElementById("shared_secret");
   const secStateEl = document.getElementById("shared_secret_state");
   const hasMaskedSecret = c.shared_secret === "***";
@@ -1407,12 +1455,15 @@ async function reloadAll(){
   document.getElementById("esp_host").value = c.esp_host || "";
   document.getElementById("esp_port").value = c.esp_port ?? "";
   document.getElementById("esp_watchdog_host").value = c.esp_watchdog_host || "";
+  document.getElementById("esp_forward_ports").value = c.esp_forward_ports || "";
   document.getElementById("esp_simulation").checked = !!c.esp_simulation;
   document.getElementById("vj3350_host").value = c.vj3350_host || "";
   document.getElementById("vj3350_port").value = c.vj3350_port ?? "";
+  document.getElementById("vj3350_forward_ports").value = c.vj3350_forward_ports || "";
   document.getElementById("vj3350_simulation").checked = !!c.vj3350_simulation;
   document.getElementById("vj6530_host").value = c.vj6530_host || "";
   document.getElementById("vj6530_port").value = c.vj6530_port ?? "";
+  document.getElementById("vj6530_forward_ports").value = c.vj6530_forward_ports || "";
   document.getElementById("vj6530_simulation").checked = !!c.vj6530_simulation;
   document.getElementById("logs_keep_days_all").value = c.logs_keep_days_all ?? 30;
   document.getElementById("logs_keep_days_esp").value = c.logs_keep_days_esp ?? 30;
@@ -1480,6 +1531,8 @@ async function saveBridge(){
   const secEl = document.getElementById("shared_secret");
   const secretRaw = secEl.value.trim();
   const clearSecret = document.getElementById("clear_shared_secret").checked;
+  const ntpIntervalRaw = Number(document.getElementById("ntp_sync_interval_min").value.trim());
+  const ntpInterval = Number.isFinite(ntpIntervalRaw) ? ntpIntervalRaw : 60;
   let sharedSecretValue = null; // null => unveraendert lassen
   if(clearSecret){
     sharedSecretValue = "";
@@ -1495,6 +1548,8 @@ async function saveBridge(){
     http_timeout_s: Number(document.getElementById("http_timeout_s").value.trim()),
     tls_verify: (document.getElementById("tls_verify").value.trim().toLowerCase()==="true"),
     eth0_source_ip: document.getElementById("eth0_source_ip").value.trim(),
+    ntp_server: document.getElementById("ntp_server").value.trim(),
+    ntp_sync_interval_min: ntpInterval,
     shared_secret: sharedSecretValue
   };
   await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
@@ -1507,12 +1562,15 @@ async function saveDevices(){
     esp_host: document.getElementById("esp_host").value.trim(),
     esp_port: Number(document.getElementById("esp_port").value.trim()),
     esp_watchdog_host: document.getElementById("esp_watchdog_host").value.trim(),
+    esp_forward_ports: document.getElementById("esp_forward_ports").value.trim(),
     esp_simulation: document.getElementById("esp_simulation").checked,
     vj3350_host: document.getElementById("vj3350_host").value.trim(),
     vj3350_port: Number(document.getElementById("vj3350_port").value.trim()),
+    vj3350_forward_ports: document.getElementById("vj3350_forward_ports").value.trim(),
     vj3350_simulation: document.getElementById("vj3350_simulation").checked,
     vj6530_host: document.getElementById("vj6530_host").value.trim(),
     vj6530_port: Number(document.getElementById("vj6530_port").value.trim()),
+    vj6530_forward_ports: document.getElementById("vj6530_forward_ports").value.trim(),
     vj6530_simulation: document.getElementById("vj6530_simulation").checked
   };
   await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});

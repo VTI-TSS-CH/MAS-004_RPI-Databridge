@@ -51,6 +51,17 @@
 - Added unreachable-target handling so TEST sync can run safely even while test device is not connected.
 - Added optional environment variable overrides for host/web target metadata.
 
+## 2026-03-04 (NTP + TCP Relay for Device Ports)
+- Added NTP configuration and runtime sync loop:
+  - config keys: `ntp_server`, `ntp_sync_interval_min`
+  - runtime worker: `mas004_rpi_databridge/ntp_sync.py`
+  - Settings UI fields and config API mapping updated.
+- Added TCP relay service from Raspi `eth0` to device hosts on `eth1`:
+  - fixed relay ports: `3007` (VJ6530), `3008` (VJ3350), `3009` (ESP32)
+  - optional extra relay ports per device: `esp_forward_ports`, `vj3350_forward_ports`, `vj6530_forward_ports`
+  - runtime worker: `mas004_rpi_databridge/tcp_forwarder.py`
+  - started from `service.py` at app startup.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

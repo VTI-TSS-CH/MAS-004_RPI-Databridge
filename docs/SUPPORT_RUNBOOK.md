@@ -50,6 +50,8 @@
 - API health: `/health`
 - Outbox not growing unexpectedly
 - Shared-secret and peer URL still valid after config changes
+- NTP configured values visible in `/ui/settings` and service logs contain `[NTP]` entries
+- TCP relay listeners started as configured (service logs contain `[FWD] listen ...` for required ports)
 
 ## 6. Ownership
 - Main project owner context: MAS-004_RPI-Databridge

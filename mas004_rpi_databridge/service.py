@@ -14,6 +14,8 @@ from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.http_client import HttpClient
 from mas004_rpi_databridge.watchdog import Watchdog
 from mas004_rpi_databridge.webui import build_app
+from mas004_rpi_databridge.ntp_sync import ntp_loop
+from mas004_rpi_databridge.tcp_forwarder import TcpForwarderManager
 
 def backoff_s(retry_count: int, base: float, cap: float) -> float:
     n = min(retry_count, 10)
@@ -109,12 +111,22 @@ def main():
     cfg_path = DEFAULT_CFG_PATH
     cfg = Settings.load(cfg_path)
 
+    ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True)
+    ntp_t.start()
+
     sender_t = threading.Thread(target=sender_loop, args=(cfg_path,), daemon=True)
     sender_t.start()
     router_t = threading.Thread(target=router_loop, args=(cfg_path,), daemon=True)
     router_t.start()
 
+    fwd_mgr = TcpForwarderManager(cfg)
+    try:
+        fwd_mgr.start()
+    except Exception as e:
+        print(f"[FWD] manager error: {repr(e)}", flush=True)
+
     app = build_app(cfg_path)
+    app.state.tcp_forwarder_manager = fwd_mgr
 
     ssl_kwargs = {}
     if cfg.webui_https:

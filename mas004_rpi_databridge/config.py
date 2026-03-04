@@ -42,6 +42,10 @@ class Settings:
     http_timeout_s: float = 10.0
     tls_verify: bool = False
 
+    # NTP sync
+    ntp_server: str = ""
+    ntp_sync_interval_min: int = 60
+
     # Retry
     retry_base_s: float = 1.0
     retry_cap_s: float = 60.0
@@ -57,9 +61,12 @@ class Settings:
     vj3350_host: str = ""
     vj3350_port: int = 0
     vj3350_simulation: bool = True
+    vj3350_forward_ports: str = ""
     vj6530_host: str = ""
     vj6530_port: int = 0
     vj6530_simulation: bool = True
+    vj6530_forward_ports: str = ""
+    esp_forward_ports: str = ""
 
     # Daily log-file retention (days)
     logs_keep_days_all: int = 30
