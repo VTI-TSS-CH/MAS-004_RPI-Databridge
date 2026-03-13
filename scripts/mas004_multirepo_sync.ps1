@@ -169,7 +169,7 @@ if ($RestartServices -and $repo.Service) {
             $installScript = @'
 set -e
 cd '__REMOTE_PATH__' || exit 2
-rm -rf build
+rm -rf build .eggs
 if [ -x .venv/bin/python ]; then
   .venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --no-deps wheel
   .venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall .
@@ -177,6 +177,7 @@ else
   python3 -m pip install --user --disable-pip-version-check --no-cache-dir --no-deps wheel
   python3 -m pip install --user --no-deps --no-build-isolation --no-cache-dir --force-reinstall .
 fi
+rm -rf .eggs
 '@
             $installScript = $installScript.Replace("__REMOTE_PATH__", $repo.Remote)
             ssh $resolvedSshHost $installScript | Out-Host
