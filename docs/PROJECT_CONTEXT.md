@@ -58,6 +58,12 @@
 - `MAS-004_VJ6530-ZBC-Bridge`: VJ6530 transport/probe subproject
 - `MAS-004_ZBC-Library`: shared ZBC transport/message library for the 6530 stack
 
+## TTO Mapping Source of Truth
+- The Videojet 6530 TTO mapping now uses the live-readable CLARiTY parameter archive from `MAS-004_ZBC-Library`:
+  - `FRQ[CURRENT_PARAMETERS]` on the 6530 returns the UTF-16 parameter XML
+  - the MAS workbook `..\Parameterliste SAR41-MAS-004_V11.11.25.xlsx` contains a dedicated `ZBC Mapping:` column for `TTP`, `TTE`, `TTW`
+  - the helper `..\MAS-004_ZBC-Library\tools\update_tto_workbook.py` refreshes this column and the added TTO rows from a live printer or saved archive
+
 ## Sync/Support Policy
 - Before and after changes in this repo, run:
   - `scripts/mas004_multirepo_status.ps1 -Target test`

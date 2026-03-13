@@ -5,6 +5,16 @@
 - Extended multi-repo status/sync scripts to include the ZBC library.
 - Added bundle-based Pi synchronization for repos without a central Git remote.
 
+## 2026-03-13 (TTO Workbook Mapping via Live CurrentParameters)
+- Extended `MAS-004_ZBC-Library` with a CLARiTY parameter-archive parser and a `request_current_parameters()` helper.
+- Verified live against the 6530 that `FRQ[CURRENT_PARAMETERS]` returns `CurrentParameters.xml`.
+- Updated `..\Parameterliste SAR41-MAS-004_V11.11.25.xlsx`:
+  - added a `ZBC Mapping:` column
+  - repaired `TTP00055` as `TextCommsAsyncNotificationsEnabled`
+  - added new TTO parameters `TTP00064` .. `TTP00072`
+- Added the reusable workbook updater:
+  - `..\MAS-004_ZBC-Library\tools\update_tto_workbook.py`
+
 ## 2026-03-13 (Configurable Forwarding Ports + ESP Port 3010)
 - TCP forwarding no longer hardcodes device main ports.
   - listeners now follow the configured device ports: `esp_port`, `vj3350_port`, `vj6530_port`
