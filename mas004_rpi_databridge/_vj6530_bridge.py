@@ -23,11 +23,8 @@ def _ensure_repo_on_path():
                 sys.path.insert(0, sibling_repo_str)
 
 
-try:
-    from mas004_vj6530_zbc_bridge import ZbcBridgeClient  # type: ignore[attr-defined]
-except ImportError:
-    _ensure_repo_on_path()
-    from mas004_vj6530_zbc_bridge import ZbcBridgeClient  # type: ignore[attr-defined]
+_ensure_repo_on_path()
+from mas004_vj6530_zbc_bridge import ZbcBridgeClient  # type: ignore[attr-defined]
 
 
 __all__ = ["ZbcBridgeClient"]
