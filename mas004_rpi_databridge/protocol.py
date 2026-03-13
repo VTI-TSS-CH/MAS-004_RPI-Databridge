@@ -13,6 +13,7 @@ class ParamMsg:
     is_ack: bool = False
 
 _RX = re.compile(r"^(?P<ack>ACK_)?(?P<ptype>[A-Z]{3})(?P<pid>\d+)\s*=\s*(?P<val>.*)$")
+_OP_RX = re.compile(r"^\s*([A-Za-z]{3})([0-9A-Za-z_]+)\s*=\s*(\?|-?[0-9A-Za-z_.:/]+)\s*$")
 
 _WIDTH = {
     "TTP": 5,
@@ -50,3 +51,26 @@ def build_value(ptype: str, pid: str, value: str) -> str:
 
 def build_ack(ptype: str, pid: str, value: str) -> str:
     return f"ACK_{ptype}{normalize_pid(ptype, pid)}={value}"
+
+
+def parse_operation_line(line: str):
+    """
+    Returns (ptype, pid, op, value)
+    op: 'read' or 'write'
+    """
+    s = (line or "").strip()
+    if not s:
+        return None
+
+    m = _OP_RX.match(s)
+    if not m:
+        return None
+
+    ptype = m.group(1).upper()
+    pid = m.group(2)
+    if pid.isdigit():
+        pid = normalize_pid(ptype, pid)
+    rhs = m.group(3)
+    if rhs == "?":
+        return (ptype, pid, "read", "?")
+    return (ptype, pid, "write", rhs)

@@ -17,6 +17,11 @@
 - Fixed a forwarding regression in `mas004_rpi_databridge/tcp_forwarder.py`:
   - listener sockets no longer get a read timeout
   - this keeps the accept loop alive and fixes hanging routed ports such as `10.27.67.69:3010`
+- Added active ESP push ingestion on the Raspi:
+  - new listener `mas004_rpi_databridge/esp_push_listener.py`
+  - binds on `eth1_ip:esp_port` when `esp_simulation=false`
+  - accepts device-origin `MA*` lines, persists them locally and forwards them to Microtom via outbox
+- Moved operation-line parsing into `mas004_rpi_databridge/protocol.py` so router and ESP-push path use the same syntax rules.
 
 ## 2026-03-04
 - Added persistent support context files:

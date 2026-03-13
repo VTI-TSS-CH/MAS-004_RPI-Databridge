@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Optional, Tuple
 
 from mas004_rpi_databridge.config import Settings
@@ -8,7 +7,7 @@ from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
-from mas004_rpi_databridge.protocol import normalize_pid
+from mas004_rpi_databridge.protocol import parse_operation_line
 from mas004_rpi_databridge.peers import peer_urls
 
 
@@ -42,30 +41,6 @@ def _extract_msg_line(body_json: Optional[str]) -> Optional[str]:
         return None
     return None
 
-
-def _parse_line(line: str) -> Optional[Tuple[str, str, str, str]]:
-    """
-    Returns (ptype, pid, op, value)
-    op: 'read' or 'write'
-    """
-    s = (line or "").strip()
-    if not s:
-        return None
-
-    m = re.match(r"^\s*([A-Za-z]{3})([0-9A-Za-z_]+)\s*=\s*(\?|-?[0-9A-Za-z_.]+)\s*$", s)
-    if not m:
-        return None
-
-    ptype = m.group(1).upper()
-    pid = m.group(2)
-    if pid.isdigit():
-        pid = normalize_pid(ptype, pid)
-    rhs = m.group(3)
-    if rhs == "?":
-        return (ptype, pid, "read", "?")
-    return (ptype, pid, "write", rhs)
-
-
 class Router:
     def __init__(self, cfg: Settings, inbox: Inbox, outbox: Outbox, params: ParamStore, logs: LogStore):
         self.cfg = cfg
@@ -89,7 +64,7 @@ class Router:
             self.outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
 
     def handle_microtom_line(self, line: str, correlation: Optional[str]) -> Optional[str]:
-        parsed = _parse_line(line)
+        parsed = parse_operation_line(line)
         if not parsed:
             return None
 

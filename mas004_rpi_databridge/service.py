@@ -15,6 +15,7 @@ from mas004_rpi_databridge.http_client import HttpClient
 from mas004_rpi_databridge.watchdog import Watchdog
 from mas004_rpi_databridge.webui import build_app
 from mas004_rpi_databridge.ntp_sync import ntp_loop
+from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
 from mas004_rpi_databridge.tcp_forwarder import TcpForwarderManager
 
 def backoff_s(retry_count: int, base: float, cap: float) -> float:
@@ -117,6 +118,16 @@ def forwarder_loop(cfg_path: str, fwd_mgr: TcpForwarderManager):
         time.sleep(5.0)
 
 
+def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
+    while True:
+        try:
+            cfg = Settings.load(cfg_path)
+            push_mgr.reconcile(cfg)
+        except Exception as e:
+            print(f"[ESP-PUSH] reconcile error: {repr(e)}", flush=True)
+        time.sleep(5.0)
+
+
 def main():
     cfg_path = DEFAULT_CFG_PATH
     cfg = Settings.load(cfg_path)
@@ -137,8 +148,17 @@ def main():
     fwd_t = threading.Thread(target=forwarder_loop, args=(cfg_path, fwd_mgr), daemon=True)
     fwd_t.start()
 
+    push_mgr = EspPushListenerManager(cfg)
+    try:
+        push_mgr.start()
+    except Exception as e:
+        print(f"[ESP-PUSH] manager error: {repr(e)}", flush=True)
+    push_t = threading.Thread(target=esp_push_listener_loop, args=(cfg_path, push_mgr), daemon=True)
+    push_t.start()
+
     app = build_app(cfg_path)
     app.state.tcp_forwarder_manager = fwd_mgr
+    app.state.esp_push_listener_manager = push_mgr
 
     ssl_kwargs = {}
     if cfg.webui_https:

@@ -11,6 +11,7 @@
 - Web/API: `mas004_rpi_databridge/webui.py`
 - Message reliability: `inbox.py`, `outbox.py`, `router.py`, `service.py`, `http_client.py`, `watchdog.py`
 - Background ops: `ntp_sync.py` (periodic time sync), `tcp_forwarder.py` (eth0->eth1 TCP relay)
+- Device-initiated ESP push path: `esp_push_listener.py` (eth1 listener for active ESP->Raspi messages)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
