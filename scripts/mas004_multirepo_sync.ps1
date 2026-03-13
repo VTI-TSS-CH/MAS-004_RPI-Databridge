@@ -164,15 +164,17 @@ fi
         ssh $resolvedSshHost "cd '$($repo.Remote)' && git pull --ff-only" | Out-Host
     }
 
-    if ($RestartServices -and $repo.Service) {
+if ($RestartServices -and $repo.Service) {
         Invoke-Step "[PI/$Target] $($repo.Name): clean build + pip install" {
             $installScript = @'
 set -e
 cd '__REMOTE_PATH__' || exit 2
 rm -rf build
 if [ -x .venv/bin/python ]; then
+  .venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir --no-deps wheel
   .venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall .
 else
+  python3 -m pip install --user --disable-pip-version-check --no-cache-dir --no-deps wheel
   python3 -m pip install --user --no-deps --no-build-isolation --no-cache-dir --force-reinstall .
 fi
 '@
