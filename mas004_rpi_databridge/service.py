@@ -167,6 +167,7 @@ def vj6530_poll_loop(cfg_path: str):
 
 
 def vj6530_async_loop(cfg_path: str):
+    error_backoff_s = 2.0
     while True:
         cfg = Settings.load(cfg_path)
         if (
@@ -175,6 +176,7 @@ def vj6530_async_loop(cfg_path: str):
             or not (cfg.vj6530_host or "").strip()
             or int(cfg.vj6530_port or 0) <= 0
         ):
+            error_backoff_s = 2.0
             time.sleep(1.0)
             continue
 
@@ -184,11 +186,13 @@ def vj6530_async_loop(cfg_path: str):
             logs = LogStore(db)
             outbox = Outbox(db)
             listener = Vj6530AsyncListener(cfg, params, logs, outbox)
-            listener.run_session(session_s=30.0)
+            listener.run_session(session_s=60.0)
+            error_backoff_s = 2.0
         except Exception as e:
             VJ6530_RUNTIME.mark_async_error(repr(e))
             print(f"[VJ6530-ASYNC] error: {repr(e)}", flush=True)
-            time.sleep(2.0)
+            time.sleep(error_backoff_s)
+            error_backoff_s = min(error_backoff_s * 1.8, 30.0)
 
 
 def main():
