@@ -7,9 +7,9 @@ function Get-Mas004TargetMeta {
         [string]$Target
     )
 
-    $testSsh = if ($env:MAS004_TEST_SSH) { $env:MAS004_TEST_SSH } else { "pi@10.27.67.69" }
+    $testSsh = if ($env:MAS004_TEST_SSH) { $env:MAS004_TEST_SSH } else { "pi@10.27.67.68" }
     $liveSsh = if ($env:MAS004_LIVE_SSH) { $env:MAS004_LIVE_SSH } else { "pi@192.168.1.20" }
-    $testWeb = if ($env:MAS004_TEST_WEB) { $env:MAS004_TEST_WEB } else { "https://10.27.67.69:8080" }
+    $testWeb = if ($env:MAS004_TEST_WEB) { $env:MAS004_TEST_WEB } else { "https://10.27.67.68:8080" }
     $liveWeb = if ($env:MAS004_LIVE_WEB) { $env:MAS004_LIVE_WEB } else { "https://192.168.210.20:8080" }
 
     $targets = @{

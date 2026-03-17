@@ -32,8 +32,8 @@
 
 ## Deployment Topology
 - TEST Raspberry:
-  - SSH: `pi@10.27.67.69`
-  - UI/API: `https://10.27.67.69:8080`
+  - SSH: `pi@10.27.67.68`
+  - UI/API: `https://10.27.67.68:8080`
   - Policy: default sync target (always keep aligned with local + git)
 - LIVE Raspberry:
   - SSH: `pi@192.168.1.20`

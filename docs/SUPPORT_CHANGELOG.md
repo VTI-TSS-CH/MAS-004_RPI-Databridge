@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-17 (TEST IP Change to 10.27.67.68)
+- Changed the TEST target from `10.27.67.69` to `10.27.67.68`.
+- Updated deployment target metadata, project context and runbook documentation.
+- TEST Raspi network and HTTPS endpoint are now expected at:
+  - SSH: `pi@10.27.67.68`
+  - UI/API: `https://10.27.67.68:8080`
+
 ## 2026-03-13 (6530 Async Primary + Versioned Master Workbook)
 - Added `mas004_rpi_databridge/vj6530_runtime.py` to track whether the 6530 async channel is currently healthy.
 - Refactored `mas004_rpi_databridge/vj6530_async_listener.py`:
@@ -24,7 +31,7 @@
 - Added `vj6530_poll_interval_s` to config, defaults and Settings UI.
 - Fixed an installed-package startup regression:
   - `_vj6530_bridge.py` now discovers sibling repos robustly even when the main package runs from `site-packages`
-  - this fixes the crash that caused `https://10.27.67.69:8080/api/inbox` to refuse connections
+  - this fixes the crash that caused `https://10.27.67.68:8080/api/inbox` to refuse connections
 
 ## 2026-03-13 (ZBC Library Integration)
 - Added `MAS-004_ZBC-Library` as a new managed subproject.
@@ -77,7 +84,7 @@
   - prevents heartbeat or extra trailing lines from corrupting `MAP`/`MAS` reads
 - Fixed a forwarding regression in `mas004_rpi_databridge/tcp_forwarder.py`:
   - listener sockets no longer get a read timeout
-  - this keeps the accept loop alive and fixes hanging routed ports such as `10.27.67.69:3010`
+  - this keeps the accept loop alive and fixes hanging routed ports such as `10.27.67.68:3010`
 - Added active ESP push ingestion on the Raspi:
   - new listener `mas004_rpi_databridge/esp_push_listener.py`
   - binds on `eth1_ip:esp_port` when `esp_simulation=false`
@@ -129,7 +136,7 @@
 - Updated multi-repo scripts to support `-Target test|live`:
   - `scripts/mas004_multirepo_status.ps1`
   - `scripts/mas004_multirepo_sync.ps1`
-- TEST (`10.27.67.69`) is now default target for status/sync.
+- TEST (`10.27.67.68`) is now default target for status/sync.
 - LIVE (`192.168.1.20`) is blocked by default and requires:
   - `-Target live -AllowLive`
 - Added unreachable-target handling so TEST sync can run safely even while test device is not connected.
@@ -149,8 +156,8 @@
   - `ntp_sync.py` now searches binaries also in `/usr/sbin`/`/sbin`, so `ntpdate` is detected in systemd service context.
 
 ## 2026-03-04 (TEST Raspi Setup Finalization + Deploy Hardening)
-- Finalized TEST Raspi setup on `10.27.67.69`:
-  - `eth0`: `10.27.67.69/24`, gateway `10.27.67.1`, DNS `10.28.193.4 10.27.30.201`
+- Finalized TEST Raspi setup on `10.27.67.68`:
+  - `eth0`: `10.27.67.68/24`, gateway `10.27.67.1`, DNS `10.28.193.4 10.27.30.201`
   - `eth1`: `192.168.2.100/24` without gateway
   - timezone set to `Europe/Zurich`
 - Root-cause fixed for "new code not active after pull/install":

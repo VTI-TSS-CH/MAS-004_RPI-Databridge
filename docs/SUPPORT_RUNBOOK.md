@@ -12,7 +12,7 @@
 6. LIVE deployment only on explicit release command:
    - `powershell -ExecutionPolicy Bypass -File scripts/mas004_multirepo_sync.ps1 -Target live -AllowLive -RestartServices`
 7. Verify runtime on Pi:
-   - `ssh pi@10.27.67.69 "systemctl status mas004-rpi-databridge.service --no-pager"` (TEST)
+   - `ssh pi@10.27.67.68 "systemctl status mas004-rpi-databridge.service --no-pager"` (TEST)
    - `ssh pi@192.168.1.20 "systemctl status mas004-rpi-databridge.service --no-pager"` (LIVE)
    - `curl -k https://<raspi-ip>:8080/health`
 
@@ -27,15 +27,15 @@
 
 ## 3. Pi Commands
 - TEST update:
-  - `ssh pi@10.27.67.69 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
+  - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
 - LIVE update (only if explicitly approved):
   - `ssh pi@192.168.1.20 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
 - Reinstall package safely after pull (prevents stale `build/` artifacts):
-  - `ssh pi@10.27.67.69 "cd /opt/MAS-004_RPI-Databridge && rm -rf build && ./.venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall ."`
+  - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && rm -rf build && ./.venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall ."`
 - Restart:
-  - `ssh pi@10.27.67.69 "sudo systemctl restart mas004-rpi-databridge.service"`
+  - `ssh pi@10.27.67.68 "sudo systemctl restart mas004-rpi-databridge.service"`
 - Logs:
-  - `ssh pi@10.27.67.69 "sudo journalctl -u mas004-rpi-databridge.service -n 120 --no-pager"`
+  - `ssh pi@10.27.67.68 "sudo journalctl -u mas004-rpi-databridge.service -n 120 --no-pager"`
 
 ## 4. Safety Rules
 - Do not run `git reset --hard` or `git checkout --` on Pi repos.
