@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-VJ6530_ASYNC_SESSION_S = 30.0
+VJ6530_ASYNC_SESSION_S = 0.0
 VJ6530_ASYNC_RECONNECT_MIN_S = 0.2
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import socket
 import time
 
@@ -33,6 +34,8 @@ _ASYNC_SUBSCRIPTIONS = [
 ]
 _ASYNC_SUMMARY_SETTLE_S = 3.0
 _ASYNC_SUMMARY_RETRY_S = 0.25
+_ASYNC_KEEPALIVE_S = 8.0
+_ASYNC_RESPONSE_TIMEOUT_S = 1.0
 
 
 class Vj6530AsyncListener:
@@ -47,6 +50,10 @@ class Vj6530AsyncListener:
     def run_session(self, session_s: float = 30.0):
         client = self._open_async_client()
         try:
+            try:
+                client.negotiate_host_version()
+            except Exception as exc:
+                self.logs.log("vj6530", "info", f"async HCV negotiation skipped: {repr(exc)}")
             msg_id, _ = client.subscribe_async(_ASYNC_SUBSCRIPTIONS)
             if int(msg_id) != int(MessageId.NUL):
                 raise RuntimeError(f"6530 async subscribe failed with 0x{int(msg_id):04X}")
@@ -54,13 +61,26 @@ class Vj6530AsyncListener:
             profile_name = getattr(getattr(client, "profile", None), "name", "unknown")
             self.logs.log("vj6530", "info", f"async subscription active profile={profile_name}")
             VJ6530_RUNTIME.mark_async_ok()
+            VJ6530_RUNTIME.mark_session_active(True)
             try:
                 self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
             except Exception as exc:
                 self.logs.log("vj6530", "info", f"async startup summary skipped: {repr(exc)}")
 
-            deadline = time.monotonic() + max(5.0, float(session_s or 30.0))
-            while time.monotonic() < deadline:
+            deadline = None
+            if float(session_s or 0.0) > 0.0:
+                deadline = time.monotonic() + max(5.0, float(session_s or 30.0))
+            last_keepalive_ts = time.monotonic()
+            while deadline is None or time.monotonic() < deadline:
+                handled_request = self._drain_session_requests(client)
+                if handled_request:
+                    last_keepalive_ts = time.monotonic()
+                    continue
+                if (time.monotonic() - last_keepalive_ts) >= _ASYNC_KEEPALIVE_S:
+                    client.request_info([])
+                    VJ6530_RUNTIME.mark_async_ok()
+                    last_keepalive_ts = time.monotonic()
+                    continue
                 try:
                     msg_id, response = client.receive_unsolicited()
                     VJ6530_RUNTIME.mark_async_ok()
@@ -90,15 +110,21 @@ class Vj6530AsyncListener:
                     except Exception as exc:
                         self.logs.log("vj6530", "error", f"async summary refresh failed: {repr(exc)}")
         finally:
+            VJ6530_RUNTIME.mark_session_active(False)
             client.close()
 
     def _open_async_client(self) -> ZbcClient:
-        timeout_s = max(2.0, float(self.cfg.http_timeout_s or 5.0))
+        timeout_s = max(1.0, float(self.cfg.http_timeout_s or 5.0))
+        async_profile = replace(
+            VJ6530_TCP_NO_CRC_PROFILE,
+            ack_timeout_s=min(VJ6530_TCP_NO_CRC_PROFILE.ack_timeout_s, 1.0),
+            response_timeout_s=_ASYNC_RESPONSE_TIMEOUT_S,
+        )
         preferred = ZbcClient(
             self.cfg.vj6530_host,
             self.cfg.vj6530_port,
             timeout_s=timeout_s,
-            profile=VJ6530_TCP_NO_CRC_PROFILE,
+            profile=async_profile,
             cache_ttl_s=0.0,
         )
         try:
@@ -112,10 +138,31 @@ class Vj6530AsyncListener:
             self.cfg.vj6530_host,
             self.cfg.vj6530_port,
             timeout_s=timeout_s,
+            profile=async_profile,
             cache_ttl_s=0.0,
         )
         fallback.connect()
         return fallback
+
+    def _drain_session_requests(self, client: ZbcClient) -> bool:
+        handled = False
+        while True:
+            request = VJ6530_RUNTIME.next_session_request(timeout_s=0.0)
+            if request is None:
+                return handled
+            handled = True
+            try:
+                fn = getattr(client, request.operation)
+                result = fn(*request.args, **request.kwargs)
+                VJ6530_RUNTIME.mark_async_ok()
+                if request.operation.startswith("write_"):
+                    try:
+                        self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
+                    except Exception as exc:
+                        self.logs.log("vj6530", "info", f"async post-write summary skipped: {repr(exc)}")
+                request.set_result(result)
+            except Exception as exc:
+                request.set_error(exc)
 
     def _sync_summary_until_stable(self, client: ZbcClient, settle_s: float) -> int:
         deadline = time.monotonic() + max(0.0, float(settle_s or 0.0))

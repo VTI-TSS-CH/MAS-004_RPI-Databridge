@@ -9,6 +9,7 @@ from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
+from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 
 class Vj6530Poller:
@@ -49,8 +50,15 @@ class Vj6530Poller:
         if not mapping_by_key:
             return {"checked": 0, "changed": 0, "forwarded": 0}
 
-        client = self.client_factory(self.cfg.vj6530_host, self.cfg.vj6530_port, timeout_s=self.cfg.http_timeout_s)
-        resolved = client.read_mapped_values(mapping_by_key)
+        if bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active():
+            resolved = VJ6530_RUNTIME.submit_session_request(
+                "read_mapped_values",
+                mapping_by_key,
+                timeout_s=max(3.0, float(self.cfg.http_timeout_s or 5.0) + 2.0),
+            )
+        else:
+            client = self.client_factory(self.cfg.vj6530_host, self.cfg.vj6530_port, timeout_s=self.cfg.http_timeout_s)
+            resolved = client.read_mapped_values(mapping_by_key)
         device_bridge = None
 
         targets = peer_urls(self.cfg, "/api/inbox")

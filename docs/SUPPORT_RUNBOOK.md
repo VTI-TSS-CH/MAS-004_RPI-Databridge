@@ -54,6 +54,7 @@
 - Shared-secret and peer URL still valid after config changes
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - Expect the 6530 async path to be primary for online/offline/warning/fault changes; the poller is fallback/reconciliation only.
+- Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
 - ESP write smoke test for `TTS0001`:
   - from `6`: `TTS0001=0` -> printer starts up into `0 OFFLINE`
   - from `0`: `TTS0001=3` -> printer goes online
@@ -68,6 +69,7 @@
 - After reboot, verify that `[FWD]` listeners appear even if `eth0` carrier comes up late and that `[NTP]` retries continue until sync succeeds
 - Do not expect arbitrary printer-side `TTP` edits from the CLARiTY UI to arrive via async push; ZBC still requires polling/readback for generic `CURRENT_PARAMETERS` deltas
 - If live 6530 status delivery looks lossy, first confirm that `mas004-vj6530-zbc-bridge.service` is not running in parallel on the same Raspberry. The Databridge owns the live `3002` session path; the standalone bridge daemon is for diagnostics and should stay disabled unless deliberately needed.
+- For exclusive printer diagnostics, stop `mas004-rpi-databridge.service` first; the TEST 6530 timed out second parallel control sessions while the live async owner session was already active.
 - `scripts/mas004_multirepo_sync.ps1 -RestartServices` now respects systemd `disabled`/`masked` state and will not revive intentionally parked services on TEST/LIVE.
 
 ## 6. Ownership

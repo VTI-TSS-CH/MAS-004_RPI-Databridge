@@ -38,9 +38,17 @@ class FakeLogs:
 class FakeAsyncClient:
     def __init__(self):
         self.profile = SimpleNamespace(name="vj6530-tcp-no-crc")
+        self.keepalive_calls = 0
 
     def subscribe_async(self, _subscriptions):
         return async_module.MessageId.NUL, object()
+
+    def negotiate_host_version(self):
+        return async_module.MessageId.NUL, object()
+
+    def request_info(self, _tags):
+        self.keepalive_calls += 1
+        return SimpleNamespace(tags=[])
 
     def receive_unsolicited(self):
         raise socket.timeout()
@@ -168,7 +176,7 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
             original_runtime = async_module.VJ6530_RUNTIME
             original_monotonic = async_module.time.monotonic
             runtime = Vj6530RuntimeState()
-            values = iter([0.1, 1.0, 1.0, 1.1, 7.0, 8.0])
+            values = iter([0.1, 1.0, 1.0, 1.1, 2.5, 7.0, 7.2, 7.4, 8.0, 8.2, 8.4])
 
             async_module.VJ6530_RUNTIME = runtime
             async_module.time.monotonic = lambda: next(values)
@@ -181,6 +189,7 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
                 async_module.time.monotonic = original_monotonic
 
             self.assertGreater(runtime.snapshot()["last_async_ok_ts"], 0.0)
+            self.assertFalse(runtime.snapshot()["session_active"])
 
 
 if __name__ == "__main__":

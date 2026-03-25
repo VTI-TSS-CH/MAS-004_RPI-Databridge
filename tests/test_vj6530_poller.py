@@ -8,6 +8,7 @@ import types
 
 sys.modules.setdefault("ping3", types.SimpleNamespace(ping=lambda *args, **kwargs: None))
 
+from mas004_rpi_databridge import vj6530_poller as poller_module
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.outbox import Outbox
@@ -36,6 +37,19 @@ class FakeBridgeClientWithTts(FakeBridgeClient):
         return {
             "TTS0001": "3",
         }
+
+
+class RuntimeSessionStub:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def session_active(self) -> bool:
+        return True
+
+    def submit_session_request(self, operation: str, *args, **kwargs):
+        self.calls.append((operation, args, kwargs))
+        return self.result
 
 
 class Vj6530PollerTests(unittest.TestCase):
@@ -187,6 +201,83 @@ class Vj6530PollerTests(unittest.TestCase):
             items = logs.list_logs("raspi", limit=20)
             messages = [entry["message"] for entry in items]
             self.assertTrue(any("skip microtom forward for TTS0001" in msg for msg in messages))
+
+    def test_poll_once_uses_runtime_session_when_async_owner_is_active(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO params(
+                        pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                        message,possible_cause,effects,remedy,updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        "TTS",
+                        "0001",
+                        0,
+                        6,
+                        "0",
+                        "enum",
+                        "R",
+                        "W",
+                        "unsigned int.",
+                        "PrinterStateCode",
+                        "NO",
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        None,
+                        "STATUS[PRINTER_STATE_CODE]",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                vj6530_async_enabled=True,
+                http_timeout_s=5.0,
+                peer_base_url="https://10.27.67.135:9090",
+                peer_base_url_secondary="",
+                esp_host="",
+                esp_port=0,
+            )
+
+            runtime = RuntimeSessionStub({"TTS0001": "3"})
+            original_runtime = poller_module.VJ6530_RUNTIME
+            poller_module.VJ6530_RUNTIME = runtime
+            try:
+                poller = Vj6530Poller(cfg, params, logs, outbox, client_factory=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("direct client should not be used")))
+                result = poller.poll_once()
+            finally:
+                poller_module.VJ6530_RUNTIME = original_runtime
+
+            self.assertEqual({"checked": 1, "changed": 1, "forwarded": 1}, result)
+            self.assertEqual("read_mapped_values", runtime.calls[0][0])
 
 
 if __name__ == "__main__":

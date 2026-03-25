@@ -7,6 +7,7 @@ import types
 
 sys.modules.setdefault("ping3", types.SimpleNamespace(ping=lambda *args, **kwargs: None))
 
+from mas004_rpi_databridge import device_bridge as device_bridge_module
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.logstore import LogStore
@@ -70,6 +71,19 @@ class RejectingStatusZbcBridgeClient(FakeZbcBridgeClient):
     def write_mapped_value(self, mapping: str, value, verify_readback: bool = True):
         self.write_calls.append((mapping, str(value), verify_readback))
         raise ValueError("printer state code 4 is derived and cannot be set directly")
+
+
+class RuntimeSessionStub:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def session_active(self) -> bool:
+        return True
+
+    def submit_session_request(self, operation: str, *args, **kwargs):
+        self.calls.append((operation, args, kwargs))
+        return self.result
 
 
 class DeviceBridgeTtoMappingTests(unittest.TestCase):
@@ -388,6 +402,92 @@ class DeviceBridgeTtoMappingTests(unittest.TestCase):
             write_resp = bridge.execute("vj6530", "TTS0001", "TTS", "write", "4", actor="esp32")
 
             self.assertEqual("TTS0001=NAK_DeviceRejected", write_resp)
+
+    def test_runtime_session_handles_live_status_write_without_second_bridge_client(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO params(
+                        pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                        message,possible_cause,effects,remedy,updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        "TTS",
+                        "0001",
+                        0,
+                        6,
+                        "0",
+                        "enum",
+                        "R",
+                        "W",
+                        "unsigned int.",
+                        "PrinterStateCode",
+                        "NO",
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        None,
+                        "STATUS[PRINTER_STATE_CODE]",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            cfg = SimpleNamespace(
+                esp_host="",
+                esp_port=0,
+                http_timeout_s=2.0,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj6530_host="10.0.0.5",
+                vj6530_port=3002,
+                vj6530_async_enabled=True,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            bridge = DeviceBridge(cfg, params, logs)
+            fake = FakeZbcBridgeClient()
+            bridge._zbc_bridge = fake
+            runtime = RuntimeSessionStub((0, "3"))
+            original_runtime = device_bridge_module.VJ6530_RUNTIME
+            device_bridge_module.VJ6530_RUNTIME = runtime
+            try:
+                write_resp = bridge.execute("vj6530", "TTS0001", "TTS", "write", "3", actor="esp32")
+            finally:
+                device_bridge_module.VJ6530_RUNTIME = original_runtime
+
+            self.assertEqual("ACK_TTS0001=3", write_resp)
+            self.assertEqual([], fake.write_calls)
+            self.assertEqual("3", params.get_effective_value("TTS0001"))
+            self.assertEqual("write_mapped_value", runtime.calls[0][0])
 
     def test_current_parameter_read_falls_back_to_cached_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:

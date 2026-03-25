@@ -24,9 +24,16 @@
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path
 - VJ6530 live reads/writes now retry once inside `device_bridge.py` before falling back to cached values or surfacing `NAK_DeviceComm`.
 - The 6530 async listener now prefers the live-verified no-CRC transport profile directly and only falls back to autodetect if that explicit profile fails.
+- The 6530 async path now owns the printer as the single live `3002` session:
+  - it negotiates `HCV` when the session comes up
+  - it keeps `AIS` alive with periodic empty `IRQ([])` keepalives
+  - synchronous 6530 mapping reads/writes are handed into that owner session instead of opening a second parallel control connection whenever async ownership is active
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
 - Outbox dedupe now only collapses consecutive identical values; non-consecutive state changes remain lossless.
-- The 6530 async loop now rotates sessions every 30s and reconnects quickly when the printer closes an idle subscription, then rehydrates workbook state from summary on the next session.
+- Live TEST proof on `192.168.2.103:3002`:
+  - idle `AIS` without synchronous traffic closes after about 15s
+  - `IRQ([])` keepalives keep the async session open
+  - a second parallel control session times out while that owner session is active
 - On TEST, `mas004-vj6530-zbc-bridge.service` is intentionally parked so the Databridge remains the sole operational owner of live 6530 traffic on `3002`.
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
@@ -108,6 +115,7 @@
   - the workbook now contains a dedicated `ESP32 R/W:` column in addition to Microtom `R/W:`
   - `TTE` / `TTW` and printer status are primarily updated from the 6530 async channel; polling remains a fallback for workbook status/error mappings
   - the async listener now re-reads summary state for a short settle window after online/offline/warning/fault events, so delayed `SHUTDOWN` / `ONLINE` follow-up bits are less likely to fall through to the fallback poller
+  - when the async owner session is up, reconciliation reads also use that same session instead of creating a second live bridge connection
   - `TTS0001` is the dedicated numeric TTO status channel via `STATUS[PRINTER_STATE_CODE]`:
     - `0=OFFLINE`, `1=OFFLINE_WARNING`, `2=OFFLINE_FAULT`, `3=ONLINE`, `4=ONLINE_WARNING`, `5=ONLINE_FAULT`, `6=SHUTDOWN`
     - ESP writes `0`, `3`, `6` map to printer control transitions, not just one fixed command:

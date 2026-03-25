@@ -10,6 +10,7 @@ from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
 from mas004_rpi_databridge.device_clients import DeviceWatchdog, EspPlcClient, UltimateClient, ZipherClient
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 READONLY_TYPES = {"TTE", "TTW", "LSE", "LSW", "MAE", "MAW"}  # push-only from device perspective
 ZBC_ERR_MESSAGE_ID = 0x500D
@@ -158,7 +159,14 @@ class DeviceBridge:
                 if zbc_upper.startswith("STATUS[") or zbc_upper.startswith("STS[") or zbc_upper.startswith("IRQ{"):
                     return f"{pkey}={self.params.get_effective_value(pkey)}"
                 try:
-                    resolved = self._call_zbc_bridge(lambda: self._zbc_bridge.read_mapped_value(zbc_mapping), pkey, "read")
+                    if self._use_vj6530_runtime_session():
+                        resolved = VJ6530_RUNTIME.submit_session_request(
+                            "read_mapped_value",
+                            zbc_mapping,
+                            timeout_s=max(3.0, float(self.cfg.http_timeout_s or 5.0) + 2.0),
+                        )
+                    else:
+                        resolved = self._call_zbc_bridge(lambda: self._zbc_bridge.read_mapped_value(zbc_mapping), pkey, "read")
                 except Exception as exc:
                     cached_value = self.params.get_effective_value(pkey)
                     self.logs.log("vj6530", "info", f"live read fallback for {pkey}: {repr(exc)}")
@@ -171,11 +179,20 @@ class DeviceBridge:
                 return f"{pkey}={resolved}"
 
             try:
-                message_id, verified = self._call_zbc_bridge(
-                    lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
-                    pkey,
-                    "write",
-                )
+                if self._use_vj6530_runtime_session():
+                    message_id, verified = VJ6530_RUNTIME.submit_session_request(
+                        "write_mapped_value",
+                        zbc_mapping,
+                        value,
+                        verify_readback=True,
+                        timeout_s=max(5.0, float(self.cfg.http_timeout_s or 5.0) + 15.0),
+                    )
+                else:
+                    message_id, verified = self._call_zbc_bridge(
+                        lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
+                        pkey,
+                        "write",
+                    )
             except ValueError as exc:
                 self.logs.log("vj6530", "info", f"live write rejected for {pkey}: {repr(exc)}")
                 return f"{pkey}=NAK_DeviceRejected"
@@ -253,6 +270,9 @@ class DeviceBridge:
         if not ok:
             return f"{pkey}={msg}"
         return f"{pkey}={parsed}"
+
+    def _use_vj6530_runtime_session(self) -> bool:
+        return bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active()
 
     def mirror_to_esp(self, pkey: str, value: str) -> tuple[bool, str]:
         if self._is_simulation("esp-plc"):

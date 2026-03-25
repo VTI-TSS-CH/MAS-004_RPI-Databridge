@@ -1,5 +1,21 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (6530 Single-Owner Session + AIS Keepalive)
+- Live TEST verification against `192.168.2.103:3002` showed:
+  - `AIS` without synchronous traffic is closed by the printer after roughly 15s
+  - `AIS` stays stable when the host sends `IRQ([])` keepalives about every 8-10s
+  - a second synchronous control session times out while the async subscription is already holding the live `3002` owner slot
+- The Databridge now treats the 6530 path as a single-owner session:
+  - the async listener negotiates host version (`HCV`) on session start
+  - the async listener keeps the subscription alive with `IRQ([])` instead of relying on idle receives
+  - synchronous 6530 mapping reads/writes are now routed through the already-open async owner session when that session is active
+- Result: status pushes can stay immediate while Microtom/ESP writes no longer have to fight a second parallel ZBC connection on `3002`.
+- The forced 30s async session rotation was removed; reconnects now happen on real socket/protocol errors instead of a deliberate timer.
+- Added regression coverage for:
+  - runtime request hand-off into the 6530 owner session
+  - DeviceBridge writes using the runtime session instead of opening a second bridge client
+  - Poller reads using the runtime session when async ownership is active
+
 ## 2026-03-25 (6530 Lossless State Forwarding + Async Stabilization)
 - The 6530 async listener now prefers the already verified `vj6530-tcp-no-crc` transport profile instead of re-probing every async session startup; autodetect remains fallback only.
 - The async loop now treats idle `socket.timeout` on the unsolicited receive path as a healthy wait state instead of tearing the subscription down as an error.
