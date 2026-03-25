@@ -55,15 +55,23 @@
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - Expect the 6530 async path to be primary for online/offline/warning/fault changes; the poller is fallback/reconciliation only.
 - Expect critical 6530 status flips (online/offline/warning/fault) to arrive via high-priority AIS and update `STATUS[...]` / `STS[...]` workbook rows immediately from the async snapshot, before the slower summary settle finishes.
+- Live TEST proof for the raw printer path:
+  - `CMD_START` -> `AIR` online in about `46 ms`
+  - `CMD_STOP` -> `AIR` offline in about `6 ms`
+  - `CMD_SHUTDOWN` / `CMD_STARTUP` have no dedicated async state tag on TEST, so `6 <-> 0` confirmation must come from fresh summary state
 - Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
 - If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
 - If `TTS0001=3` ever returns `ACK_TTS0001=0`, treat that as a regression: the ACK must follow the async-observed settled workbook state, not a stale synchronous verify snapshot.
 - If a 6530 state change reaches Microtom late, inspect whether the delay came from ESP mirror attempts rather than the ZBC async path; Microtom delivery should now be queued before ESP mirroring starts.
+- If `TTS0001=3` fails only from `6 SHUTDOWN`, treat that as a regression in live-summary confirmation for the `STARTUP -> START` sequence.
 - ESP write smoke test for `TTS0001`:
   - from `6`: `TTS0001=0` -> printer starts up into `0 OFFLINE`
   - from `0`: `TTS0001=3` -> printer goes online
   - from `6`: `TTS0001=3` -> printer runs `STARTUP` then `START`
   - `TTS0001=6` -> printer shuts down
+- Current TEST-only gap:
+  - the real ESP currently still answers `NAK_UnknownParam` for `TTS0001`, `TTP00073`, `TTP00076`
+  - do not misread that as a 6530 async timing problem; it is an ESP parameter-support / mapping gap
 - Expect direct rejection for `TTS0001=1`, `2`, `4`, `5`; these are observed composite warning/fault states, not direct control targets
 - `TTE` / `TTW` / `TTS` printer-originated updates only forward to Microtom / ESP when the workbook `R/W:` / `ESP32 R/W:` flags allow it
 - After a successful 6530 write, verify that related status rows (`TTP00073`, `TTP00076`, `TTS0001`, relevant `TTE*` / `TTW*`) follow immediately without waiting for the next periodic poll cycle.

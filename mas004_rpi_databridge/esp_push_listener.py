@@ -222,17 +222,16 @@ class EspPushListener:
             logs.log("raspi", "out", f"forward to microtom: {forwarded_line}")
 
         if dev == "vj6530" and op == "write":
-            if not (bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active()):
-                try:
-                    result = Vj6530Poller(self.cfg, params, logs, outbox).poll_once()
-                    if int(result.get("changed", 0) or 0) > 0:
-                        logs.log(
-                            "raspi",
-                            "info",
-                            f"vj6530 post-write sync for {pkey}: changed={result.get('changed', 0)} forwarded={result.get('forwarded', 0)}",
-                        )
-                except Exception as exc:
-                    logs.log("raspi", "error", f"vj6530 post-write sync failed for {pkey}: {repr(exc)}")
+            try:
+                result = Vj6530Poller(self.cfg, params, logs, outbox).poll_once(force=True)
+                if int(result.get("changed", 0) or 0) > 0:
+                    logs.log(
+                        "raspi",
+                        "info",
+                        f"vj6530 post-write sync for {pkey}: changed={result.get('changed', 0)} forwarded={result.get('forwarded', 0)}",
+                    )
+            except Exception as exc:
+                logs.log("raspi", "error", f"vj6530 post-write sync failed for {pkey}: {repr(exc)}")
 
         resp = f"ACK_{pkey}={value}"
         logs.log("esp-plc", "out", f"raspi->esp: {resp}")

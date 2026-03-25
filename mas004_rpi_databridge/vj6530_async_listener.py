@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+import queue
 import socket
+import threading
 import time
 
 from mas004_rpi_databridge._vj6530_bridge import (
@@ -37,7 +39,7 @@ _ASYNC_SUBSCRIPTIONS = [
 ]
 _ASYNC_SUMMARY_SETTLE_S = 3.0
 _ASYNC_SUMMARY_RETRY_S = 0.25
-_ASYNC_KEEPALIVE_S = 5.0
+_ASYNC_KEEPALIVE_S = 2.0
 _ASYNC_RESPONSE_TIMEOUT_S = 1.0
 _ASYNC_SUMMARY_RESPONSE_TIMEOUT_S = 6.0
 _ASYNC_SESSION_READ_RESPONSE_TIMEOUT_S = 6.0
@@ -52,9 +54,14 @@ class Vj6530AsyncListener:
         self.outbox = outbox
         self.device_bridge = DeviceBridge(cfg, params, logs)
         self._status_snapshot: dict[str, bool | str] = {}
+        self._background_esp_mirror = False
+        self._esp_mirror_queue: queue.Queue[list[tuple[str, str]] | None] = queue.Queue()
+        self._esp_mirror_stop = threading.Event()
+        self._esp_mirror_worker: threading.Thread | None = None
 
     def run_session(self, session_s: float = 30.0):
         client = self._open_async_client()
+        self._background_esp_mirror = bool(not getattr(self.cfg, "esp_simulation", False))
         try:
             try:
                 client.negotiate_host_version()
@@ -99,24 +106,9 @@ class Vj6530AsyncListener:
                 except OSError:
                     raise
 
-                if int(msg_id) != int(MessageId.AIR):
-                    continue
-
-                tag_ids = [int(getattr(tag, "tag_id", 0) or 0) for tag in getattr(response, "tags", [])]
-                if not tag_ids:
-                    continue
-
-                self.logs.log("vj6530", "in", f"async tags={','.join(f'0x{tag_id:04X}' for tag_id in tag_ids)}")
-                self._status_snapshot.update(_status_updates_from_async(tag_ids))
-                VJ6530_RUNTIME.mark_async_event()
-                self._sync_from_snapshot()
-
-                if _needs_summary_sync(tag_ids):
-                    try:
-                        self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
-                    except Exception as exc:
-                        self.logs.log("vj6530", "error", f"async summary refresh failed: {repr(exc)}")
+                self._handle_async_message(client, msg_id, response)
         finally:
+            self._stop_esp_mirror_worker()
             VJ6530_RUNTIME.mark_session_active(False)
             client.close()
 
@@ -168,15 +160,54 @@ class Vj6530AsyncListener:
                     result = fn(*request.args, **kwargs)
                 VJ6530_RUNTIME.mark_async_ok()
                 if request.operation.startswith("write_"):
+                    handled_async = self._drain_pending_async_messages(client)
                     request.set_result(result)
-                    try:
-                        self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
-                    except Exception as exc:
-                        self.logs.log("vj6530", "info", f"async post-write summary skipped: {repr(exc)}")
+                    if handled_async <= 0:
+                        try:
+                            self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
+                        except Exception as exc:
+                            self.logs.log("vj6530", "info", f"async post-write summary skipped: {repr(exc)}")
                     continue
                 request.set_result(result)
             except Exception as exc:
                 request.set_error(exc)
+
+    def _drain_pending_async_messages(self, client: ZbcClient, max_messages: int = 16) -> int:
+        handled = 0
+        while handled < max_messages:
+            try:
+                with _temporary_client_timeouts(client, response_timeout_s=0.05):
+                    msg_id, response = client.receive_unsolicited()
+                VJ6530_RUNTIME.mark_async_ok()
+            except socket.timeout:
+                break
+            except TimeoutError:
+                break
+            except OSError:
+                raise
+            self._handle_async_message(client, msg_id, response)
+            handled += 1
+        return handled
+
+    def _handle_async_message(self, client: ZbcClient, msg_id: int, response) -> int:
+        if int(msg_id) != int(MessageId.AIR):
+            return 0
+
+        tag_ids = [int(getattr(tag, "tag_id", 0) or 0) for tag in getattr(response, "tags", [])]
+        if not tag_ids:
+            return 0
+
+        self.logs.log("vj6530", "in", f"async tags={','.join(f'0x{tag_id:04X}' for tag_id in tag_ids)}")
+        self._status_snapshot.update(_status_updates_from_async(tag_ids))
+        VJ6530_RUNTIME.mark_async_event()
+        self._sync_from_snapshot()
+
+        if _needs_summary_sync(tag_ids):
+            try:
+                self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
+            except Exception as exc:
+                self.logs.log("vj6530", "error", f"async summary refresh failed: {repr(exc)}")
+        return len(tag_ids)
 
     def _sync_summary_until_stable(self, client: ZbcClient, settle_s: float) -> int:
         deadline = time.monotonic() + max(0.0, float(settle_s or 0.0))
@@ -275,14 +306,66 @@ class Vj6530AsyncListener:
             if targets and self.params.can_actor_read(pkey, actor="microtom"):
                 self.logs.log("raspi", "out", f"forward to microtom: {line}")
 
+        esp_lines = [(pkey, new_text) for pkey, new_text in changed_lines if self.params.can_actor_read(pkey, actor="esp32")]
+        if not esp_lines:
+            return
+        if not self._background_esp_mirror:
+            self._mirror_changed_lines_to_esp(esp_lines)
+            return
+        self._ensure_esp_mirror_worker()
+        self._esp_mirror_queue.put(list(esp_lines))
+
+    def _mirror_changed_lines_to_esp(self, changed_lines: list[tuple[str, str]], retry_until_success: bool = False):
         for pkey, new_text in changed_lines:
             line = f"{pkey}={new_text}"
-            if self.params.can_actor_read(pkey, actor="esp32"):
+            if not self.params.can_actor_read(pkey, actor="esp32"):
+                continue
+            attempt = 0
+            while True:
                 ok, detail = self.device_bridge.mirror_to_esp(pkey, new_text)
                 if ok:
                     self.logs.log("raspi", "out", f"forward to esp-plc: {line}")
-                else:
-                    self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
+                    break
+                self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
+                if not retry_until_success or _esp_mirror_is_permanent_failure(detail):
+                    break
+                attempt += 1
+                delay_s = min(5.0, 0.5 * attempt)
+                if self._esp_mirror_stop.wait(delay_s):
+                    return
+
+    def _ensure_esp_mirror_worker(self):
+        if self._esp_mirror_worker is not None and self._esp_mirror_worker.is_alive():
+            return
+        self._esp_mirror_stop.clear()
+        self._esp_mirror_worker = threading.Thread(
+            target=self._esp_mirror_worker_loop,
+            name="mas004-vj6530-esp-mirror",
+            daemon=True,
+        )
+        self._esp_mirror_worker.start()
+
+    def _esp_mirror_worker_loop(self):
+        while not self._esp_mirror_stop.is_set():
+            try:
+                changed_lines = self._esp_mirror_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if changed_lines is None:
+                self._esp_mirror_queue.task_done()
+                continue
+            try:
+                self._mirror_changed_lines_to_esp(changed_lines, retry_until_success=True)
+            finally:
+                self._esp_mirror_queue.task_done()
+
+    def _stop_esp_mirror_worker(self):
+        self._esp_mirror_stop.set()
+        worker = self._esp_mirror_worker
+        if worker is not None and worker.is_alive():
+            self._esp_mirror_queue.put(None)
+            worker.join(timeout=max(1.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0) + 1.0))
+        self._esp_mirror_worker = None
 
 
 def _needs_summary_sync(tag_ids: list[int]) -> bool:
@@ -303,6 +386,15 @@ def _needs_summary_sync(tag_ids: list[int]) -> bool:
         }
         for tag_id in tag_ids
     )
+
+
+def _esp_mirror_is_permanent_failure(detail: str) -> bool:
+    text = str(detail or "").strip().lower()
+    if not text:
+        return False
+    if text in {"esp-simulation", "esp-endpoint-missing", "esp-no-access"}:
+        return True
+    return "nak" in text
 
 
 def _status_updates_from_async(tag_ids: list[int]) -> dict[str, bool]:

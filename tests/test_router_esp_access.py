@@ -14,6 +14,7 @@ from mas004_rpi_databridge.params import ParamStore
 
 sys.modules.setdefault("ping3", SimpleNamespace(ping=lambda *_args, **_kwargs: 1.0))
 
+from mas004_rpi_databridge import router as router_module
 from mas004_rpi_databridge.router import Router
 
 
@@ -107,6 +108,56 @@ class RouterEspAccessTests(unittest.TestCase):
 
             self.assertEqual("ACK_MAS0026=21", resp)
             self.assertEqual([("MAS0026", "write", "21", "microtom")], calls)
+
+    def test_vj6530_write_triggers_forced_follow_up_sync(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "TTS0001", "TTS", "0001", "0", "R", "W", "enum")
+            with router.params.db._conn() as c:
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        None,
+                        "STATUS[PRINTER_STATE_CODE]",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            calls = []
+
+            class _ForcedPoller:
+                def __init__(self, *args, **kwargs):
+                    calls.append(("init", args, kwargs))
+
+                def poll_once(self, force: bool = False):
+                    calls.append(("poll_once", force))
+                    return {"checked": 1, "changed": 1, "forwarded": 1}
+
+            original_poller = router_module.Vj6530Poller
+            original_execute = router.device_bridge.execute
+            router_module.Vj6530Poller = _ForcedPoller
+            router.device_bridge.execute = lambda *args, **kwargs: "ACK_TTS0001=3"
+            try:
+                resp = router.handle_microtom_line("TTS0001=3", correlation="corr-3")
+            finally:
+                router_module.Vj6530Poller = original_poller
+                router.device_bridge.execute = original_execute
+
+            self.assertEqual("ACK_TTS0001=3", resp)
+            self.assertIn(("poll_once", True), calls)
 
 
 if __name__ == "__main__":

@@ -131,10 +131,8 @@ class Router:
     def _refresh_vj6530_state_after_success(self, device: str, op: str, pkey: str):
         if device != "vj6530" or op != "write":
             return
-        if bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active():
-            return
         try:
-            result = Vj6530Poller(self.cfg, self.params, self.logs, self.outbox).poll_once()
+            result = Vj6530Poller(self.cfg, self.params, self.logs, self.outbox).poll_once(force=True)
             if int(result.get("changed", 0) or 0) > 0:
                 self.logs.log(
                     "raspi",

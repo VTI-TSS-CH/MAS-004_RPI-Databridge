@@ -1,5 +1,24 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (6530 Async Proof + Background ESP Mirror)
+- Live raw ZBC verification on TEST now confirms that `AIS/AIR` is really active and immediate on the 6530:
+  - `CMD_START` produced `AIR` tag `0x0002` in about `46 ms`
+  - `CMD_STOP` produced `AIR` tag `0x0008` in about `6 ms`
+- The Databridge async owner now mirrors 6530-originated values to the ESP on a dedicated background worker instead of on the async listener thread itself.
+- Result:
+  - Microtom fanout no longer waits behind slow ESP writes
+  - transient ESP communication failures retry in the worker
+  - permanent ESP rejections such as `NAK_UnknownParam` remain visible in the logs instead of silently disappearing
+- Current TEST finding kept explicit:
+  - `TTP00073`, `TTP00076`, `TTS0001` are currently still rejected by the real ESP with `NAK_UnknownParam`, so the Microtom path is healthy but ESP-side parameter support is not yet aligned for those TTO state pushes.
+
+## 2026-03-25 (6530 `6 -> 3` Confirmation Uses Live Summary)
+- Fixed the remaining `TTS0001=3` failure from `SHUTDOWN (6)`: the Raspi no longer trusts a stale shutdown snapshot while confirming the `STARTUP` step.
+- The upper 6530 write path now benefits from the shared-library fix that reads fresh summary state for `STARTUP` / `SHUTDOWN`, because those transitions do not emit their own dedicated `AIR` state tag on the TEST printer.
+- Result on TEST:
+  - `TTS0001=6` settles to `SHUTDOWN` in about `4.1 s`
+  - `TTS0001=3` from `6` now reaches `ONLINE` in about `3.2 s` instead of ending in `NAK_DeviceComm`
+
 ## 2026-03-25 (6530 ACK Follows Async-Observed State)
 - Runtime-session `STATUS[PRINTER_STATE_CODE]` writes no longer trust a stale synchronous verify value if the async owner session has already observed a newer real printer state.
 - The Databridge now waits on the workbook-backed async state update for `TTS0001` and acknowledges the settled observed printer state (`0/1/2`, `3/4/5`, `6`) instead of echoing an outdated `0`.

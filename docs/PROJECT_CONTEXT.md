@@ -26,7 +26,7 @@
 - The 6530 async listener now prefers the live-verified no-CRC transport profile directly and only falls back to autodetect if that explicit profile fails.
 - The 6530 async path now owns the printer as the single live `3002` session:
   - it negotiates `HCV` when the session comes up
-  - it keeps `AIS` alive with periodic empty `IRQ([])` keepalives on a tighter ~5s cadence
+  - it keeps `AIS` alive with periodic empty `IRQ([])` keepalives on a tight ~2s cadence
   - synchronous 6530 mapping reads/writes are handed into that owner session instead of opening a second parallel control connection whenever async ownership is active
 - Critical AIS subscriptions (`ONLINE`, `OFFLINE`, `WARNING`, `FAULT`, `PRINT_FAILED`) are now requested with the high-priority flag so operator status changes and faults reach the Raspi path without the low-priority batching delay.
 - Incoming AIR tags now update `STATUS[...]` / `STS[...]` workbook rows immediately from the async snapshot before the slower summary settle/reread completes.
@@ -36,6 +36,10 @@
 - The Databridge owner-session timeout for queued 6530 writes is intentionally larger than the shared-library state-settle window, so slow `6 -> 3` transitions are not aborted prematurely at the Raspi layer.
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
 - Async summary fanout is ordered so all Microtom notifications are queued before any ESP mirror attempt starts, preventing ESP-side delays from holding back Microtom state delivery.
+- 6530 async fanout now uses a dedicated background ESP mirror worker during the live owner session:
+  - Microtom callbacks are queued immediately on the async thread
+  - ESP mirrors run in order on the background worker and no longer block `AIR` handling
+  - transient ESP communication failures are retried in that worker; permanent `NAK_*` / access/configuration failures are logged and left visible
 - The fallback poller now yields to recent async events and will discard overlapping stale poll results instead of overwriting a fresher async state transition.
 - The fallback poller also stands down while the async owner session is healthy, even if no fresh state change happened recently.
 - Background 6530 cache warmup is skipped while async ownership is enabled, avoiding a second control client on `3002` during startup.
@@ -44,6 +48,9 @@
   - idle `AIS` without synchronous traffic closes after about 15s
   - `IRQ([])` keepalives keep the async session open
   - a second parallel control session times out while that owner session is active
+  - raw `CMD_START` now triggers `AIR` online (`0x0002`) on TEST in about `46 ms`
+  - raw `CMD_STOP` now triggers `AIR` offline (`0x0008`) on TEST in about `6 ms`
+  - `CMD_SHUTDOWN` / `CMD_STARTUP` do not emit a dedicated `AIR` state tag on TEST; the Raspi must therefore confirm `6 <-> 0` from fresh summary state rather than waiting for an async status tag that never comes
 - On TEST, `mas004-vj6530-zbc-bridge.service` is intentionally parked so the Databridge remains the sole operational owner of live 6530 traffic on `3002`.
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
@@ -133,8 +140,15 @@
       - `0 -> 3` via `START`
       - `6 -> 3` via `STARTUP` then `START`
       - `6` via `SHUTDOWN`
+    - the shared library now confirms `6 -> 3` against a fresh live summary instead of a stale shutdown snapshot, so `STARTUP` can reach `0` and then continue with `START`
+    - current TEST live timings through the Raspi path are now typically:
+      - `3 -> 0` in about `2.9 s`
+      - `0 -> 3` in about `4.8 s`
+      - `0 -> 6` in about `4.1 s`
+      - `6 -> 3` in about `3.2 s`
     - the derived states `1`, `2`, `4`, `5` are observed Warning/Fault combinations and are not direct write targets
     - printer-originated state changes are fanned out to Microtom / ESP only when the workbook access flags allow it
+    - current TEST gap: the real ESP at `192.168.2.101:3010` still answers `NAK_UnknownParam` for `TTP00073`, `TTP00076` and `TTS0001`; the Microtom path is healthy, but ESP-side parameter support/mapping still needs alignment before those TTO updates can arrive there successfully
   - the ZBC spec does not expose a generic async delta event for arbitrary `CURRENT_PARAMETERS` changes from the printer UI; direct CLARiTY-side `TTP` edits still require polling/readback
 
 ## Sync/Support Policy
