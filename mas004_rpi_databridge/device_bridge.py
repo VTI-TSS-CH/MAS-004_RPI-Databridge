@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import struct
+import time
 from typing import Optional
 
 from mas004_rpi_databridge.config import Settings
@@ -201,6 +202,18 @@ class DeviceBridge:
             if int(message_id) != 0:
                 return f"{pkey}=NAK_ZBC_{int(message_id):04X}"
             stored_value = verified if verified is not None else str(value)
+            if self._use_vj6530_runtime_session() and _is_printer_state_code_mapping(zbc_mapping):
+                observed = self._await_vj6530_state_confirmation(pkey, value)
+                allowed = _settled_printer_state_codes(value)
+                if observed is not None and observed in allowed:
+                    stored_value = observed
+                elif stored_value is None or str(stored_value) not in allowed:
+                    self.logs.log(
+                        "vj6530",
+                        "info",
+                        f"live state confirmation pending for {pkey}: verified={verified!r} observed={observed!r} target={value!r}",
+                    )
+                    return f"{pkey}=NAK_DeviceComm"
             ok, msg = self.params.apply_device_value(pkey, stored_value, promote_default=True)
             if not ok:
                 return f"{pkey}={msg}"
@@ -275,6 +288,20 @@ class DeviceBridge:
 
     def _use_vj6530_runtime_session(self) -> bool:
         return bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active()
+
+    def _await_vj6530_state_confirmation(self, pkey: str, target_value: str | int | float | bool) -> str | None:
+        allowed = _settled_printer_state_codes(target_value)
+        timeout_s = max(20.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0) + 15.0)
+        deadline = time.monotonic() + timeout_s
+        last_value = str(self.params.get_effective_value(pkey) or "")
+        while time.monotonic() < deadline:
+            current = str(self.params.get_effective_value(pkey) or "")
+            if current:
+                last_value = current
+            if current in allowed:
+                return current
+            time.sleep(0.2)
+        return last_value or None
 
     def mirror_to_esp(self, pkey: str, value: str) -> tuple[bool, str]:
         if self._is_simulation("esp-plc"):
@@ -376,3 +403,26 @@ def _decode_codec(data: bytes, codec: str, scale: float, offset: float) -> str:
     if math.isfinite(value) and abs(value - round(value)) < 1e-9:
         return str(int(round(value)))
     return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _is_printer_state_code_mapping(mapping: str) -> bool:
+    return str(mapping or "").strip().upper() in {"STATUS[PRINTER_STATE_CODE]", "STS[PRINTER_STATE_CODE]"}
+
+
+def _settled_printer_state_codes(value: str | int | float | bool) -> set[str]:
+    text = str(value).strip().upper()
+    normalized = {
+        "STOP": "0",
+        "OFFLINE": "0",
+        "ONLINE": "3",
+        "START": "3",
+        "STARTUP": "3",
+        "SHUTDOWN": "6",
+    }.get(text, text)
+    if normalized == "0":
+        return {"0", "1", "2"}
+    if normalized == "3":
+        return {"3", "4", "5"}
+    if normalized == "6":
+        return {"6"}
+    return {normalized}

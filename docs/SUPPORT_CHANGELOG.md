@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (6530 ACK Follows Async-Observed State)
+- Runtime-session `STATUS[PRINTER_STATE_CODE]` writes no longer trust a stale synchronous verify value if the async owner session has already observed a newer real printer state.
+- The Databridge now waits on the workbook-backed async state update for `TTS0001` and acknowledges the settled observed printer state (`0/1/2`, `3/4/5`, `6`) instead of echoing an outdated `0`.
+- Result: `TTS0001=3` no longer returns `ACK_TTS0001=0` simply because the direct verify path lagged behind the AIR-driven state transition.
+- Added regression coverage for runtime-session status writes where the direct verify value is stale but the async-observed state already reached the requested target.
+
 ## 2026-03-25 (6530 AIS Priority + Immediate Snapshot Push)
 - The 6530 async owner now subscribes to online/offline/warning/fault plus print-failed AIS events with the high-priority flag, matching the real-time requirement from the ZBC spec for critical state changes.
 - Incoming AIR tag changes now update workbook-backed `STATUS[...]` / `STS[...]` rows immediately from the async snapshot before the slower summary settle runs.

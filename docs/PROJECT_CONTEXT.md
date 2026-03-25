@@ -31,6 +31,7 @@
 - Critical AIS subscriptions (`ONLINE`, `OFFLINE`, `WARNING`, `FAULT`, `PRINT_FAILED`) are now requested with the high-priority flag so operator status changes and faults reach the Raspi path without the low-priority batching delay.
 - Incoming AIR tags now update `STATUS[...]` / `STS[...]` workbook rows immediately from the async snapshot before the slower summary settle/reread completes.
 - Owner-session reads and writes now temporarily widen the ZBC response timeout per request while the listener keeps its short unsolicited receive timeout for fast async handling.
+- For runtime-session `TTS0001` writes, the final ACK now prefers the async-observed workbook state over a stale direct verify value, so `ACK_TTS0001=0` is no longer emitted after the printer already reached `ONLINE`.
 - Queued 6530 writes now return success as soon as the live write itself completes; the follow-up summary settle still runs in-session, but no longer blocks or falsely NAKs slow printer transitions.
 - The Databridge owner-session timeout for queued 6530 writes is intentionally larger than the shared-library state-settle window, so slow `6 -> 3` transitions are not aborted prematurely at the Raspi layer.
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
