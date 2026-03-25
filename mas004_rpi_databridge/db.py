@@ -18,8 +18,6 @@ CREATE TABLE IF NOT EXISTS outbox (
   next_attempt_ts REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_next ON outbox(next_attempt_ts, created_ts);
-CREATE INDEX IF NOT EXISTS idx_outbox_sched ON outbox(next_attempt_ts, priority, retry_count, created_ts);
-CREATE INDEX IF NOT EXISTS idx_outbox_dedupe ON outbox(method, url, dedupe_key);
 
 CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +140,12 @@ def _apply_migrations(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE outbox ADD COLUMN priority INTEGER NOT NULL DEFAULT 100")
     if "dedupe_key" not in outbox_cols:
         conn.execute("ALTER TABLE outbox ADD COLUMN dedupe_key TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outbox_sched ON outbox(next_attempt_ts, priority, retry_count, created_ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outbox_dedupe ON outbox(method, url, dedupe_key)"
+    )
     param_cols = {row[1] for row in conn.execute("PRAGMA table_info(params)").fetchall()}
     if "esp_rw" not in param_cols:
         conn.execute("ALTER TABLE params ADD COLUMN esp_rw TEXT")
