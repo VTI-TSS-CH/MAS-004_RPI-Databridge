@@ -22,6 +22,11 @@
   - downloading a production TXT file removes it from the Raspi immediately
   - after the final production file is downloaded, the Raspi automatically sets `MAS0030=0`
   - that reset is also forwarded automatically to Microtom via callback `/api/inbox`
+- A new production cannot be started with `MAS0002=1` while old production files are still pending:
+  - the Raspi now returns `MAS0002=NAK_ProductionLogfilesPending`
+- Daily and production TXT logfiles are now enriched with workbook metadata:
+  - parameter `Name`
+  - parameter `Message` / description text
 
 ## 2026-03-25 (LIVE/Test State Merge for Microtom Rollout)
 - Reconciled the code baseline between the TEST branch work and the current Microtom LIVE system.

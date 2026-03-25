@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 
 from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager, DEFAULT_PRODUCTION_LOG_DIR
 
 DEFAULT_LOG_DIR = "/var/lib/mas004_rpi_databridge/logs"
@@ -53,6 +54,8 @@ class LogStore:
         self.cfg_path = cfg_path
         self._next_housekeeping_ts = 0.0
         self._production = ProductionLogManager(db, log_dir=production_log_dir or DEFAULT_PRODUCTION_LOG_DIR)
+        self._params = ParamStore(db)
+        self._meta_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         os.makedirs(self.log_dir, exist_ok=True)
 
     def log(self, channel: str, direction: str, message: str):
@@ -82,7 +85,45 @@ class LogStore:
 
     def _log_line(self, ts: float, channel: str, direction: str, message: str) -> str:
         dt = datetime.fromtimestamp(ts)
-        return f"[{dt:%Y-%m-%d %H:%M:%S}.{int(dt.microsecond/1000):03d}] [{channel}] {direction} {message}\n"
+        enriched = self._enrich_message(message)
+        return f"[{dt:%Y-%m-%d %H:%M:%S}.{int(dt.microsecond/1000):03d}] [{channel}] {direction} {enriched}\n"
+
+    def _extract_pkey(self, message: str) -> Optional[str]:
+        s = (message or "").strip()
+        if not s:
+            return None
+        m = re.search(r"(?:ACK_)?([A-Z]{3})(\d{4,5})\s*=", s)
+        if not m:
+            return None
+        return f"{m.group(1)}{m.group(2)}"
+
+    def _meta_for_pkey(self, pkey: str) -> Optional[Dict[str, Any]]:
+        if pkey in self._meta_cache:
+            return self._meta_cache[pkey]
+        meta = self._params.get_meta(pkey)
+        self._meta_cache[pkey] = meta
+        return meta
+
+    def _clean_meta_text(self, value: Any) -> str:
+        txt = str(value or "").replace("\r", " ").replace("\n", " ")
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt
+
+    def _enrich_message(self, message: str) -> str:
+        pkey = self._extract_pkey(message)
+        if not pkey:
+            return message
+        meta = self._meta_for_pkey(pkey)
+        if not meta:
+            return message
+        parts = [message]
+        name = self._clean_meta_text(meta.get("name"))
+        desc = self._clean_meta_text(meta.get("message"))
+        if name:
+            parts.append(f"NAME: {name}")
+        if desc:
+            parts.append(f"DESC: {desc}")
+        return " | ".join(parts)
 
     def _groups_for_channel(self, channel: str) -> List[str]:
         groups = [DAILY_GROUP_ALL]

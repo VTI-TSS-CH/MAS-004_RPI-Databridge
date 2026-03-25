@@ -84,6 +84,16 @@ class Router:
         self.logs.log("raspi", "in", f"microtom: {line}")
         self.logs.log(dev, "in", f"raspi-> {dev}: {line}")
 
+        if pkey == "MAS0002" and op == "write" and str(value).strip() == "1":
+            allowed, reason = self.production_logs.can_start_new_production()
+            if not allowed:
+                resp = f"{pkey}={reason}"
+                self.logs.log("raspi", "info", "start blocked: production logfiles of previous batch are still pending")
+                self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
+                self.logs.log("raspi", "out", f"to microtom: {resp}")
+                self._enqueue_to_microtom(resp, correlation=correlation)
+                return resp
+
         resp = self.device_bridge.execute(device=dev, pkey=pkey, ptype=ptype, op=op, value=value, actor="microtom")
         self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
         self.logs.log("raspi", "out", f"to microtom: {resp}")

@@ -158,6 +158,12 @@ class ProductionLogManager:
         out["files"] = files
         return out
 
+    def can_start_new_production(self) -> tuple[bool, str]:
+        manifest = self.ready_manifest()
+        if manifest.get("ready") or manifest.get("files"):
+            return False, "NAK_ProductionLogfilesPending"
+        return True, "OK"
+
     def resolve_ready_file(self, name: str) -> str:
         safe_name = os.path.basename((name or "").strip())
         if safe_name != (name or "").strip():

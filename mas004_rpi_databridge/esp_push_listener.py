@@ -160,6 +160,14 @@ class EspPushListener:
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")
             return resp
 
+        if pkey == "MAS0002" and str(value).strip() == "1":
+            allowed, reason = production_logs.can_start_new_production()
+            if not allowed:
+                resp = f"{pkey}={reason}"
+                logs.log("raspi", "info", "start blocked: production logfiles of previous batch are still pending")
+                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+                return resp
+
         if ptype.startswith("MA"):
             ok, msg = params.apply_device_value(pkey, value)
             if not ok:
