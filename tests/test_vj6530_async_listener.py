@@ -39,6 +39,7 @@ class FakeAsyncClient:
     def __init__(self):
         self.profile = SimpleNamespace(name="vj6530-tcp-no-crc")
         self.keepalive_calls = 0
+        self.write_calls = []
 
     def subscribe_async(self, _subscriptions):
         return async_module.MessageId.NUL, object()
@@ -49,6 +50,10 @@ class FakeAsyncClient:
     def request_info(self, _tags):
         self.keepalive_calls += 1
         return SimpleNamespace(tags=[])
+
+    def write_mapped_value(self, mapping: str, value: str):
+        self.write_calls.append((mapping, value))
+        return async_module.MessageId.NUL, str(value)
 
     def receive_unsolicited(self):
         raise socket.timeout()
@@ -190,6 +195,40 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
 
             self.assertGreater(runtime.snapshot()["last_async_ok_ts"], 0.0)
             self.assertFalse(runtime.snapshot()["session_active"])
+
+    def test_drain_session_requests_strips_verify_readback_for_zbc_client(self):
+        listener = object.__new__(Vj6530AsyncListener)
+        listener.logs = FakeLogs()
+        listener._sync_summary_until_stable = lambda client, settle_s: 0
+        fake_client = FakeAsyncClient()
+        request = async_module.VJ6530_RUNTIME.next_session_request(timeout_s=0.0)
+        self.assertIsNone(request)
+
+        runtime = Vj6530RuntimeState()
+        original_runtime = async_module.VJ6530_RUNTIME
+        async_module.VJ6530_RUNTIME = runtime
+        runtime.mark_session_active(True)
+        try:
+            def worker():
+                result = runtime.submit_session_request(
+                    "write_mapped_value",
+                    "STATUS[PRINTER_STATE_CODE]",
+                    "3",
+                    verify_readback=True,
+                    timeout_s=1.0,
+                )
+                self.assertEqual((async_module.MessageId.NUL, "3"), result)
+
+            import threading
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            handled = listener._drain_session_requests(fake_client)
+            thread.join(timeout=1.0)
+            self.assertTrue(handled)
+            self.assertEqual([("STATUS[PRINTER_STATE_CODE]", "3")], fake_client.write_calls)
+        finally:
+            async_module.VJ6530_RUNTIME = original_runtime
 
 
 if __name__ == "__main__":

@@ -153,7 +153,10 @@ class Vj6530AsyncListener:
             handled = True
             try:
                 fn = getattr(client, request.operation)
-                result = fn(*request.args, **request.kwargs)
+                kwargs = dict(request.kwargs)
+                if request.operation == "write_mapped_value":
+                    kwargs.pop("verify_readback", None)
+                result = fn(*request.args, **kwargs)
                 VJ6530_RUNTIME.mark_async_ok()
                 if request.operation.startswith("write_"):
                     try:
