@@ -4,7 +4,7 @@
 - The 6530 async listener now prefers the already verified `vj6530-tcp-no-crc` transport profile instead of re-probing every async session startup; autodetect remains fallback only.
 - The async loop now treats idle `socket.timeout` on the unsolicited receive path as a healthy wait state instead of tearing the subscription down as an error.
 - Async status refreshes now use a short summary settle window after online/offline/warning/fault events so follow-up state transitions like `OFFLINE -> SHUTDOWN` or `OFFLINE -> ONLINE` are more likely to be captured immediately.
-- The 6530 fallback poller is no longer suppressed just because the async socket is alive; it now only yields after recent real async events.
+- The 6530 fallback poller now stands down while the async channel is still healthy, but the async-health age-out window was reduced so fallback reconciliation resumes much sooner after a broken async session.
 - The background 6530 poll loop now reuses one bridge client while host/port/timeout stay unchanged, so profile knowledge is no longer thrown away on every cycle.
 - Successful 6530 writes from Microtom or ESP now trigger an immediate workbook status resync so related status rows such as `TTP00073`, `TTP00076`, `TTS0001`, `TTE*`, `TTW*` do not wait for the next background cycle.
 - Outbox dedupe is now lossless for non-consecutive state changes:
