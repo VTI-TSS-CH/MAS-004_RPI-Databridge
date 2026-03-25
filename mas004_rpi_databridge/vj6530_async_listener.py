@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import time
 
 from mas004_rpi_databridge._vj6530_bridge import (
@@ -63,6 +64,9 @@ class Vj6530AsyncListener:
                 try:
                     msg_id, response = client.receive_unsolicited()
                     VJ6530_RUNTIME.mark_async_ok()
+                except socket.timeout:
+                    VJ6530_RUNTIME.mark_async_ok()
+                    continue
                 except TimeoutError:
                     VJ6530_RUNTIME.mark_async_ok()
                     continue
