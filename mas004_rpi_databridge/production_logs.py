@@ -176,7 +176,7 @@ class ProductionLogManager:
             return
         params.apply_device_value("MAS0030", str(value), promote_default=True)
 
-    def _notify_ready_to_microtom(self):
+    def _notify_ready_to_microtom(self, value: str):
         if self.cfg is None or self.outbox is None:
             return
         targets = peer_urls(self.cfg, "/api/inbox")
@@ -185,7 +185,7 @@ class ProductionLogManager:
                 "POST",
                 url,
                 {},
-                {"msg": "MAS0030=1", "source": "raspi"},
+                {"msg": f"MAS0030={value}", "source": "raspi"},
                 None,
                 priority=15,
                 dedupe_key="raspi:MAS0030",
@@ -228,15 +228,40 @@ class ProductionLogManager:
             state["files"] = [production_file_name(group, label) for group in PRODUCTION_GROUP_LABELS] if label else []
             self._write_state(state)
             self._set_ready_param("1")
-            self._notify_ready_to_microtom()
+            self._notify_ready_to_microtom("1")
             return {"event": "stop", "production_label": label}
 
         return None
 
     def acknowledge_ready(self) -> Dict[str, Any]:
         state = self._read_state()
-        if state.get("ready"):
+        if state.get("ready") and not self.ready_manifest().get("files"):
             state["ready"] = False
             self._write_state(state)
             self._set_ready_param("0")
         return self.ready_manifest()
+
+    def consume_ready_file(self, name: str, max_bytes: int = 5_000_000) -> bytes:
+        path = self.resolve_ready_file(name)
+        with open(path, "rb") as f:
+            data = f.read()
+        if len(data) > max_bytes:
+            data = data[-max_bytes:]
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self._refresh_ready_state_after_removal()
+        return data
+
+    def _refresh_ready_state_after_removal(self):
+        manifest = self.ready_manifest()
+        if manifest.get("files"):
+            return
+        state = self._read_state()
+        if not state.get("ready"):
+            return
+        state["ready"] = False
+        self._write_state(state)
+        self._set_ready_param("0")
+        self._notify_ready_to_microtom("0")

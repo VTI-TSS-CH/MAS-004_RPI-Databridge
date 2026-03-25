@@ -89,9 +89,29 @@ class ProductionLogTests(unittest.TestCase):
             body = json.loads(job.body_json)
             self.assertEqual("MAS0030=1", body["msg"])
 
-            acked = manager.acknowledge_ready()
-            self.assertFalse(acked["ready"])
+            data_all = manager.consume_ready_file(production_file_name("all", "JOB_4711"))
+            self.assertIn(b"production test line", data_all)
+            self.assertEqual("1", params.get_effective_value("MAS0030"))
+
+            # Extend the production set so the ready flag stays high until the final download.
+            (base / "production" / production_file_name("tto", "JOB_4711")).write_text("tto\n", encoding="utf-8")
+            (base / "production" / production_file_name("laser", "JOB_4711")).write_text("laser\n", encoding="utf-8")
+            manager.consume_ready_file(production_file_name("esp", "JOB_4711"))
+            self.assertEqual("1", params.get_effective_value("MAS0030"))
+            manager.consume_ready_file(production_file_name("tto", "JOB_4711"))
+            self.assertEqual("1", params.get_effective_value("MAS0030"))
+
+            manager.consume_ready_file(production_file_name("laser", "JOB_4711"))
+            manifest_after = manager.ready_manifest()
+            self.assertFalse(manifest_after["ready"])
             self.assertEqual("0", params.get_effective_value("MAS0030"))
+            self.assertEqual(2, outbox.count())
+            remaining = outbox.next_due()
+            self.assertIsNotNone(remaining)
+            outbox.delete(remaining.id)
+            final_job = outbox.next_due()
+            final_body = json.loads(final_job.body_json)
+            self.assertEqual("MAS0030=0", final_body["msg"])
 
 
 if __name__ == "__main__":

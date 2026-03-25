@@ -18,6 +18,10 @@
   - `GET /api/production/logfiles/download`
   - `POST /api/production/logfiles/ack`
 - When a production stops, the Raspi now raises `MAS0030=1` so Microtom can detect that the last production logs are ready to fetch.
+- Production-log downloads are now consumptive:
+  - downloading a production TXT file removes it from the Raspi immediately
+  - after the final production file is downloaded, the Raspi automatically sets `MAS0030=0`
+  - that reset is also forwarded automatically to Microtom via callback `/api/inbox`
 
 ## 2026-03-25 (LIVE/Test State Merge for Microtom Rollout)
 - Reconciled the code baseline between the TEST branch work and the current Microtom LIVE system.

@@ -321,3 +321,6 @@ class LogStore:
 
     def acknowledge_production_files(self) -> Dict[str, Any]:
         return self._production.acknowledge_ready()
+
+    def consume_production_file(self, name: str, max_bytes: int = 5_000_000) -> bytes:
+        return self._production.consume_ready_file(name, max_bytes=max_bytes)

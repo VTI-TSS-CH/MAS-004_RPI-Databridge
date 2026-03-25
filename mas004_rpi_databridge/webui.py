@@ -40,6 +40,12 @@ def require_shared_secret(x_shared_secret: Optional[str], cfg: Settings):
         raise HTTPException(status_code=401, detail="Unauthorized (shared secret)")
 
 
+def require_token_or_shared_secret(x_token: Optional[str], x_shared_secret: Optional[str], cfg: Settings):
+    if cfg.ui_token and x_token == cfg.ui_token:
+        return
+    require_shared_secret(x_shared_secret, cfg)
+
+
 class ConfigUpdate(BaseModel):
     # Microtom
     peer_base_url: Optional[str] = None
@@ -921,29 +927,40 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         )
 
     @app.get("/api/production/logfiles/list")
-    def list_production_logfiles(x_shared_secret: Optional[str] = Header(default=None)):
+    def list_production_logfiles(
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
         cfg2 = Settings.load(cfg_path)
-        require_shared_secret(x_shared_secret, cfg2)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         return production_logs.ready_manifest()
 
     @app.get("/api/production/logfiles/download")
     def download_production_logfile(
         name: str = Query(...),
+        x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_shared_secret(x_shared_secret, cfg2)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         try:
-            path = logs.resolve_production_file(name)
+            data = logs.consume_production_file(name)
         except Exception as e:
             raise HTTPException(status_code=404, detail=str(e))
         safe_name = os.path.basename(name)
-        return FileResponse(path, media_type="text/plain; charset=utf-8", filename=safe_name)
+        return Response(
+            content=data,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
 
     @app.post("/api/production/logfiles/ack")
-    def ack_production_logfiles(x_shared_secret: Optional[str] = Header(default=None)):
+    def ack_production_logfiles(
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
         cfg2 = Settings.load(cfg_path)
-        require_shared_secret(x_shared_secret, cfg2)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         return logs.acknowledge_production_files()
 
     # =========================
@@ -1466,6 +1483,33 @@ load();
   </fieldset>
 
   <fieldset>
+    <legend>Production Log Files</legend>
+    <div class="muted">Diese Dateien werden pro Produktion erzeugt. Ein Download entfernt die jeweilige Produktionsdatei direkt vom Raspi. Wenn die letzte Datei heruntergeladen wurde, wird `MAS0030=0` automatisch gesetzt und an Microtom gemeldet.</div>
+    <div class="grid cols-3b">
+      <div class="field"><label>Production label</label><input id="prod_label" readonly/></div>
+      <div class="field"><label>Recording active</label><input id="prod_active" readonly/></div>
+      <div class="field"><label>Files ready</label><input id="prod_ready" readonly/></div>
+    </div>
+    <div class="actions">
+      <button onclick="loadProductionLogFiles()">Reload Production Log File List</button>
+      <span id="prodlog_status" class="muted"></span>
+    </div>
+    <div style="overflow:auto; margin-top:8px;">
+      <table style="width:100%; border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th style="text-align:left; border-bottom:1px solid #d6dde7; padding:6px;">Datei</th>
+            <th style="text-align:left; border-bottom:1px solid #d6dde7; padding:6px;">Typ</th>
+            <th style="text-align:left; border-bottom:1px solid #d6dde7; padding:6px;">Groesse</th>
+            <th style="text-align:left; border-bottom:1px solid #d6dde7; padding:6px;">Aktion</th>
+          </tr>
+        </thead>
+        <tbody id="production_log_files"></tbody>
+      </table>
+    </div>
+  </fieldset>
+
+  <fieldset>
     <legend>Queue Maintenance</legend>
     <div class="grid cols-3b">
       <div class="field"><label>Outbox count</label><input id="queue_outbox" readonly/></div>
@@ -1658,6 +1702,7 @@ async function reloadAll(){
 
   document.getElementById("netinfo").textContent = JSON.stringify(net.status, null, 2);
   await loadDailyLogFiles();
+  await loadProductionLogFiles();
 }
 
 async function refreshQueueStatus(){
@@ -1839,6 +1884,66 @@ async function downloadDailyLog(name){
     URL.revokeObjectURL(a.href);
   }catch(e){
     alert("Download failed: " + e.message);
+  }
+}
+
+async function loadProductionLogFiles(){
+  const tbody = document.getElementById("production_log_files");
+  const status = document.getElementById("prodlog_status");
+  tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;">loading...</td></tr>';
+  status.textContent = "";
+  try{
+    const t = getToken();
+    const r = await fetch("/api/production/logfiles/list", {headers: t ? {"X-Token": t} : {}});
+    const txt = await r.text();
+    let j = null; try{ j = JSON.parse(txt); }catch(e){}
+    if(!r.ok){
+      throw new Error((j && j.detail) ? j.detail : ("HTTP " + r.status + " " + txt));
+    }
+    document.getElementById("prod_label").value = j.production_label || "";
+    document.getElementById("prod_active").value = j.active ? "yes" : "no";
+    document.getElementById("prod_ready").value = j.ready ? "yes" : "no";
+    const items = j.files || [];
+    if(!items.length){
+      tbody.innerHTML = '<tr><td colspan="4" style="padding:6px;">keine Produktionsdateien bereit</td></tr>';
+      return;
+    }
+    const rows = items.map(it => {
+      const name = it.name || "";
+      const grp = it.group_label || it.group || "";
+      const sz = fmtBytes(it.size_bytes || 0);
+      const btn = `<button onclick="downloadProductionLog('${name.replace(/'/g, "\\'")}')">Download + Delete</button>`;
+      return `<tr>
+        <td style="padding:6px; border-top:1px solid #e7edf6;">${name}</td>
+        <td style="padding:6px; border-top:1px solid #e7edf6;">${grp}</td>
+        <td style="padding:6px; border-top:1px solid #e7edf6;">${sz}</td>
+        <td style="padding:6px; border-top:1px solid #e7edf6;">${btn}</td>
+      </tr>`;
+    });
+    tbody.innerHTML = rows.join("");
+  }catch(e){
+    tbody.innerHTML = `<tr><td colspan="4" style="padding:6px; color:#c62828;">ERROR: ${e.message}</td></tr>`;
+  }
+}
+
+async function downloadProductionLog(name){
+  try{
+    const t = getToken();
+    const r = await fetch("/api/production/logfiles/download?name=" + encodeURIComponent(name), {headers: t ? {"X-Token": t} : {}});
+    if(!r.ok){
+      const txt = await r.text();
+      throw new Error(txt || ("HTTP " + r.status));
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    document.getElementById("prodlog_status").textContent = `downloaded + deleted: ${name}`;
+    await loadProductionLogFiles();
+  }catch(e){
+    alert("Production download failed: " + e.message);
   }
 }
 
