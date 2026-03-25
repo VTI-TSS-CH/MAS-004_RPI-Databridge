@@ -190,7 +190,7 @@ set -e
 svc="__SERVICE__"
 enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
 if [ "$enabled" = "disabled" ] || [ "$enabled" = "masked" ]; then
-  echo "skip restart ($enabled)"
+  echo "skip_restart_$enabled"
   exit 0
 fi
 sudo systemctl restart "$svc"

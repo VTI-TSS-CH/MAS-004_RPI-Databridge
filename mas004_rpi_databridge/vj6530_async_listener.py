@@ -53,9 +53,9 @@ class Vj6530AsyncListener:
 
             profile_name = getattr(getattr(client, "profile", None), "name", "unknown")
             self.logs.log("vj6530", "info", f"async subscription active profile={profile_name}")
+            VJ6530_RUNTIME.mark_async_ok()
             try:
                 self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
-                VJ6530_RUNTIME.mark_async_ok()
             except Exception as exc:
                 self.logs.log("vj6530", "info", f"async startup summary skipped: {repr(exc)}")
 

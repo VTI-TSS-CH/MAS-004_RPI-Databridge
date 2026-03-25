@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 import types
+import socket
 
 sys.modules.setdefault("ping3", types.SimpleNamespace(ping=lambda *args, **kwargs: None))
 
@@ -14,6 +15,7 @@ from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.vj6530_async_listener import Vj6530AsyncListener
+from mas004_rpi_databridge.vj6530_runtime import Vj6530RuntimeState
 
 
 class FakeDeviceBridge:
@@ -23,6 +25,28 @@ class FakeDeviceBridge:
     def mirror_to_esp(self, pkey: str, value: str):
         self.calls.append((pkey, value))
         return True, "OK"
+
+
+class FakeLogs:
+    def __init__(self):
+        self.entries = []
+
+    def log(self, channel: str, direction: str, message: str):
+        self.entries.append((channel, direction, message))
+
+
+class FakeAsyncClient:
+    def __init__(self):
+        self.profile = SimpleNamespace(name="vj6530-tcp-no-crc")
+
+    def subscribe_async(self, _subscriptions):
+        return async_module.MessageId.NUL, object()
+
+    def receive_unsolicited(self):
+        raise socket.timeout()
+
+    def close(self):
+        return None
 
 
 class Vj6530AsyncListenerTests(unittest.TestCase):
@@ -116,6 +140,47 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
                 bodies.append(json.loads(job.body_json)["msg"])
                 outbox.delete(job.id)
             self.assertEqual(["TTE1000=1", "TTS0001=5"], bodies)
+
+    def test_run_session_marks_async_ok_before_startup_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                http_timeout_s=5.0,
+                peer_base_url="",
+                peer_base_url_secondary="",
+                esp_host="",
+                esp_port=0,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+            listener = Vj6530AsyncListener(cfg, ParamStore(db), LogStore(db), Outbox(db))
+            listener.logs = FakeLogs()
+            listener.device_bridge = FakeDeviceBridge()
+
+            original_runtime = async_module.VJ6530_RUNTIME
+            original_monotonic = async_module.time.monotonic
+            runtime = Vj6530RuntimeState()
+            values = iter([0.1, 1.0, 1.0, 1.1, 7.0, 8.0])
+
+            async_module.VJ6530_RUNTIME = runtime
+            async_module.time.monotonic = lambda: next(values)
+            listener._open_async_client = lambda: FakeAsyncClient()
+            listener._sync_summary_until_stable = lambda client, settle_s: (_ for _ in ()).throw(TimeoutError("summary timeout"))
+            try:
+                listener.run_session(session_s=5.0)
+            finally:
+                async_module.VJ6530_RUNTIME = original_runtime
+                async_module.time.monotonic = original_monotonic
+
+            self.assertGreater(runtime.snapshot()["last_async_ok_ts"], 0.0)
 
 
 if __name__ == "__main__":
