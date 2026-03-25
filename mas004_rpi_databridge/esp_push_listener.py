@@ -10,6 +10,7 @@ from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.production_logs import ProductionLogManager
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 
@@ -131,6 +132,7 @@ class EspPushListener:
         outbox = Outbox(db)
         logs = LogStore(db)
         bridge = DeviceBridge(self.cfg, params, logs)
+        production_logs = ProductionLogManager(db, cfg=self.cfg, outbox=outbox)
 
         logs.log("esp-plc", "in", f"esp->raspi: {line}")
         logs.log("raspi", "in", f"esp-plc push: {line}")
@@ -164,6 +166,11 @@ class EspPushListener:
                 resp = f"{pkey}={msg}"
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")
                 return resp
+            event = production_logs.handle_param_change(pkey, value)
+            if event and event.get("event") == "start":
+                logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
+            elif event and event.get("event") == "stop":
+                logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
             forwarded_line = line
         else:
             resp = bridge.execute(device=dev, pkey=pkey, ptype=ptype, op="write", value=value, actor="esp32")
@@ -171,6 +178,11 @@ class EspPushListener:
             if "NAK" in resp.upper():
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")
                 return resp
+            event = production_logs.handle_param_change(pkey, value)
+            if event and event.get("event") == "start":
+                logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
+            elif event and event.get("event") == "stop":
+                logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
             parsed_resp = parse_param_line(resp)
             if not parsed_resp or parsed_resp.ptype is None or parsed_resp.value is None:
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")

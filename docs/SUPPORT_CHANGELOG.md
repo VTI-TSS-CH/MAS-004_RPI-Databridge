@@ -1,5 +1,24 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (Production Logfiles via MAS0002 / MAS0029 / MAS0030)
+- Added `mas004_rpi_databridge/production_logs.py`.
+- Production log capture is now controlled by MAS status values:
+  - `MAS0002=1` starts a production log session
+  - `MAS0002=2` stops the session and marks the last production logs as ready
+- Added new workbook parameters:
+  - `MAS0029` production label / logfile suffix (string)
+  - `MAS0030` production-logfiles-ready flag (`0|1`)
+- `logstore.py` now mirrors active communication into separate production TXT files:
+  - `gesamtanlage_<MAS0029>.txt`
+  - `esp32_plc_<MAS0029>.txt`
+  - `tto_6530_<MAS0029>.txt`
+  - `laser_3350_<MAS0029>.txt`
+- Added Microtom pull endpoints:
+  - `GET /api/production/logfiles/list`
+  - `GET /api/production/logfiles/download`
+  - `POST /api/production/logfiles/ack`
+- When a production stops, the Raspi now raises `MAS0030=1` so Microtom can detect that the last production logs are ready to fetch.
+
 ## 2026-03-25 (LIVE/Test State Merge for Microtom Rollout)
 - Reconciled the code baseline between the TEST branch work and the current Microtom LIVE system.
 - Confirmed that LIVE runtime settings remain external in `/etc/mas004_rpi_databridge/config.json` and are not touched by repo deployment.

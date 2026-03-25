@@ -15,6 +15,9 @@
   - `vj6530_async_listener.py` (primary async status/error ingestion from the 6530)
   - `vj6530_poller.py` (slow fallback sync when the async channel is not healthy)
 - Device-initiated ESP push path: `esp_push_listener.py` (eth1 listener for active ESP->Raspi messages)
+- Production batch logging:
+  - `production_logs.py` manages start/stop state from `MAS0002`, batch label from `MAS0029` and ready flag `MAS0030`
+  - `logstore.py` mirrors active communication into production-specific TXT logs (`Gesamtanlage`, `ESP`, `TTO`, `Laser`)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
@@ -25,6 +28,10 @@
 - Main outbound callback target: `<peer_base_url>/api/inbox`
 - Optional parallel outbound callback target: `<peer_base_url_secondary>/api/inbox`
 - Health endpoint: `GET /health`
+- Production log pull endpoints for Microtom:
+  - `GET /api/production/logfiles/list`
+  - `GET /api/production/logfiles/download`
+  - `POST /api/production/logfiles/ack`
 - TCP relay endpoints on Raspi eth0:
   - main relay ports follow the configured device ports: `vj6530_port`, `vj3350_port`, `esp_port`
   - optional extra per-device ports from Settings UI (`*_forward_ports`)

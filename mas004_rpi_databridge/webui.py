@@ -23,6 +23,7 @@ from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_ip_info
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
+from mas004_rpi_databridge.production_logs import ProductionLogManager
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
@@ -32,6 +33,11 @@ REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)
 def require_token(x_token: Optional[str], cfg: Settings):
     if cfg.ui_token and x_token != cfg.ui_token:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def require_shared_secret(x_shared_secret: Optional[str], cfg: Settings):
+    if (cfg.shared_secret or "") and x_shared_secret != cfg.shared_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized (shared secret)")
 
 
 class ConfigUpdate(BaseModel):
@@ -122,6 +128,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     inbox = Inbox(db)
     params = ParamStore(db)
     logs = LogStore(db)
+    production_logs = ProductionLogManager(db, cfg=cfg, outbox=outbox)
     if not os.path.exists(cfg.master_params_xlsx_path) and os.path.exists(REPO_MASTER_PARAMS_XLSX):
         os.makedirs(os.path.dirname(cfg.master_params_xlsx_path), exist_ok=True)
         shutil.copyfile(REPO_MASTER_PARAMS_XLSX, cfg.master_params_xlsx_path)
@@ -601,6 +608,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             parsed = re.match(r"^\s*([A-Za-z]{3})([0-9A-Za-z_]+)\s*=\s*(.+?)\s*$", line)
             persisted = None
             persist_msg = None
+            pkey = None
             if parsed:
                 ptype = parsed.group(1).upper()
                 pid = parsed.group(2)
@@ -612,6 +620,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     persisted, persist_msg = params.apply_device_value(pkey, rhs)
                     if not persisted:
                         logs.log("raspi", "info", f"value not persisted for {pkey}: {persist_msg}")
+                    else:
+                        event = production_logs.handle_param_change(pkey, rhs)
+                        if event and event.get("event") == "start":
+                            logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
+                        elif event and event.get("event") == "stop":
+                            logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
 
             if src == "raspi":
                 logs.log("raspi", "out", f"manual->microtom: {line}")
@@ -681,9 +695,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        # optional shared secret check (if set)
-        if (cfg2.shared_secret or "") and x_shared_secret != cfg2.shared_secret:
-            raise HTTPException(status_code=401, detail="Unauthorized (shared secret)")
+        require_shared_secret(x_shared_secret, cfg2)
 
         raw_body = await request.body()
         body = None
@@ -907,6 +919,32 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             media_type="text/plain; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
         )
+
+    @app.get("/api/production/logfiles/list")
+    def list_production_logfiles(x_shared_secret: Optional[str] = Header(default=None)):
+        cfg2 = Settings.load(cfg_path)
+        require_shared_secret(x_shared_secret, cfg2)
+        return production_logs.ready_manifest()
+
+    @app.get("/api/production/logfiles/download")
+    def download_production_logfile(
+        name: str = Query(...),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_shared_secret(x_shared_secret, cfg2)
+        try:
+            path = logs.resolve_production_file(name)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        safe_name = os.path.basename(name)
+        return FileResponse(path, media_type="text/plain; charset=utf-8", filename=safe_name)
+
+    @app.post("/api/production/logfiles/ack")
+    def ack_production_logfiles(x_shared_secret: Optional[str] = Header(default=None)):
+        cfg2 = Settings.load(cfg_path)
+        require_shared_secret(x_shared_secret, cfg2)
+        return logs.acknowledge_production_files()
 
     # =========================
     # ===== SIMPLE UI =========

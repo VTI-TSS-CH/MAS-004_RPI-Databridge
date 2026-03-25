@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 
 from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.production_logs import ProductionLogManager, DEFAULT_PRODUCTION_LOG_DIR
 
 DEFAULT_LOG_DIR = "/var/lib/mas004_rpi_databridge/logs"
 
@@ -40,11 +41,18 @@ DAILY_CHANNEL_GROUP = {
 
 
 class LogStore:
-    def __init__(self, db: DB, log_dir: str = DEFAULT_LOG_DIR, cfg_path: str = DEFAULT_CFG_PATH):
+    def __init__(
+        self,
+        db: DB,
+        log_dir: str = DEFAULT_LOG_DIR,
+        cfg_path: str = DEFAULT_CFG_PATH,
+        production_log_dir: Optional[str] = None,
+    ):
         self.db = db
         self.log_dir = log_dir
         self.cfg_path = cfg_path
         self._next_housekeeping_ts = 0.0
+        self._production = ProductionLogManager(db, log_dir=production_log_dir or DEFAULT_PRODUCTION_LOG_DIR)
         os.makedirs(self.log_dir, exist_ok=True)
 
     def log(self, channel: str, direction: str, message: str):
@@ -69,6 +77,7 @@ class LogStore:
             )
 
         self._write_daily_logfiles(ts, channel, direction, message)
+        self._write_production_logfiles(ts, channel, direction, message)
         self._maybe_housekeeping(ts)
 
     def _log_line(self, ts: float, channel: str, direction: str, message: str) -> str:
@@ -96,6 +105,22 @@ class LogStore:
                     f.write(line)
             except Exception:
                 # logging errors must never break runtime path
+                pass
+
+    def _write_production_logfiles(self, ts: float, channel: str, direction: str, message: str):
+        state = self._production.active_state()
+        if not state:
+            return
+        label = str(state.get("production_label") or "").strip()
+        if not label:
+            return
+        line = self._log_line(ts, channel, direction, message)
+        for group in self._groups_for_channel(channel):
+            try:
+                fn = self._production.path_for_group(group, label)
+                with open(fn, "a", encoding="utf-8") as f:
+                    f.write(line)
+            except Exception:
                 pass
 
     def _safe_days(self, value: Any, default_v: int) -> int:
@@ -287,3 +312,12 @@ class LogStore:
         if len(data) > max_bytes:
             data = data[-max_bytes:]
         return data.decode("utf-8", errors="replace")
+
+    def list_production_files(self) -> Dict[str, Any]:
+        return self._production.ready_manifest()
+
+    def resolve_production_file(self, name: str) -> str:
+        return self._production.resolve_ready_file(name)
+
+    def acknowledge_production_files(self) -> Dict[str, Any]:
+        return self._production.acknowledge_ready()

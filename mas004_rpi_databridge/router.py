@@ -6,6 +6,7 @@ from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.production_logs import ProductionLogManager
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 from mas004_rpi_databridge.peers import peer_urls
@@ -49,6 +50,7 @@ class Router:
         self.params = params
         self.logs = logs
         self.device_bridge = DeviceBridge(cfg, params, logs)
+        self.production_logs = ProductionLogManager(params.db, cfg=cfg, outbox=outbox)
 
     def _enqueue_to_microtom(self, line: str, correlation: Optional[str] = None):
         targets = peer_urls(self.cfg, "/api/inbox")
@@ -85,6 +87,12 @@ class Router:
         resp = self.device_bridge.execute(device=dev, pkey=pkey, ptype=ptype, op=op, value=value, actor="microtom")
         self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
         self.logs.log("raspi", "out", f"to microtom: {resp}")
+        if op == "write" and "NAK" not in resp.upper():
+            event = self.production_logs.handle_param_change(pkey, value)
+            if event and event.get("event") == "start":
+                self.logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
+            elif event and event.get("event") == "stop":
+                self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
         self._enqueue_to_microtom(resp, correlation=correlation)
         self._mirror_success_to_esp(pkey, resp)
         return resp
