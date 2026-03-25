@@ -17,6 +17,8 @@ class FakeZbcBridgeClient:
     def __init__(self):
         self.read_calls = []
         self.write_calls = []
+        self.invalidated_current_cache = 0
+        self.invalidated_summary_cache = 0
 
     def read_mapped_value(self, mapping: str):
         self.read_calls.append(mapping)
@@ -26,10 +28,42 @@ class FakeZbcBridgeClient:
         self.write_calls.append((mapping, str(value), verify_readback))
         return 0, str(value)
 
+    def invalidate_current_parameters_cache(self):
+        self.invalidated_current_cache += 1
+
+    def invalidate_summary_cache(self):
+        self.invalidated_summary_cache += 1
+
 
 class FailingZbcBridgeClient(FakeZbcBridgeClient):
     def read_mapped_value(self, mapping: str):
         raise TimeoutError("timed out")
+
+
+class FlakyReadZbcBridgeClient(FakeZbcBridgeClient):
+    def __init__(self):
+        super().__init__()
+        self._failed = False
+
+    def read_mapped_value(self, mapping: str):
+        self.read_calls.append(mapping)
+        if not self._failed:
+            self._failed = True
+            raise TimeoutError("timed out")
+        return "49"
+
+
+class FlakyWriteZbcBridgeClient(FakeZbcBridgeClient):
+    def __init__(self):
+        super().__init__()
+        self._failed = False
+
+    def write_mapped_value(self, mapping: str, value, verify_readback: bool = True):
+        self.write_calls.append((mapping, str(value), verify_readback))
+        if not self._failed:
+            self._failed = True
+            raise TimeoutError("timed out")
+        return 0, str(value)
 
 
 class DeviceBridgeTtoMappingTests(unittest.TestCase):
@@ -272,6 +306,170 @@ class DeviceBridgeTtoMappingTests(unittest.TestCase):
             read_resp = bridge.execute("vj6530", "TTP00002", "TTP", "read", "?")
 
             self.assertEqual("TTP00002=47", read_resp)
+
+    def test_current_parameter_read_retries_before_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO params(
+                        pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                        message,possible_cause,effects,remedy,updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTP00002",
+                        "TTP",
+                        "00002",
+                        0,
+                        100,
+                        "45",
+                        None,
+                        "R/W",
+                        "W",
+                        "unsigned int.",
+                        "RadialRibbonWidthLimit",
+                        "NO",
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO param_values(pkey,value,updated_ts) VALUES(?,?,?)""",
+                    ("TTP00002", "47", now_ts()),
+                )
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTP00002",
+                        None,
+                        "FRQ[CURRENT_PARAMETERS]/Devices/PHds/1/Consumables/RadialRibbonWidthLimit",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            cfg = SimpleNamespace(
+                esp_host="",
+                esp_port=0,
+                http_timeout_s=2.0,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj6530_host="10.0.0.5",
+                vj6530_port=3002,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            bridge = DeviceBridge(cfg, params, logs)
+            flaky = FlakyReadZbcBridgeClient()
+            bridge._zbc_bridge = flaky
+
+            read_resp = bridge.execute("vj6530", "TTP00002", "TTP", "read", "?")
+
+            self.assertEqual("TTP00002=49", read_resp)
+            self.assertEqual(2, len(flaky.read_calls))
+            self.assertEqual(1, flaky.invalidated_current_cache)
+            self.assertEqual(1, flaky.invalidated_summary_cache)
+
+    def test_current_parameter_write_retries_before_device_comm(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO params(
+                        pkey,ptype,pid,min_v,max_v,default_v,unit,rw,dtype,name,format_relevant,
+                        message,possible_cause,effects,remedy,updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTP00071",
+                        "TTP",
+                        "00071",
+                        0,
+                        1000,
+                        "0",
+                        "ms",
+                        "R/W",
+                        "unsigned int.",
+                        "JobUpdateReplyDelay",
+                        "NO",
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTP00071",
+                        None,
+                        "FRQ[CURRENT_PARAMETERS]/System/TCPIP/JobUpdateReplyDelay",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            cfg = SimpleNamespace(
+                esp_host="",
+                esp_port=0,
+                http_timeout_s=2.0,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj6530_host="10.0.0.5",
+                vj6530_port=3002,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            bridge = DeviceBridge(cfg, params, logs)
+            flaky = FlakyWriteZbcBridgeClient()
+            bridge._zbc_bridge = flaky
+
+            write_resp = bridge.execute("vj6530", "TTP00071", "TTP", "write", "9")
+
+            self.assertEqual("ACK_TTP00071=9", write_resp)
+            self.assertEqual("9", params.get_effective_value("TTP00071"))
+            self.assertEqual(2, len(flaky.write_calls))
+            self.assertEqual(1, flaky.invalidated_current_cache)
+            self.assertEqual(1, flaky.invalidated_summary_cache)
 
 
 if __name__ == "__main__":

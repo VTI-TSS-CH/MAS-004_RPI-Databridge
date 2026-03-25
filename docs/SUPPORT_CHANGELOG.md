@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (Retry Once Before `NAK_DeviceComm` on VJ6530)
+- Current-parameter reads and writes on the 6530 live path now retry once before falling back to cached values or bubbling up to the generic `NAK_DeviceComm`.
+- Goal: absorb transient profile-detect / session timeouts on `3002` that would otherwise fail a user write even though the immediate retry succeeds.
+- Added regression tests for:
+  - a flaky current-parameter read that succeeds on the second attempt
+  - a flaky current-parameter write that succeeds on the second attempt
+
 ## 2026-03-25 (Respect `esp_rw = N` for MA* Live Routing)
 - Fixed the router so `MAP` / `MAS` / `MAE` / `MAW` parameters with `esp_rw = N` stay Raspi-local even when ESP live mode is enabled.
 - This closes the mismatch where the simulation path accepted local-only parameters such as `MAS0029`, but the real ESP path still forwarded them and collapsed the device-side rejection into `NAK_DeviceRejected`.

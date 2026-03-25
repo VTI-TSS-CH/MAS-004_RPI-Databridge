@@ -22,6 +22,7 @@
 - Routing detail for `MA*` parameters:
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path
+- VJ6530 live reads/writes now retry once inside `device_bridge.py` before falling back to cached values or surfacing `NAK_DeviceComm`.
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
 

@@ -75,6 +75,22 @@ class DeviceBridge:
         except Exception as exc:
             self.logs.log("vj6530", "info", f"6530 cache warmup skipped: {repr(exc)}")
 
+    def _call_zbc_bridge(self, fn, pkey: str, op: str):
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 3):
+            try:
+                return fn()
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= 2:
+                    raise
+                if hasattr(self._zbc_bridge, "invalidate_current_parameters_cache"):
+                    self._zbc_bridge.invalidate_current_parameters_cache()
+                if hasattr(self._zbc_bridge, "invalidate_summary_cache"):
+                    self._zbc_bridge.invalidate_summary_cache()
+                self.logs.log("vj6530", "info", f"retry {op} for {pkey} after {repr(exc)}")
+        raise last_exc  # pragma: no cover
+
     def _is_simulation(self, device: str) -> bool:
         if device == "esp-plc":
             return bool(self.cfg.esp_simulation)
@@ -142,7 +158,7 @@ class DeviceBridge:
                 if zbc_upper.startswith("STATUS[") or zbc_upper.startswith("STS[") or zbc_upper.startswith("IRQ{"):
                     return f"{pkey}={self.params.get_effective_value(pkey)}"
                 try:
-                    resolved = self._zbc_bridge.read_mapped_value(zbc_mapping)
+                    resolved = self._call_zbc_bridge(lambda: self._zbc_bridge.read_mapped_value(zbc_mapping), pkey, "read")
                 except Exception as exc:
                     cached_value = self.params.get_effective_value(pkey)
                     self.logs.log("vj6530", "info", f"live read fallback for {pkey}: {repr(exc)}")
@@ -154,7 +170,11 @@ class DeviceBridge:
                     return f"{pkey}={msg}"
                 return f"{pkey}={resolved}"
 
-            message_id, verified = self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True)
+            message_id, verified = self._call_zbc_bridge(
+                lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
+                pkey,
+                "write",
+            )
             if int(message_id) != 0:
                 return f"{pkey}=NAK_ZBC_{int(message_id):04X}"
             stored_value = verified if verified is not None else str(value)
