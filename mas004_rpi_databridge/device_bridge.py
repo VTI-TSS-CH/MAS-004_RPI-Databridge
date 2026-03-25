@@ -65,6 +65,8 @@ class DeviceBridge:
             return f"{pkey}=NAK_DeviceComm"
 
     def warm_device_caches(self):
+        if bool(getattr(self.cfg, "vj6530_async_enabled", True)):
+            return
         if self._is_simulation("vj6530"):
             return
         if not (self.cfg.vj6530_host or "").strip() or int(self.cfg.vj6530_port or 0) <= 0:

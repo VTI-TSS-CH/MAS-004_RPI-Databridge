@@ -11,6 +11,7 @@ from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
+from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 
 def _channel_for_operation(params: ParamStore, ptype: str, pid: str) -> str:
@@ -129,6 +130,8 @@ class Router:
 
     def _refresh_vj6530_state_after_success(self, device: str, op: str, pkey: str):
         if device != "vj6530" or op != "write":
+            return
+        if bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active():
             return
         try:
             result = Vj6530Poller(self.cfg, self.params, self.logs, self.outbox).poll_once()
