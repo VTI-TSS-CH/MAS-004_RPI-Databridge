@@ -52,6 +52,7 @@
 ## Current LIVE Runtime Snapshot (2026-03-25)
 - Captured from `/etc/mas004_rpi_databridge/config.json` on the Microtom LIVE Raspberry.
 - This runtime configuration is intentionally not version-controlled and must not be overwritten by a code-only deployment.
+- The LIVE Raspberry timezone is expected to stay on `Europe/Zurich` and should be treated as an OS-level invariant, not a Databridge config field.
 - Current operational values:
   - `eth0_ip = 192.168.210.20`
   - `eth1_ip = 192.168.2.100`

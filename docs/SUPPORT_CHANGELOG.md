@@ -1,5 +1,16 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (Settings UI: System Time / Timezone / NTP Status)
+- Added token-protected endpoint `GET /api/system/time`.
+- `ui/settings` now shows:
+  - current local system time
+  - current system timezone
+  - synchronized yes/no state
+  - OS NTP service state
+  - detected OS time source
+- This status is read-only and complements the existing Databridge-side `ntp_server` / `ntp_sync_interval_min` settings.
+- Clarified operational expectation: the Microtom LIVE Raspberry remains in timezone `Europe/Zurich`.
+
 ## 2026-03-25 (Production Logfiles via MAS0002 / MAS0029 / MAS0030)
 - Added `mas004_rpi_databridge/production_logs.py`.
 - Production log capture is now controlled by MAS status values:

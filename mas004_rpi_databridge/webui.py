@@ -46,6 +46,78 @@ def require_token_or_shared_secret(x_token: Optional[str], x_shared_secret: Opti
     require_shared_secret(x_shared_secret, cfg)
 
 
+def get_current_time_info() -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "ok": True,
+        "local_time": "",
+        "universal_time": "",
+        "rtc_time": "",
+        "time_zone": "",
+        "system_clock_synchronized": "",
+        "ntp_service": "",
+        "rtc_in_local_tz": "",
+        "timesync_server": "",
+        "timesync_address": "",
+    }
+
+    try:
+        proc = subprocess.run(
+            ["timedatectl"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if ":" not in line:
+                continue
+            key, value = [part.strip() for part in line.split(":", 1)]
+            key_l = key.lower()
+            if key_l == "local time":
+                info["local_time"] = value
+            elif key_l == "universal time":
+                info["universal_time"] = value
+            elif key_l == "rtc time":
+                info["rtc_time"] = value
+            elif key_l == "time zone":
+                info["time_zone"] = value
+            elif key_l == "system clock synchronized":
+                info["system_clock_synchronized"] = value
+            elif key_l == "ntp service":
+                info["ntp_service"] = value
+            elif key_l == "rtc in local tz":
+                info["rtc_in_local_tz"] = value
+    except Exception as e:
+        info["ok"] = False
+        info["error"] = f"timedatectl failed: {e}"
+        return info
+
+    try:
+        proc = subprocess.run(
+            ["timedatectl", "show-timesync", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0:
+            for raw_line in (proc.stdout or "").splitlines():
+                line = raw_line.strip()
+                if "=" not in line:
+                    continue
+                key, value = [part.strip() for part in line.split("=", 1)]
+                if key == "ServerName":
+                    info["timesync_server"] = value
+                elif key == "ServerAddress":
+                    info["timesync_address"] = value
+    except Exception:
+        pass
+
+    return info
+
+
 class ConfigUpdate(BaseModel):
     # Microtom
     peer_base_url: Optional[str] = None
@@ -511,6 +583,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "eth1_ip": cfg2.eth1_ip, "eth1_subnet": cfg2.eth1_subnet, "eth1_gateway": cfg2.eth1_gateway,
             "eth1_dns": getattr(cfg2, "eth1_dns", ""),
         }, "status": get_current_ip_info()}
+
+    @app.get("/api/system/time")
+    def get_system_time(x_token: Optional[str] = Header(default=None)):
+        cfg2 = Settings.load(cfg_path)
+        require_token(x_token, cfg2)
+        return get_current_time_info()
 
     @app.post("/api/system/network")
     def set_network(req: NetworkUpdate, x_token: Optional[str] = Header(default=None)):
@@ -1403,6 +1481,14 @@ load();
       <div class="field"><label>ntp_sync_interval_min</label><input id="ntp_sync_interval_min" type="number" min="1" max="1440"/></div>
     </div>
     <div class="muted">NTP: Raspi synchronisiert die Zeit zyklisch gegen den konfigurierten Server.</div>
+    <div class="grid cols-5" style="margin-top:8px;">
+      <div class="field"><label>System local time</label><input id="sys_local_time" readonly/></div>
+      <div class="field"><label>Time zone</label><input id="sys_time_zone" readonly/></div>
+      <div class="field"><label>Clock synchronized</label><input id="sys_clock_sync" readonly/></div>
+      <div class="field"><label>OS NTP service</label><input id="sys_ntp_service" readonly/></div>
+      <div class="field"><label>OS time source</label><input id="sys_timesync_server" readonly/></div>
+    </div>
+    <div class="muted" id="sys_time_hint">Systemzeit/Zeitzone des Raspi. Zeitzone wird vom Betriebssystem vorgegeben, nicht vom Databridge-NTP-Feld.</div>
     <div class="grid">
       <div class="field">
         <label>shared_secret</label>
@@ -1701,6 +1787,18 @@ async function reloadAll(){
   document.getElementById("eth1_dns").value = n.eth1_dns || "";
 
   document.getElementById("netinfo").textContent = JSON.stringify(net.status, null, 2);
+  const ti = await api("/api/system/time");
+  document.getElementById("sys_local_time").value = ti.local_time || "";
+  document.getElementById("sys_time_zone").value = ti.time_zone || "";
+  document.getElementById("sys_clock_sync").value = ti.system_clock_synchronized || "";
+  document.getElementById("sys_ntp_service").value = ti.ntp_service || "";
+  document.getElementById("sys_timesync_server").value = ti.timesync_server || ti.timesync_address || "";
+  const tiHint = document.getElementById("sys_time_hint");
+  if(ti.ok === false && ti.error){
+    tiHint.textContent = `Systemzeit-Status konnte nicht gelesen werden: ${ti.error}`;
+  }else{
+    tiHint.textContent = "Systemzeit/Zeitzone des Raspi. Zeitzone wird vom Betriebssystem vorgegeben, nicht vom Databridge-NTP-Feld.";
+  }
   await loadDailyLogFiles();
   await loadProductionLogFiles();
 }
