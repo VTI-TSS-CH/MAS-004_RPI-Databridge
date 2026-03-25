@@ -3,6 +3,7 @@
 ## 2026-03-25 (6530 Immediate ACK + Non-Blocking Event Fanout)
 - The queued 6530 owner-session write path now returns success to the caller as soon as the live write itself succeeds; the post-write summary settle still runs, but no longer causes false `NAK_DeviceComm` on slow state transitions such as `TTS0001=3`.
 - Runtime-session 6530 writes now wait longer before timing out, matching the observed `STARTUP -> START` transition time on the real TEST printer.
+- The owner-session timeout budget for queued 6530 writes is now deliberately larger than the shared-library settle window, so the Databridge does not abort slow `SHUTDOWN -> ONLINE` transitions before the library has finished waiting for the real target state.
 - 6530 async summary updates now enqueue all Microtom notifications before any ESP mirror attempt starts, so slow or failing ESP mirrors no longer delay `TTP00073` / `TTP00076` / `TTS0001` delivery to Microtom.
 - The async keepalive cadence was tightened from ~8s to ~5s to give more headroom before the printer closes an idle TCP AIS session.
 - The fallback poller now stands down for a short grace window after a fresh async event and discards any overlapping poll result if async state arrived first.

@@ -488,6 +488,7 @@ class DeviceBridgeTtoMappingTests(unittest.TestCase):
             self.assertEqual([], fake.write_calls)
             self.assertEqual("3", params.get_effective_value("TTS0001"))
             self.assertEqual("write_mapped_value", runtime.calls[0][0])
+            self.assertGreaterEqual(float(runtime.calls[0][2].get("timeout_s", 0.0) or 0.0), 72.0)
 
     def test_current_parameter_read_falls_back_to_cached_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:

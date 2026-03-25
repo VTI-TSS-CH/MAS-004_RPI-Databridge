@@ -187,7 +187,7 @@ class DeviceBridge:
                         zbc_mapping,
                         value,
                         verify_readback=True,
-                        timeout_s=max(10.0, float(self.cfg.http_timeout_s or 5.0) + 35.0),
+                        timeout_s=max(20.0, float(self.cfg.http_timeout_s or 5.0) + 70.0),
                     )
                 else:
                     message_id, verified = self._call_zbc_bridge(

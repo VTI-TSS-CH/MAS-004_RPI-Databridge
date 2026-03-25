@@ -29,6 +29,7 @@
   - it keeps `AIS` alive with periodic empty `IRQ([])` keepalives on a tighter ~5s cadence
   - synchronous 6530 mapping reads/writes are handed into that owner session instead of opening a second parallel control connection whenever async ownership is active
 - Queued 6530 writes now return success as soon as the live write itself completes; the follow-up summary settle still runs in-session, but no longer blocks or falsely NAKs slow printer transitions.
+- The Databridge owner-session timeout for queued 6530 writes is intentionally larger than the shared-library state-settle window, so slow `6 -> 3` transitions are not aborted prematurely at the Raspi layer.
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
 - Async summary fanout is ordered so all Microtom notifications are queued before any ESP mirror attempt starts, preventing ESP-side delays from holding back Microtom state delivery.
 - The fallback poller now yields to recent async events and will discard overlapping stale poll results instead of overwriting a fresher async state transition.
