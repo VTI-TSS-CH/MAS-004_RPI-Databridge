@@ -1,5 +1,16 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (6530 AIS Priority + Immediate Snapshot Push)
+- The 6530 async owner now subscribes to online/offline/warning/fault plus print-failed AIS events with the high-priority flag, matching the real-time requirement from the ZBC spec for critical state changes.
+- Incoming AIR tag changes now update workbook-backed `STATUS[...]` / `STS[...]` rows immediately from the async snapshot before the slower summary settle runs.
+- Result: `TTP00073`, `TTP00076`, `TTS0001` and similar state rows no longer have to wait for the summary reread before they can be forwarded to Microtom / ESP.
+- Session-owner requests now temporarily raise the live ZBC response-time budget per operation, so slow `CMD_STARTUP` / `CMD_START` transitions no longer fail early with `NAK_DeviceComm` just because the listener keeps a short unsolicited receive timeout.
+- The fallback poller now also stands down while the async owner session is healthy, not only after a fresh async event, reducing stale or delayed poll-derived state updates.
+- Added regression coverage for:
+  - immediate snapshot-driven state fanout from async events
+  - write requests using the longer owner-session response timeout
+  - poller stand-down while the async owner is healthy
+
 ## 2026-03-25 (6530 Immediate ACK + Non-Blocking Event Fanout)
 - The queued 6530 owner-session write path now returns success to the caller as soon as the live write itself succeeds; the post-write summary settle still runs, but no longer causes false `NAK_DeviceComm` on slow state transitions such as `TTS0001=3`.
 - Runtime-session 6530 writes now wait longer before timing out, matching the observed `STARTUP -> START` transition time on the real TEST printer.

@@ -54,7 +54,9 @@
 - Shared-secret and peer URL still valid after config changes
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - Expect the 6530 async path to be primary for online/offline/warning/fault changes; the poller is fallback/reconciliation only.
+- Expect critical 6530 status flips (online/offline/warning/fault) to arrive via high-priority AIS and update `STATUS[...]` / `STS[...]` workbook rows immediately from the async snapshot, before the slower summary settle finishes.
 - Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
+- If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
 - If a 6530 state change reaches Microtom late, inspect whether the delay came from ESP mirror attempts rather than the ZBC async path; Microtom delivery should now be queued before ESP mirroring starts.
 - ESP write smoke test for `TTS0001`:
   - from `6`: `TTS0001=0` -> printer starts up into `0 OFFLINE`

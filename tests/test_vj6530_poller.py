@@ -44,6 +44,7 @@ class RuntimeSessionStub:
         self.result = result
         self.calls = []
         self._recent_event = False
+        self._recent_ok = False
 
     def session_active(self) -> bool:
         return True
@@ -51,8 +52,14 @@ class RuntimeSessionStub:
     def mark_async_event(self):
         self._recent_event = True
 
+    def mark_async_ok(self):
+        self._recent_ok = True
+
     def async_event_recent(self, max_age_s: float) -> bool:
         return self._recent_event
+
+    def async_recent(self, max_age_s: float) -> bool:
+        return self._recent_ok
 
     def submit_session_request(self, operation: str, *args, **kwargs):
         self.calls.append((operation, args, kwargs))
@@ -306,6 +313,41 @@ class Vj6530PollerTests(unittest.TestCase):
             original_runtime = poller_module.VJ6530_RUNTIME
             runtime = RuntimeSessionStub({})
             runtime.mark_async_event()
+            poller_module.VJ6530_RUNTIME = runtime
+            try:
+                poller = Vj6530Poller(
+                    cfg,
+                    params,
+                    logs,
+                    outbox,
+                    client_factory=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("direct client should not be used")),
+                )
+                result = poller.poll_once()
+            finally:
+                poller_module.VJ6530_RUNTIME = original_runtime
+
+            self.assertEqual({"checked": 0, "changed": 0, "forwarded": 0}, result)
+
+    def test_poll_once_skips_when_async_owner_is_healthy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                vj6530_async_enabled=True,
+                http_timeout_s=5.0,
+                peer_base_url="https://10.27.67.135:9090",
+                peer_base_url_secondary="",
+                esp_host="",
+                esp_port=0,
+            )
+
+            original_runtime = poller_module.VJ6530_RUNTIME
+            runtime = RuntimeSessionStub({})
+            runtime.mark_async_ok()
             poller_module.VJ6530_RUNTIME = runtime
             try:
                 poller = Vj6530Poller(

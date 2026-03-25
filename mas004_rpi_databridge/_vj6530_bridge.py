@@ -32,6 +32,7 @@ from mas004_vj6530_zbc_bridge._zbc_library import (  # type: ignore[attr-defined
     ZbcClient,
     parse_zbc_mapping,
     resolve_summary_mappings,
+    snapshot_to_status_values,
     summary_to_status_values,
 )
 
@@ -44,5 +45,6 @@ __all__ = [
     "ZbcClient",
     "parse_zbc_mapping",
     "resolve_summary_mappings",
+    "snapshot_to_status_values",
     "summary_to_status_values",
 ]

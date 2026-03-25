@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import replace
 import socket
 import time
@@ -10,6 +11,7 @@ from mas004_rpi_databridge._vj6530_bridge import (
     VJ6530_TCP_NO_CRC_PROFILE,
     ZbcClient,
     resolve_summary_mappings,
+    snapshot_to_status_values,
 )
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_bridge import DeviceBridge
@@ -19,23 +21,27 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
+_AIS_FLAG_HIGH_PRIORITY = 0x00000080
 _ASYNC_SUBSCRIPTIONS = [
-    (int(AsyncSubscriptionId.PRINTER_IS_ONLINE), 0),
-    (int(AsyncSubscriptionId.PRINTER_IS_OFFLINE), 0),
-    (int(AsyncSubscriptionId.PRINTER_ENTERS_WARNING), 0),
-    (int(AsyncSubscriptionId.PRINTER_LEAVES_WARNING), 0),
-    (int(AsyncSubscriptionId.PRINTER_ENTERS_FAULT), 0),
-    (int(AsyncSubscriptionId.PRINTER_LEAVES_FAULT), 0),
+    (int(AsyncSubscriptionId.PRINTER_IS_ONLINE), _AIS_FLAG_HIGH_PRIORITY),
+    (int(AsyncSubscriptionId.PRINTER_IS_OFFLINE), _AIS_FLAG_HIGH_PRIORITY),
+    (int(AsyncSubscriptionId.PRINTER_ENTERS_WARNING), _AIS_FLAG_HIGH_PRIORITY),
+    (int(AsyncSubscriptionId.PRINTER_LEAVES_WARNING), _AIS_FLAG_HIGH_PRIORITY),
+    (int(AsyncSubscriptionId.PRINTER_ENTERS_FAULT), _AIS_FLAG_HIGH_PRIORITY),
+    (int(AsyncSubscriptionId.PRINTER_LEAVES_FAULT), _AIS_FLAG_HIGH_PRIORITY),
     (int(AsyncSubscriptionId.PRINTER_IS_BUSY), 0),
     (int(AsyncSubscriptionId.PRINTER_IS_NOT_BUSY), 0),
     (int(AsyncSubscriptionId.PRINTER_STARTS_PRINTING), 0),
     (int(AsyncSubscriptionId.PRINTER_FINISHES_PRINTING), 0),
-    (int(AsyncSubscriptionId.PRINT_FAILED), 0),
+    (int(AsyncSubscriptionId.PRINT_FAILED), _AIS_FLAG_HIGH_PRIORITY),
 ]
 _ASYNC_SUMMARY_SETTLE_S = 3.0
 _ASYNC_SUMMARY_RETRY_S = 0.25
 _ASYNC_KEEPALIVE_S = 5.0
 _ASYNC_RESPONSE_TIMEOUT_S = 1.0
+_ASYNC_SUMMARY_RESPONSE_TIMEOUT_S = 6.0
+_ASYNC_SESSION_READ_RESPONSE_TIMEOUT_S = 6.0
+_ASYNC_SESSION_WRITE_RESPONSE_TIMEOUT_S = 60.0
 
 
 class Vj6530AsyncListener:
@@ -103,6 +109,7 @@ class Vj6530AsyncListener:
                 self.logs.log("vj6530", "in", f"async tags={','.join(f'0x{tag_id:04X}' for tag_id in tag_ids)}")
                 self._status_snapshot.update(_status_updates_from_async(tag_ids))
                 VJ6530_RUNTIME.mark_async_event()
+                self._sync_from_snapshot()
 
                 if _needs_summary_sync(tag_ids):
                     try:
@@ -156,7 +163,9 @@ class Vj6530AsyncListener:
                 kwargs = dict(request.kwargs)
                 if request.operation == "write_mapped_value":
                     kwargs.pop("verify_readback", None)
-                result = fn(*request.args, **kwargs)
+                response_timeout_s = _session_request_response_timeout_s(self.cfg, request.operation)
+                with _temporary_client_timeouts(client, response_timeout_s=response_timeout_s):
+                    result = fn(*request.args, **kwargs)
                 VJ6530_RUNTIME.mark_async_ok()
                 if request.operation.startswith("write_"):
                     request.set_result(result)
@@ -173,27 +182,42 @@ class Vj6530AsyncListener:
         deadline = time.monotonic() + max(0.0, float(settle_s or 0.0))
         total_changed = 0
         stable_reads = 0
-        while True:
-            changed = self._sync_from_summary(client.request_summary_info(force_refresh=True))
-            total_changed += changed
-            if changed > 0:
-                stable_reads = 0
-            else:
-                stable_reads += 1
-            if stable_reads >= 2 or time.monotonic() >= deadline:
-                return total_changed
-            time.sleep(_ASYNC_SUMMARY_RETRY_S)
+        response_timeout_s = max(_ASYNC_SUMMARY_RESPONSE_TIMEOUT_S, float(self.cfg.http_timeout_s or 5.0) + 1.0)
+        with _temporary_client_timeouts(client, response_timeout_s=response_timeout_s):
+            while True:
+                changed = self._sync_from_summary(client.request_summary_info(force_refresh=True))
+                total_changed += changed
+                if changed > 0:
+                    stable_reads = 0
+                else:
+                    stable_reads += 1
+                if stable_reads >= 2 or time.monotonic() >= deadline:
+                    return total_changed
+                time.sleep(_ASYNC_SUMMARY_RETRY_S)
 
-    def _sync_from_summary(self, summary) -> int:
+    def _iter_vj6530_rows(self):
         rows = []
         rows.extend(self.params.list_params(ptype="TTP", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTE", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTW", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTS", limit=5000, offset=0))
+        return rows
 
+    def _sync_from_snapshot(self) -> int:
+        status_values = snapshot_to_status_values(self._status_snapshot)
+        resolved: dict[str, str | None] = {}
+        for row in self._iter_vj6530_rows():
+            pkey = str(row.get("pkey") or "").strip()
+            mapping = str(row.get("zbc_mapping") or "").strip()
+            status_name = _status_mapping_name(mapping)
+            if not pkey or not status_name:
+                continue
+            resolved[pkey] = _status_value_as_text(status_values, status_name)
+        return self._apply_resolved_values(resolved)
+
+    def _sync_from_summary(self, summary) -> int:
         mapping_by_key: dict[str, str] = {}
-        current_by_key: dict[str, str] = {}
-        for row in rows:
+        for row in self._iter_vj6530_rows():
             pkey = str(row.get("pkey") or "").strip()
             mapping = str(row.get("zbc_mapping") or "").strip()
             upper = mapping.upper()
@@ -202,21 +226,21 @@ class Vj6530AsyncListener:
             if not (upper.startswith("STATUS[") or upper.startswith("STS[") or upper.startswith("IRQ{")):
                 continue
             mapping_by_key[pkey] = mapping
-            current_by_key[pkey] = str(row.get("effective_v") if row.get("effective_v") is not None else "0")
 
         if not mapping_by_key:
             return 0
 
         resolved = resolve_summary_mappings(mapping_by_key, summary, snapshot=self._status_snapshot)
-        targets = peer_urls(self.cfg, "/api/inbox")
-        changed = 0
-        changed_lines: list[tuple[str, str]] = []
+        return self._apply_resolved_values(resolved)
 
+    def _apply_resolved_values(self, resolved: dict[str, str | None]) -> int:
+        changed_lines: list[tuple[str, str]] = []
         for pkey, new_value in resolved.items():
             if new_value is None:
                 continue
             new_text = str(new_value)
-            if current_by_key.get(pkey, "0") == new_text:
+            current_text = str(self.params.get_effective_value(pkey) or "0")
+            if current_text == new_text:
                 continue
 
             ok, msg = self.params.apply_device_value(pkey, new_text, promote_default=True)
@@ -227,9 +251,13 @@ class Vj6530AsyncListener:
             line = f"{pkey}={new_text}"
             self.logs.log("vj6530", "in", f"async: {line}")
             self.logs.log("raspi", "in", f"vj6530 async: {line}")
-            changed += 1
             changed_lines.append((pkey, new_text))
 
+        self._forward_changed_lines(changed_lines)
+        return len(changed_lines)
+
+    def _forward_changed_lines(self, changed_lines: list[tuple[str, str]]):
+        targets = peer_urls(self.cfg, "/api/inbox")
         for pkey, new_text in changed_lines:
             line = f"{pkey}={new_text}"
             if self.params.can_actor_read(pkey, actor="microtom"):
@@ -255,7 +283,6 @@ class Vj6530AsyncListener:
                     self.logs.log("raspi", "out", f"forward to esp-plc: {line}")
                 else:
                     self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
-        return changed
 
 
 def _needs_summary_sync(tag_ids: list[int]) -> bool:
@@ -303,3 +330,55 @@ def _status_updates_from_async(tag_ids: list[int]) -> dict[str, bool]:
         elif tag_id in (int(AsyncSubscriptionId.PRINTER_FINISHES_PRINTING), int(AsyncSubscriptionId.PRINT_FAILED)):
             updates["printer_printing"] = False
     return updates
+
+
+def _temporary_client_timeouts(client: ZbcClient, *, response_timeout_s: float | None = None, ack_timeout_s: float | None = None):
+    override = getattr(client, "temporary_timeouts", None)
+    if callable(override):
+        return override(response_timeout_s=response_timeout_s, ack_timeout_s=ack_timeout_s)
+    return nullcontext()
+
+
+def _session_request_response_timeout_s(cfg: Settings, operation: str) -> float:
+    op = str(operation or "").strip().lower()
+    base = float(getattr(cfg, "http_timeout_s", 5.0) or 5.0)
+    if op.startswith("write_"):
+        return max(_ASYNC_SESSION_WRITE_RESPONSE_TIMEOUT_S, base + 5.0)
+    if op.startswith("read_"):
+        return max(_ASYNC_SESSION_READ_RESPONSE_TIMEOUT_S, base + 1.0)
+    return max(_ASYNC_SUMMARY_RESPONSE_TIMEOUT_S, base + 1.0)
+
+
+def _status_mapping_name(mapping: str) -> str | None:
+    text = str(mapping or "").strip()
+    upper = text.upper()
+    if not (upper.startswith("STATUS[") or upper.startswith("STS[")):
+        return None
+    start = text.find("[")
+    end = text.find("]", start + 1)
+    if start < 0 or end <= start:
+        return None
+    name = text[start + 1:end].strip().upper()
+    return name or None
+
+
+def _status_value_as_text(status_values: dict[str, object], name: str) -> str | None:
+    key = (name or "").strip().upper()
+    value = {
+        "PRINTER_ONLINE": status_values.get("printer_online"),
+        "PRINTER_POWERED_DOWN": status_values.get("printer_powered_down"),
+        "PRINTER_FAULT": status_values.get("printer_fault"),
+        "PRINTER_WARNING": status_values.get("printer_warning"),
+        "PRINTER_IMAGING": status_values.get("printer_imaging"),
+        "PRINTER_BUSY": status_values.get("printer_busy"),
+        "PRINTER_PRINTING": status_values.get("printer_printing"),
+        "PRINTER_ACTIVE_ERROR_TYPE": status_values.get("printer_active_error_type"),
+        "PRINTER_ACTIVE_ERROR_STRING": status_values.get("printer_active_error_string"),
+        "PRINTER_STATE_TEXT": status_values.get("printer_state_text"),
+        "PRINTER_STATE_CODE": status_values.get("printer_state_code"),
+    }.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)

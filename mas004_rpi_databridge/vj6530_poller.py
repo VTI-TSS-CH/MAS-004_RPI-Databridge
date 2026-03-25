@@ -28,6 +28,13 @@ class Vj6530Poller:
         self.client_factory = client_factory
 
     def poll_once(self) -> dict[str, int]:
+        if (
+            bool(getattr(self.cfg, "vj6530_async_enabled", True))
+            and VJ6530_RUNTIME.session_active()
+            and VJ6530_RUNTIME.async_recent(max(6.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0) + 1.0))
+        ):
+            self.logs.log("raspi", "info", "skip vj6530 poll: async owner healthy")
+            return {"checked": 0, "changed": 0, "forwarded": 0}
         if bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.async_event_recent(10.0):
             self.logs.log("raspi", "info", "skip vj6530 poll: recent async event")
             return {"checked": 0, "changed": 0, "forwarded": 0}

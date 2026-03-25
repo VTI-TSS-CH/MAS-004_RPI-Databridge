@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 import sys
 import tempfile
 import unittest
@@ -43,6 +44,7 @@ class FakeAsyncClient:
         self.profile = SimpleNamespace(name="vj6530-tcp-no-crc")
         self.keepalive_calls = 0
         self.write_calls = []
+        self.timeout_overrides = []
 
     def subscribe_async(self, _subscriptions):
         return async_module.MessageId.NUL, object()
@@ -57,6 +59,10 @@ class FakeAsyncClient:
     def write_mapped_value(self, mapping: str, value: str):
         self.write_calls.append((mapping, value))
         return async_module.MessageId.NUL, str(value)
+
+    def temporary_timeouts(self, *, response_timeout_s=None, ack_timeout_s=None):
+        self.timeout_overrides.append((response_timeout_s, ack_timeout_s))
+        return nullcontext()
 
     def receive_unsolicited(self):
         raise socket.timeout()
@@ -251,6 +257,81 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
                 fake_bridge.calls,
             )
 
+    def test_sync_from_snapshot_pushes_state_immediately_from_async_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+
+            with db._conn() as c:
+                for pkey, ptype, pid, rw, esp_rw, mapping in (
+                    ("TTP00076", "TTP", "0076", "R", "W", "STATUS[PRINTER_STATE_TEXT]"),
+                    ("TTS0001", "TTS", "0001", "R", "W", "STATUS[PRINTER_STATE_CODE]"),
+                ):
+                    c.execute(
+                        """INSERT INTO params(
+                            pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                            message,possible_cause,effects,remedy,updated_ts
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            pkey,
+                            ptype,
+                            pid,
+                            0,
+                            6,
+                            "0",
+                            "",
+                            rw,
+                            esp_rw,
+                            "string",
+                            pkey,
+                            "NO",
+                            None,
+                            None,
+                            None,
+                            None,
+                            now_ts(),
+                        ),
+                    )
+                    c.execute(
+                        """INSERT INTO param_device_map(
+                            pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                            zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (pkey, None, mapping, None, None, None, None, None, None, None, None, now_ts()),
+                    )
+
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                http_timeout_s=5.0,
+                peer_base_url="https://10.27.67.135:9090",
+                peer_base_url_secondary="",
+                esp_host="192.168.2.101",
+                esp_port=3010,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            listener = Vj6530AsyncListener(cfg, params, logs, outbox)
+            fake_bridge = FakeDeviceBridge()
+            listener.device_bridge = fake_bridge
+            listener._status_snapshot.update({"printer_online": True, "printer_fault": False, "printer_warning": False})
+
+            changed = listener._sync_from_snapshot()
+
+            self.assertEqual(2, changed)
+            self.assertEqual("ONLINE", params.get_effective_value("TTP00076"))
+            self.assertEqual("3", params.get_effective_value("TTS0001"))
+            self.assertEqual([("TTP00076", "ONLINE"), ("TTS0001", "3")], fake_bridge.calls)
+
     def test_run_session_marks_async_ok_before_startup_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = DB(str(Path(tmpdir) / "db.sqlite3"))
@@ -295,6 +376,7 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
 
     def test_drain_session_requests_strips_verify_readback_for_zbc_client(self):
         listener = object.__new__(Vj6530AsyncListener)
+        listener.cfg = SimpleNamespace(http_timeout_s=5.0)
         listener.logs = FakeLogs()
         listener._sync_summary_until_stable = lambda client, settle_s: 0
         fake_client = FakeAsyncClient()
@@ -324,6 +406,7 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
             thread.join(timeout=1.0)
             self.assertTrue(handled)
             self.assertEqual([("STATUS[PRINTER_STATE_CODE]", "3")], fake_client.write_calls)
+            self.assertEqual([(60.0, None)], fake_client.timeout_overrides)
         finally:
             async_module.VJ6530_RUNTIME = original_runtime
 
