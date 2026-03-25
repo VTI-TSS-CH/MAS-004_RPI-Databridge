@@ -19,6 +19,9 @@
   - `production_logs.py` manages start/stop state from `MAS0002`, batch label from `MAS0029` and ready flag `MAS0030`
   - `logstore.py` mirrors active communication into production-specific TXT logs (`Gesamtanlage`, `ESP`, `TTO`, `Laser`)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
+- Routing detail for `MA*` parameters:
+  - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
+  - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
 
@@ -79,6 +82,9 @@
 - All multi-repo operations should start here.
 - The recommended long-term master orchestration prompt and sub-agent topology live in:
   - `docs/MAS-004_Roche_Master_Chat.md`
+- The sub-agent names defined there are canonical project identities.
+- If the tool session drops or parks a sub-agent thread, the master chat must rehydrate it under the same name before delegation continues.
+- Current platform behavior may cap the number of simultaneously live sub-agent threads below the full MAS-004 role map; this does not change ownership boundaries.
 
 ## Multi-Repo Dependency Map
 - `MAS-004_ESP32-PLC-Bridge`: ESP32 transport/probe subproject

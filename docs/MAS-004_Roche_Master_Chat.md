@@ -189,6 +189,13 @@ This agent should be pulled in whenever a change affects:
    - dirty/clean state per repo
 4. Reuse the same sub-agent names across the whole project lifespan.
 
+## Session Persistence / Rehydration Rule
+- Treat the named agents as canonical project roles, not as disposable one-off helpers.
+- The execution environment may expose fewer simultaneous live agent threads than the full MAS-004 role set.
+- If a named sub-agent is no longer live in the UI, immediately re-create it under the exact same canonical name before delegating work.
+- Never rename a role, merge two role names, or silently reassign ownership because an earlier thread expired.
+- Report which named agents are currently live and which ones are temporarily parked behind the platform slot limit.
+
 ## Why this split scales well
 - The main repo stays the orchestration authority.
 - Shared semantics (Excel/parameter model) do not get buried inside a single bridge repo.

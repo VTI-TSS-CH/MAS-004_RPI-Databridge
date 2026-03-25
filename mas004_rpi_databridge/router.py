@@ -12,13 +12,17 @@ from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_lin
 from mas004_rpi_databridge.peers import peer_urls
 
 
-def _channel_for_ptype(ptype: str) -> str:
+def _channel_for_operation(params: ParamStore, ptype: str, pid: str) -> str:
     ptype = (ptype or "").upper()
     if ptype.startswith("TT"):  # TTP/TTE/TTW
         return "vj6530"
     if ptype.startswith("LS"):  # LSE/LSW
         return "vj3350"
     if ptype.startswith("MA"):  # MAP/MAS/MAE/MAW
+        pkey = f"{ptype}{pid}"
+        meta = params.get_meta(pkey)
+        if meta and params.actor_access(pkey, actor="esp32") == "N":
+            return "raspi"
         return "esp-plc"
     return "raspi"
 
@@ -79,7 +83,7 @@ class Router:
 
         ptype, pid, op, value = parsed
         pkey = f"{ptype}{pid}"
-        dev = _channel_for_ptype(ptype)
+        dev = _channel_for_operation(self.params, ptype, pid)
 
         self.logs.log("raspi", "in", f"microtom: {line}")
         self.logs.log(dev, "in", f"raspi-> {dev}: {line}")

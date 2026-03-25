@@ -1,5 +1,19 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (Respect `esp_rw = N` for MA* Live Routing)
+- Fixed the router so `MAP` / `MAS` / `MAE` / `MAW` parameters with `esp_rw = N` stay Raspi-local even when ESP live mode is enabled.
+- This closes the mismatch where the simulation path accepted local-only parameters such as `MAS0029`, but the real ESP path still forwarded them and collapsed the device-side rejection into `NAK_DeviceRejected`.
+- Added a regression test for:
+  - local-only `MAS0029` with `esp_rw = N`
+  - ESP-routed `MAS0026` with `esp_rw = W`
+
+## 2026-03-25 (Canonical Sub-Agent Rehydration Policy)
+- Clarified that the MAS-004 sub-agents are canonical long-lived project roles even if individual agent threads disappear from the UI.
+- Documented the required fallback for platform slot/session limits:
+  - re-create missing agents under the exact same canonical names before delegating further work
+  - keep ownership boundaries unchanged
+  - report which named agents are live versus temporarily parked behind the current slot limit
+
 ## 2026-03-25 (Master Chat / Sub-Agent Orchestration Blueprint)
 - Added `docs/MAS-004_Roche_Master_Chat.md` as the recommended bootstrap instruction for the future master chat `MAS-004_Roche`.
 - Defined a stable long-term sub-agent topology with dedicated owners for:
