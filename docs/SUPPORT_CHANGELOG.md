@@ -1,5 +1,15 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (6530 Immediate ACK + Non-Blocking Event Fanout)
+- The queued 6530 owner-session write path now returns success to the caller as soon as the live write itself succeeds; the post-write summary settle still runs, but no longer causes false `NAK_DeviceComm` on slow state transitions such as `TTS0001=3`.
+- Runtime-session 6530 writes now wait longer before timing out, matching the observed `STARTUP -> START` transition time on the real TEST printer.
+- 6530 async summary updates now enqueue all Microtom notifications before any ESP mirror attempt starts, so slow or failing ESP mirrors no longer delay `TTP00073` / `TTP00076` / `TTS0001` delivery to Microtom.
+- The async keepalive cadence was tightened from ~8s to ~5s to give more headroom before the printer closes an idle TCP AIS session.
+- Background 6530 cache warmup is now skipped entirely while async ownership is enabled, removing another avoidable second-client collision on `3002`.
+- Added regression coverage for:
+  - queued async-session writes returning before the post-write summary settle
+  - Microtom event enqueue staying complete even when the ESP mirror path is slow or failing
+
 ## 2026-03-25 (6530 Single-Owner Session + AIS Keepalive)
 - Live TEST verification against `192.168.2.103:3002` showed:
   - `AIS` without synchronous traffic is closed by the printer after roughly 15s

@@ -34,7 +34,7 @@ _ASYNC_SUBSCRIPTIONS = [
 ]
 _ASYNC_SUMMARY_SETTLE_S = 3.0
 _ASYNC_SUMMARY_RETRY_S = 0.25
-_ASYNC_KEEPALIVE_S = 8.0
+_ASYNC_KEEPALIVE_S = 5.0
 _ASYNC_RESPONSE_TIMEOUT_S = 1.0
 
 
@@ -159,10 +159,12 @@ class Vj6530AsyncListener:
                 result = fn(*request.args, **kwargs)
                 VJ6530_RUNTIME.mark_async_ok()
                 if request.operation.startswith("write_"):
+                    request.set_result(result)
                     try:
                         self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
                     except Exception as exc:
                         self.logs.log("vj6530", "info", f"async post-write summary skipped: {repr(exc)}")
+                    continue
                 request.set_result(result)
             except Exception as exc:
                 request.set_error(exc)
@@ -208,6 +210,7 @@ class Vj6530AsyncListener:
         resolved = resolve_summary_mappings(mapping_by_key, summary, snapshot=self._status_snapshot)
         targets = peer_urls(self.cfg, "/api/inbox")
         changed = 0
+        changed_lines: list[tuple[str, str]] = []
 
         for pkey, new_value in resolved.items():
             if new_value is None:
@@ -225,7 +228,10 @@ class Vj6530AsyncListener:
             self.logs.log("vj6530", "in", f"async: {line}")
             self.logs.log("raspi", "in", f"vj6530 async: {line}")
             changed += 1
+            changed_lines.append((pkey, new_text))
 
+        for pkey, new_text in changed_lines:
+            line = f"{pkey}={new_text}"
             if self.params.can_actor_read(pkey, actor="microtom"):
                 for url in targets:
                     self.outbox.enqueue(
@@ -241,6 +247,8 @@ class Vj6530AsyncListener:
             if targets and self.params.can_actor_read(pkey, actor="microtom"):
                 self.logs.log("raspi", "out", f"forward to microtom: {line}")
 
+        for pkey, new_text in changed_lines:
+            line = f"{pkey}={new_text}"
             if self.params.can_actor_read(pkey, actor="esp32"):
                 ok, detail = self.device_bridge.mirror_to_esp(pkey, new_text)
                 if ok:

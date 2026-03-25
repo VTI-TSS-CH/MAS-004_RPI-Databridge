@@ -55,6 +55,7 @@
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - Expect the 6530 async path to be primary for online/offline/warning/fault changes; the poller is fallback/reconciliation only.
 - Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
+- If a 6530 state change reaches Microtom late, inspect whether the delay came from ESP mirror attempts rather than the ZBC async path; Microtom delivery should now be queued before ESP mirroring starts.
 - ESP write smoke test for `TTS0001`:
   - from `6`: `TTS0001=0` -> printer starts up into `0 OFFLINE`
   - from `0`: `TTS0001=3` -> printer goes online

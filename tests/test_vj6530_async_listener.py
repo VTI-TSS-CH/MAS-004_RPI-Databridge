@@ -21,9 +21,12 @@ from mas004_rpi_databridge.vj6530_runtime import Vj6530RuntimeState
 class FakeDeviceBridge:
     def __init__(self):
         self.calls = []
+        self.raise_for = set()
 
     def mirror_to_esp(self, pkey: str, value: str):
         self.calls.append((pkey, value))
+        if pkey in self.raise_for:
+            return False, f"TimeoutError('mirror timeout for {pkey}')"
         return True, "OK"
 
 
@@ -153,6 +156,100 @@ class Vj6530AsyncListenerTests(unittest.TestCase):
                 bodies.append(json.loads(job.body_json)["msg"])
                 outbox.delete(job.id)
             self.assertEqual(["TTE1000=1", "TTS0001=5"], bodies)
+
+    def test_sync_from_summary_enqueues_microtom_before_slow_esp_mirror(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+
+            with db._conn() as c:
+                for pkey, ptype, pid, rw, esp_rw, mapping in (
+                    ("TTP00073", "TTP", "0073", "R", "W", "STATUS[PRINTER_BUSY]"),
+                    ("TTP00076", "TTP", "0076", "R", "W", "STATUS[PRINTER_STATE_TEXT]"),
+                    ("TTS0001", "TTS", "0001", "R", "W", "STATUS[PRINTER_STATE_CODE]"),
+                ):
+                    c.execute(
+                        """INSERT INTO params(
+                            pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                            message,possible_cause,effects,remedy,updated_ts
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            pkey,
+                            ptype,
+                            pid,
+                            0,
+                            6,
+                            "0",
+                            "",
+                            rw,
+                            esp_rw,
+                            "string",
+                            pkey,
+                            "NO",
+                            None,
+                            None,
+                            None,
+                            None,
+                            now_ts(),
+                        ),
+                    )
+                    c.execute(
+                        """INSERT INTO param_device_map(
+                            pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                            zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (pkey, None, mapping, None, None, None, None, None, None, None, None, now_ts()),
+                    )
+
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                http_timeout_s=5.0,
+                peer_base_url="https://10.27.67.135:9090",
+                peer_base_url_secondary="",
+                esp_host="192.168.2.101",
+                esp_port=3010,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            listener = Vj6530AsyncListener(cfg, params, logs, outbox)
+            fake_bridge = FakeDeviceBridge()
+            fake_bridge.raise_for.add("TTP00073")
+            listener.device_bridge = fake_bridge
+
+            original_resolve = async_module.resolve_summary_mappings
+            async_module.resolve_summary_mappings = lambda mappings, summary, snapshot=None: {
+                "TTP00073": "1",
+                "TTP00076": "ONLINE",
+                "TTS0001": "3",
+            }
+            try:
+                listener._sync_from_summary(object())
+            finally:
+                async_module.resolve_summary_mappings = original_resolve
+
+            bodies = []
+            while True:
+                job = outbox.next_due()
+                if job is None:
+                    break
+                bodies.append(json.loads(job.body_json)["msg"])
+                outbox.delete(job.id)
+
+            self.assertEqual(["TTP00073=1", "TTP00076=ONLINE", "TTS0001=3"], bodies)
+            self.assertEqual(
+                [("TTP00073", "1"), ("TTP00076", "ONLINE"), ("TTS0001", "3")],
+                fake_bridge.calls,
+            )
 
     def test_run_session_marks_async_ok_before_startup_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
