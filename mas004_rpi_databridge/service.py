@@ -17,6 +17,7 @@ from mas004_rpi_databridge.webui import build_app
 from mas004_rpi_databridge.ntp_sync import ntp_loop
 from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
 from mas004_rpi_databridge.tcp_forwarder import TcpForwarderManager
+from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
 from mas004_rpi_databridge.vj6530_async_listener import Vj6530AsyncListener
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
@@ -133,11 +134,15 @@ def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
 
 
 def vj6530_poll_loop(cfg_path: str):
+    cached_client = None
+    cached_sig = None
     while True:
         cfg = Settings.load(cfg_path)
         interval_s = max(0.5, float(getattr(cfg, "vj6530_poll_interval_s", 2.0) or 2.0))
 
         if bool(cfg.vj6530_simulation) or not (cfg.vj6530_host or "").strip() or int(cfg.vj6530_port or 0) <= 0:
+            cached_client = None
+            cached_sig = None
             time.sleep(interval_s)
             continue
 
@@ -145,12 +150,17 @@ def vj6530_poll_loop(cfg_path: str):
             time.sleep(interval_s)
             continue
 
+        client_sig = ((cfg.vj6530_host or "").strip(), int(cfg.vj6530_port or 0), float(cfg.http_timeout_s or 0.0))
+        if cached_client is None or client_sig != cached_sig:
+            cached_client = ZbcBridgeClient(cfg.vj6530_host, cfg.vj6530_port, timeout_s=cfg.http_timeout_s)
+            cached_sig = client_sig
+
         try:
             db = DB(cfg.db_path)
             params = ParamStore(db)
             logs = LogStore(db)
             outbox = Outbox(db)
-            poller = Vj6530Poller(cfg, params, logs, outbox)
+            poller = Vj6530Poller(cfg, params, logs, outbox, client_factory=lambda *_args, **_kwargs: cached_client)
             result = poller.poll_once()
             if result.get("changed"):
                 print(
@@ -159,6 +169,8 @@ def vj6530_poll_loop(cfg_path: str):
                     flush=True,
                 )
         except Exception as e:
+            cached_client = None
+            cached_sig = None
             print(f"[VJ6530-POLL] error: {repr(e)}", flush=True)
             time.sleep(min(interval_s, 2.0))
             continue
