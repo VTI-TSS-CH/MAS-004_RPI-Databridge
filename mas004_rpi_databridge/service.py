@@ -141,7 +141,7 @@ def vj6530_poll_loop(cfg_path: str):
             time.sleep(interval_s)
             continue
 
-        if bool(getattr(cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.async_recent(max(interval_s * 2.0, 45.0)):
+        if bool(getattr(cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.async_event_recent(max(interval_s * 2.0, 5.0)):
             time.sleep(interval_s)
             continue
 

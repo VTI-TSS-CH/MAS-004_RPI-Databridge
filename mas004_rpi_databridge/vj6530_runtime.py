@@ -33,6 +33,13 @@ class Vj6530RuntimeState:
             last_ok = self._last_async_ok_ts
         return (time.monotonic() - last_ok) <= max(0.0, float(max_age_s or 0.0))
 
+    def async_event_recent(self, max_age_s: float) -> bool:
+        with self._lock:
+            last_event = self._last_async_event_ts
+        if last_event <= 0.0:
+            return False
+        return (time.monotonic() - last_event) <= max(0.0, float(max_age_s or 0.0))
+
     def snapshot(self) -> dict[str, float | str]:
         with self._lock:
             return {

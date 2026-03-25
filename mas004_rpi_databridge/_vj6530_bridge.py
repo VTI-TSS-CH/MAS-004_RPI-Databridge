@@ -28,6 +28,7 @@ from mas004_vj6530_zbc_bridge import ZbcBridgeClient  # type: ignore[attr-define
 from mas004_vj6530_zbc_bridge._zbc_library import (  # type: ignore[attr-defined]
     AsyncSubscriptionId,
     MessageId,
+    VJ6530_TCP_NO_CRC_PROFILE,
     ZbcClient,
     parse_zbc_mapping,
     resolve_summary_mappings,
@@ -38,6 +39,7 @@ from mas004_vj6530_zbc_bridge._zbc_library import (  # type: ignore[attr-defined
 __all__ = [
     "AsyncSubscriptionId",
     "MessageId",
+    "VJ6530_TCP_NO_CRC_PROFILE",
     "ZbcBridgeClient",
     "ZbcClient",
     "parse_zbc_mapping",

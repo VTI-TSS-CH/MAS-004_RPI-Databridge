@@ -56,6 +56,38 @@ class QueueBehaviorTests(unittest.TestCase):
             )
             self.assertEqual(2, outbox.count())
 
+    def test_outbox_keeps_non_consecutive_value_changes_for_same_dedupe_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            outbox = Outbox(db)
+
+            outbox.enqueue(
+                "POST",
+                "https://peer/api/inbox",
+                {},
+                {"msg": "TTS0001=3", "source": "raspi", "origin": "vj6530"},
+                dedupe_key="vj6530:TTS0001",
+                drop_if_duplicate=True,
+            )
+            outbox.enqueue(
+                "POST",
+                "https://peer/api/inbox",
+                {},
+                {"msg": "TTS0001=0", "source": "raspi", "origin": "vj6530"},
+                dedupe_key="vj6530:TTS0001",
+                drop_if_duplicate=True,
+            )
+            outbox.enqueue(
+                "POST",
+                "https://peer/api/inbox",
+                {},
+                {"msg": "TTS0001=3", "source": "raspi", "origin": "vj6530"},
+                dedupe_key="vj6530:TTS0001",
+                drop_if_duplicate=True,
+            )
+
+            self.assertEqual(3, outbox.count())
+
     def test_inbox_and_outbox_can_be_cleared(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = DB(str(Path(tmpdir) / "db.sqlite3"))

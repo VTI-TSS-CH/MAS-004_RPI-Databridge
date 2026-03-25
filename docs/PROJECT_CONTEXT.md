@@ -23,6 +23,9 @@
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path
 - VJ6530 live reads/writes now retry once inside `device_bridge.py` before falling back to cached values or surfacing `NAK_DeviceComm`.
+- The 6530 async listener now prefers the live-verified no-CRC transport profile directly and only falls back to autodetect if that explicit profile fails.
+- Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
+- Outbox dedupe now only collapses consecutive identical values; non-consecutive state changes remain lossless.
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
 
@@ -102,6 +105,7 @@
   - `MAS-004_VJ6530-ZBC-Bridge` now consumes the shared library instead of maintaining a separate transport stack
   - the workbook now contains a dedicated `ESP32 R/W:` column in addition to Microtom `R/W:`
   - `TTE` / `TTW` and printer status are primarily updated from the 6530 async channel; polling remains a fallback for workbook status/error mappings
+  - the async listener now re-reads summary state for a short settle window after online/offline/warning/fault events, so delayed `SHUTDOWN` / `ONLINE` follow-up bits are less likely to fall through to the fallback poller
   - `TTS0001` is the dedicated numeric TTO status channel via `STATUS[PRINTER_STATE_CODE]`:
     - `0=OFFLINE`, `1=OFFLINE_WARNING`, `2=OFFLINE_FAULT`, `3=ONLINE`, `4=ONLINE_WARNING`, `5=ONLINE_FAULT`, `6=SHUTDOWN`
     - ESP writes `0`, `3`, `6` map to printer control transitions, not just one fixed command:

@@ -5,6 +5,7 @@ import time
 from mas004_rpi_databridge._vj6530_bridge import (
     AsyncSubscriptionId,
     MessageId,
+    VJ6530_TCP_NO_CRC_PROFILE,
     ZbcClient,
     resolve_summary_mappings,
 )
@@ -29,6 +30,8 @@ _ASYNC_SUBSCRIPTIONS = [
     (int(AsyncSubscriptionId.PRINTER_FINISHES_PRINTING), 0),
     (int(AsyncSubscriptionId.PRINT_FAILED), 0),
 ]
+_ASYNC_SUMMARY_SETTLE_S = 3.0
+_ASYNC_SUMMARY_RETRY_S = 0.25
 
 
 class Vj6530AsyncListener:
@@ -41,16 +44,16 @@ class Vj6530AsyncListener:
         self._status_snapshot: dict[str, bool | str] = {}
 
     def run_session(self, session_s: float = 30.0):
-        client = ZbcClient(self.cfg.vj6530_host, self.cfg.vj6530_port, timeout_s=max(2.0, float(self.cfg.http_timeout_s or 5.0)))
-        with client:
-            client.detect_profile()
+        client = self._open_async_client()
+        try:
             msg_id, _ = client.subscribe_async(_ASYNC_SUBSCRIPTIONS)
             if int(msg_id) != int(MessageId.NUL):
                 raise RuntimeError(f"6530 async subscribe failed with 0x{int(msg_id):04X}")
 
-            self.logs.log("vj6530", "info", "async subscription active")
+            profile_name = getattr(getattr(client, "profile", None), "name", "unknown")
+            self.logs.log("vj6530", "info", f"async subscription active profile={profile_name}")
             try:
-                self._sync_from_summary(client.request_summary_info(force_refresh=True))
+                self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
                 VJ6530_RUNTIME.mark_async_ok()
             except Exception as exc:
                 self.logs.log("vj6530", "info", f"async startup summary skipped: {repr(exc)}")
@@ -79,11 +82,53 @@ class Vj6530AsyncListener:
 
                 if _needs_summary_sync(tag_ids):
                     try:
-                        self._sync_from_summary(client.request_summary_info(force_refresh=True))
+                        self._sync_summary_until_stable(client, settle_s=_ASYNC_SUMMARY_SETTLE_S)
                     except Exception as exc:
                         self.logs.log("vj6530", "error", f"async summary refresh failed: {repr(exc)}")
+        finally:
+            client.close()
 
-    def _sync_from_summary(self, summary):
+    def _open_async_client(self) -> ZbcClient:
+        timeout_s = max(2.0, float(self.cfg.http_timeout_s or 5.0))
+        preferred = ZbcClient(
+            self.cfg.vj6530_host,
+            self.cfg.vj6530_port,
+            timeout_s=timeout_s,
+            profile=VJ6530_TCP_NO_CRC_PROFILE,
+            cache_ttl_s=0.0,
+        )
+        try:
+            preferred.connect()
+            return preferred
+        except Exception as exc:
+            preferred.close()
+            self.logs.log("vj6530", "info", f"async preferred profile failed, fallback to autodetect: {repr(exc)}")
+
+        fallback = ZbcClient(
+            self.cfg.vj6530_host,
+            self.cfg.vj6530_port,
+            timeout_s=timeout_s,
+            cache_ttl_s=0.0,
+        )
+        fallback.connect()
+        return fallback
+
+    def _sync_summary_until_stable(self, client: ZbcClient, settle_s: float) -> int:
+        deadline = time.monotonic() + max(0.0, float(settle_s or 0.0))
+        total_changed = 0
+        stable_reads = 0
+        while True:
+            changed = self._sync_from_summary(client.request_summary_info(force_refresh=True))
+            total_changed += changed
+            if changed > 0:
+                stable_reads = 0
+            else:
+                stable_reads += 1
+            if stable_reads >= 2 or time.monotonic() >= deadline:
+                return total_changed
+            time.sleep(_ASYNC_SUMMARY_RETRY_S)
+
+    def _sync_from_summary(self, summary) -> int:
         rows = []
         rows.extend(self.params.list_params(ptype="TTP", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTE", limit=5000, offset=0))
@@ -104,10 +149,11 @@ class Vj6530AsyncListener:
             current_by_key[pkey] = str(row.get("effective_v") if row.get("effective_v") is not None else "0")
 
         if not mapping_by_key:
-            return
+            return 0
 
         resolved = resolve_summary_mappings(mapping_by_key, summary, snapshot=self._status_snapshot)
         targets = peer_urls(self.cfg, "/api/inbox")
+        changed = 0
 
         for pkey, new_value in resolved.items():
             if new_value is None:
@@ -124,6 +170,7 @@ class Vj6530AsyncListener:
             line = f"{pkey}={new_text}"
             self.logs.log("vj6530", "in", f"async: {line}")
             self.logs.log("raspi", "in", f"vj6530 async: {line}")
+            changed += 1
 
             if self.params.can_actor_read(pkey, actor="microtom"):
                 for url in targets:
@@ -146,6 +193,7 @@ class Vj6530AsyncListener:
                     self.logs.log("raspi", "out", f"forward to esp-plc: {line}")
                 else:
                     self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
+        return changed
 
 
 def _needs_summary_sync(tag_ids: list[int]) -> bool:

@@ -1,8 +1,12 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+import types
+
+sys.modules.setdefault("ping3", types.SimpleNamespace(ping=lambda *args, **kwargs: None))
 
 from mas004_rpi_databridge import vj6530_async_listener as async_module
 from mas004_rpi_databridge.db import DB, now_ts

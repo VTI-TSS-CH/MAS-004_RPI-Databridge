@@ -49,19 +49,18 @@ class Outbox:
 
         with self.db._conn() as c:
             if dedupe_key and drop_if_duplicate:
-                existing = c.execute(
-                    """SELECT idempotency_key
+                latest = c.execute(
+                    """SELECT idempotency_key, body_json
                        FROM outbox
                        WHERE method=?
                          AND url=?
-                         AND COALESCE(body_json,'')=COALESCE(?, '')
                          AND dedupe_key=?
                        ORDER BY created_ts DESC
                        LIMIT 1""",
-                    (method.upper(), url, body_json, dedupe_key),
+                    (method.upper(), url, dedupe_key),
                 ).fetchone()
-                if existing and existing[0]:
-                    return str(existing[0])
+                if latest and latest[0] and (latest[1] or None) == body_json:
+                    return str(latest[0])
             c.execute(
                 """INSERT INTO outbox(
                        created_ts,method,url,headers_json,body_json,idempotency_key,priority,dedupe_key
