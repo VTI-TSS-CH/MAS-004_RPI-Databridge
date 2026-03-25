@@ -18,6 +18,11 @@ from mas004_rpi_databridge.ntp_sync import ntp_loop
 from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
 from mas004_rpi_databridge.tcp_forwarder import TcpForwarderManager
 from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
+from mas004_rpi_databridge.vj6530_async_policy import (
+    VJ6530_ASYNC_RECONNECT_MIN_S,
+    VJ6530_ASYNC_SESSION_S,
+    vj6530_async_reconnect_delay_s,
+)
 from mas004_rpi_databridge.vj6530_async_listener import Vj6530AsyncListener
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
@@ -198,13 +203,19 @@ def vj6530_async_loop(cfg_path: str):
             logs = LogStore(db)
             outbox = Outbox(db)
             listener = Vj6530AsyncListener(cfg, params, logs, outbox)
-            listener.run_session(session_s=60.0)
+            listener.run_session(session_s=VJ6530_ASYNC_SESSION_S)
             error_backoff_s = 2.0
         except Exception as e:
-            VJ6530_RUNTIME.mark_async_error(repr(e))
-            print(f"[VJ6530-ASYNC] error: {repr(e)}", flush=True)
-            time.sleep(error_backoff_s)
-            error_backoff_s = min(error_backoff_s * 1.8, 30.0)
+            detail = repr(e)
+            reconnect_delay_s = vj6530_async_reconnect_delay_s(e, error_backoff_s)
+            VJ6530_RUNTIME.mark_async_error(detail)
+            if reconnect_delay_s <= VJ6530_ASYNC_RECONNECT_MIN_S:
+                print(f"[VJ6530-ASYNC] reconnect: {detail}", flush=True)
+                error_backoff_s = 2.0
+            else:
+                print(f"[VJ6530-ASYNC] error: {detail}", flush=True)
+                error_backoff_s = min(error_backoff_s * 1.8, 30.0)
+            time.sleep(reconnect_delay_s)
 
 
 def main():

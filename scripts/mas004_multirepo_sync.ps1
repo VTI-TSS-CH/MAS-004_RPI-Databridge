@@ -185,7 +185,19 @@ rm -rf .eggs
         }
 
         Invoke-Step "[PI/$Target] $($repo.Name): restart $($repo.Service)" {
-            ssh $resolvedSshHost "sudo systemctl restart $($repo.Service) && systemctl is-active $($repo.Service)" | Out-Host
+            $restartScript = @'
+set -e
+svc="__SERVICE__"
+enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
+if [ "$enabled" = "disabled" ] || [ "$enabled" = "masked" ]; then
+  echo "skip restart ($enabled)"
+  exit 0
+fi
+sudo systemctl restart "$svc"
+systemctl is-active "$svc"
+'@
+            $restartScript = $restartScript.Replace("__SERVICE__", $repo.Service)
+            ssh $resolvedSshHost $restartScript | Out-Host
         }
     } elseif ($RestartServices -and -not $repo.Service) {
         Write-Host "[PI/$Target] $($repo.Name): no service configured -> skip restart" -ForegroundColor DarkYellow

@@ -26,6 +26,8 @@
 - The 6530 async listener now prefers the live-verified no-CRC transport profile directly and only falls back to autodetect if that explicit profile fails.
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
 - Outbox dedupe now only collapses consecutive identical values; non-consecutive state changes remain lossless.
+- The 6530 async loop now rotates sessions every 30s and reconnects quickly when the printer closes an idle subscription, then rehydrates workbook state from summary on the next session.
+- On TEST, `mas004-vj6530-zbc-bridge.service` is intentionally parked so the Databridge remains the sole operational owner of live 6530 traffic on `3002`.
 - Networking helper: `netconfig.py`
 - Deployment: `systemd/mas004-rpi-databridge.service`, `scripts/`
 
