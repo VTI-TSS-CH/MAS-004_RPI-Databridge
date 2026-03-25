@@ -2256,8 +2256,7 @@ function clearOutput(source){
 }
 function formatLogs(items){
   return items.map(it => {
-    const d = new Date((it.ts || 0) * 1000);
-    const t = d.toISOString().replace("T"," ").replace("Z","");
+    const t = displayTs(it.ts_display);
     const dir = String(it.direction || "").toUpperCase();
     return `[${t}] ${dir} ${it.message || ""}`;
   }).join("\\n");
