@@ -1,9 +1,9 @@
 # MAS-004_RPI-Databridge QuickStart
 
-**Dokumentversion:** 3.0  
+**Dokumentversion:** 3.1  
 **Softwarestand:** MAS-004_RPI-Databridge `0.3.0`  
 **Autor:** Erwin Egli  
-**Datum:** 2026-02-19
+**Datum:** 2026-03-25
 
 ## 1. Ziel
 In 10-15 Minuten eine funktionsfähige Testverbindung aufbauen zwischen:
@@ -98,13 +98,93 @@ Microtom erhält später Callback auf `POST /api/inbox`.
 6. `POST /api/params/edit`
 7. `GET/POST /api/ui/logs*`
 8. `GET /api/logfiles/*`
+9. `GET/POST /api/production/logfiles/*`
 
 Vollständig und detailliert: `docs/Microtom_Interface.md`
 
-## 8. Zertifikat ohne Browser-Warnung
+## 8. Produktions-Logfiles (Kurzablauf fuer Microtom)
+1. Produktionsnamen setzen:
+
+```text
+MAS0029=Testproduktion2
+```
+
+2. Vor dem Start pruefen:
+
+```text
+MAS0030=?
+```
+
+Erwartung:
+
+```text
+MAS0030=0
+```
+
+3. Produktion starten:
+
+```text
+MAS0002=1
+```
+
+Erwartung:
+
+```text
+ACK_MAS0002=1
+```
+
+4. Waehrend der Produktion laufen die separaten Produktionsdateien mit:
+   1. `gesamtanlage_<MAS0029>.txt`
+   2. `esp32_plc_<MAS0029>.txt`
+   3. `tto_6530_<MAS0029>.txt`
+   4. `laser_3350_<MAS0029>.txt`
+
+5. Produktion stoppen:
+
+```text
+MAS0002=2
+```
+
+Erwartung:
+
+```text
+ACK_MAS0002=2
+```
+
+Danach meldet der Raspi:
+
+```text
+MAS0030=1
+```
+
+6. Dateien auflisten:
+
+```bash
+curl -k "https://192.168.210.20:8080/api/production/logfiles/list" \
+  -H "X-Shared-Secret: <SECRET>"
+```
+
+7. Einzeldatei herunterladen:
+
+```bash
+curl -k -o "gesamtanlage_Testproduktion2.txt" \
+  "https://192.168.210.20:8080/api/production/logfiles/download?name=gesamtanlage_Testproduktion2.txt" \
+  -H "X-Shared-Secret: <SECRET>"
+```
+
+Wichtig:
+1. Jeder Produktions-Download loescht genau diese Datei sofort auf dem Raspi.
+2. Nach dem letzten Download setzt der Raspi automatisch `MAS0030=0` und meldet diesen Wert an Microtom zurueck.
+3. Solange noch Produktionsdateien offen sind, wird ein neuer Start mit `MAS0002=1` abgewiesen mit:
+
+```text
+MAS0002=NAK_ProductionLogfilesPending
+```
+
+## 9. Zertifikat ohne Browser-Warnung
 Nach IP-Wechsel muss Zertifikat neu erzeugt und importiert werden.
 
-### 8.1 Auf Raspi neues Zertifikat erzeugen
+### 9.1 Auf Raspi neues Zertifikat erzeugen
 ```bash
 sudo openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
   -keyout /etc/mas004_rpi_databridge/certs/raspi.key \
@@ -114,34 +194,35 @@ sudo openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 825 \
 sudo systemctl restart mas004-rpi-databridge.service
 ```
 
-### 8.2 Zertifikat nach Windows kopieren
+### 9.2 Zertifikat nach Windows kopieren
 ```powershell
 scp pi@192.168.210.20:/etc/mas004_rpi_databridge/certs/raspi.crt "$env:USERPROFILE\Downloads\raspi.crt"
 ```
 
-### 8.3 In Root-Store importieren (Admin-PowerShell)
+### 9.3 In Root-Store importieren (Admin-PowerShell)
 ```powershell
 Import-Certificate -FilePath "$env:USERPROFILE\Downloads\raspi.crt" -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
-## 9. Schnell-Diagnose
+## 10. Schnell-Diagnose
 
-### 9.1 Outbox prüfen
+### 10.1 Outbox pruefen
 ```bash
 sudo sqlite3 /var/lib/mas004_rpi_databridge/databridge.db \
 "SELECT id,url,retry_count,datetime(next_attempt_ts,'unixepoch','localtime') FROM outbox ORDER BY id;"
 ```
 
-### 9.2 Service-Log prüfen
+### 10.2 Service-Log pruefen
 ```bash
 sudo journalctl -u mas004-rpi-databridge.service -n 200 --no-pager
 ```
 
-### 9.3 Häufigste Ursachen
+### 10.3 Haeufigste Ursachen
 1. Alte/falsche Peer-URL in Outbox (falsche IP).
 2. Shared-Secret stimmt nicht.
 3. Microtom `/health` nicht erreichbar.
 4. Token fehlt für geschützte API-Aufrufe.
 
-## 10. Release-Notiz
+## 11. Release-Notiz
 1. **v3.0 (2026-02-19):** QuickStart auf `192.168.210.x` aktualisiert, UI-Screenshots, TLS-Zertifikatsablauf, API-Kurzreferenz und Troubleshooting erweitert.
+2. **v3.1 (2026-03-25):** Produktions-Logfiles mit `MAS0029`/`MAS0030`, konsumierendem Download und Startsperre bei offenen Altdateien ergaenzt.

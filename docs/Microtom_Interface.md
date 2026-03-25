@@ -1,9 +1,9 @@
 # MAS-004_RPI-Databridge Interface Manual
 
-**Dokumentversion:** 3.0  
+**Dokumentversion:** 3.1  
 **Softwarestand:** MAS-004_RPI-Databridge `0.3.0`  
 **Autor:** Erwin Egli  
-**Datum:** 2026-02-19  
+**Datum:** 2026-03-25  
 **System:** Raspberry PLC (Industrial Shields) als Datenbrücke zwischen Microtom und simulierten/realen Subsystemen
 
 ## 1. Zweck und Geltungsbereich
@@ -146,6 +146,9 @@ Prefix-basiert:
 17. `GET /api/ui/logs/download`
 18. `GET /api/logfiles/list`
 19. `GET /api/logfiles/download`
+20. `GET /api/production/logfiles/list`
+21. `GET /api/production/logfiles/download`
+22. `POST /api/production/logfiles/ack`
 
 ## 7. Vollständige API-Referenz
 
@@ -399,6 +402,47 @@ Fehler:
 3. Download einer Tagesdatei.
 4. `404` falls Datei nicht vorhanden.
 
+### `GET /api/production/logfiles/list`
+1. Header: `X-Token` **oder** `X-Shared-Secret`
+2. Liefert den Produktions-Manifest-Status.
+3. Wichtige Felder:
+   1. `active`
+   2. `ready`
+   3. `production_label`
+   4. `files[]`
+4. Produktionsdateien sind getrennt von den normalen Tages-Logfiles.
+
+Beispiel:
+
+```json
+{
+  "ok": true,
+  "active": false,
+  "ready": true,
+  "production_label": "Testproduktion2",
+  "files": [
+    {"name":"gesamtanlage_Testproduktion2.txt","group":"all","group_label":"Gesamtanlage"},
+    {"name":"esp32_plc_Testproduktion2.txt","group":"esp","group_label":"ESP32-PLC"},
+    {"name":"tto_6530_Testproduktion2.txt","group":"tto","group_label":"TTO 6530"}
+  ]
+}
+```
+
+### `GET /api/production/logfiles/download`
+1. Header: `X-Token` **oder** `X-Shared-Secret`
+2. Query: `name` (Pflicht)
+3. Download einer Produktionsdatei als Text.
+4. Der Download ist **konsumierend**:
+   1. Die heruntergeladene Datei wird sofort auf dem Raspi geloescht.
+   2. Wenn dadurch die letzte Produktionsdatei verschwindet, setzt der Raspi automatisch `MAS0030=0`.
+   3. `MAS0030=0` wird danach automatisch an Microtom per Callback gesendet.
+5. `404` falls Datei nicht vorhanden ist oder bereits konsumiert wurde.
+
+### `POST /api/production/logfiles/ack`
+1. Header: `X-Token` **oder** `X-Shared-Secret`
+2. Optionaler Abschluss-Endpunkt.
+3. Praktisch nur noch als Fallback relevant, weil der letzte Download den Ready-Zustand bereits automatisch zuruecksetzt.
+
 ## 8. Microtom-Schnittstelle (fachlich)
 
 ### 8.1 Microtom -> Raspi
@@ -419,6 +463,95 @@ Raspi sendet an `peer_base_url + /api/inbox`, z. B.:
 3. Header: `X-Idempotency-Key`, `X-Correlation-Id`
 
 Microtom muss auf 2xx antworten, sonst bleibt Nachricht in Outbox und wird erneut versucht.
+
+### 8.3 Produktions-Logfiles (Microtom-Ablauf)
+Die Produktions-Logfiles sind ein separater Mechanismus fuer auftragsbezogene TXT-Dateien. Sie ergaenzen die normalen Tages-Logfiles und ersetzen diese nicht.
+
+Fachlicher Ablauf:
+1. Microtom setzt zuerst den Produktionsnamen:
+
+```text
+MAS0029=Testproduktion2
+```
+
+2. Vor dem Start kann Microtom pruefen:
+
+```text
+MAS0030=?
+```
+
+Erwartung ohne offene Altdateien:
+
+```text
+MAS0030=0
+```
+
+3. Produktion starten:
+
+```text
+MAS0002=1
+```
+
+Erwartete positive Rueckmeldung:
+
+```text
+ACK_MAS0002=1
+```
+
+4. Falls noch Produktionsdateien der letzten Produktion offen sind, wird der Start gesperrt:
+
+```text
+MAS0002=NAK_ProductionLogfilesPending
+```
+
+5. Produktion stoppen:
+
+```text
+MAS0002=2
+```
+
+Erwartete positive Rueckmeldung:
+
+```text
+ACK_MAS0002=2
+```
+
+6. Nach dem Stop setzt der Raspi:
+
+```text
+MAS0030=1
+```
+
+Das bedeutet: Produktionsdateien der letzten Produktion sind abholbereit.
+
+7. Microtom holt die Dateien ueber die Produktions-API ab:
+
+```bash
+curl -k "https://192.168.210.20:8080/api/production/logfiles/list" \
+  -H "X-Shared-Secret: <SECRET>"
+```
+
+```bash
+curl -k -o "gesamtanlage_Testproduktion2.txt" \
+  "https://192.168.210.20:8080/api/production/logfiles/download?name=gesamtanlage_Testproduktion2.txt" \
+  -H "X-Shared-Secret: <SECRET>"
+```
+
+8. Wenn die letzte Produktionsdatei heruntergeladen wurde:
+   1. wird `MAS0030` automatisch auf `0` gesetzt
+   2. und `MAS0030=0` wird automatisch an Microtom gemeldet
+
+Typische Produktionsdateien:
+1. `gesamtanlage_<MAS0029>.txt`
+2. `esp32_plc_<MAS0029>.txt`
+3. `tto_6530_<MAS0029>.txt`
+4. `laser_3350_<MAS0029>.txt`
+
+Inhalt der Produktionsdateien:
+1. Zeitstempel
+2. Rohmeldung
+3. Parametername aus der Parameterliste
+4. Beschreibung/Message aus der Parameterliste
 
 ## 9. Performance und Zuverlässigkeit
 
@@ -499,3 +632,4 @@ Aktuell sind ESP/VJ3350/VJ6530 in Simulation möglich. Für reale Anbindung:
 
 ## 13. Änderungslog
 1. **v3.0 (2026-02-19):** Vollständige API-Beschreibung aller Endpunkte, neue IP-Umgebung `192.168.210.x`, UI-Screenshots, aktualisierte Betriebs- und Security-Kapitel.
+2. **v3.1 (2026-03-25):** Produktions-Logfiles mit `MAS0029`/`MAS0030`, konsumierenden Download-Endpunkten, automatischem `MAS0030`-Reset und Startsperre `MAS0002=NAK_ProductionLogfilesPending` dokumentiert.
