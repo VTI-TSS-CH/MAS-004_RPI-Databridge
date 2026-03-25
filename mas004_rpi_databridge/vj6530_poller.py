@@ -28,6 +28,10 @@ class Vj6530Poller:
         self.client_factory = client_factory
 
     def poll_once(self) -> dict[str, int]:
+        if bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.async_event_recent(10.0):
+            self.logs.log("raspi", "info", "skip vj6530 poll: recent async event")
+            return {"checked": 0, "changed": 0, "forwarded": 0}
+
         rows = []
         rows.extend(self.params.list_params(ptype="TTP", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTE", limit=5000, offset=0))
@@ -59,6 +63,9 @@ class Vj6530Poller:
         else:
             client = self.client_factory(self.cfg.vj6530_host, self.cfg.vj6530_port, timeout_s=self.cfg.http_timeout_s)
             resolved = client.read_mapped_values(mapping_by_key)
+        if bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.async_event_recent(10.0):
+            self.logs.log("raspi", "info", "discard vj6530 poll result: async event won the race")
+            return {"checked": len(mapping_by_key), "changed": 0, "forwarded": 0}
         device_bridge = None
 
         targets = peer_urls(self.cfg, "/api/inbox")

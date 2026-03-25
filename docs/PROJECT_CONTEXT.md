@@ -31,6 +31,7 @@
 - Queued 6530 writes now return success as soon as the live write itself completes; the follow-up summary settle still runs in-session, but no longer blocks or falsely NAKs slow printer transitions.
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
 - Async summary fanout is ordered so all Microtom notifications are queued before any ESP mirror attempt starts, preventing ESP-side delays from holding back Microtom state delivery.
+- The fallback poller now yields to recent async events and will discard overlapping stale poll results instead of overwriting a fresher async state transition.
 - Background 6530 cache warmup is skipped while async ownership is enabled, avoiding a second control client on `3002` during startup.
 - Outbox dedupe now only collapses consecutive identical values; non-consecutive state changes remain lossless.
 - Live TEST proof on `192.168.2.103:3002`:
