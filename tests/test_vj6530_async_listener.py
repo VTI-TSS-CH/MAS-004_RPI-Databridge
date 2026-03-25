@@ -1,0 +1,118 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+from mas004_rpi_databridge import vj6530_async_listener as async_module
+from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.logstore import LogStore
+from mas004_rpi_databridge.outbox import Outbox
+from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.vj6530_async_listener import Vj6530AsyncListener
+
+
+class FakeDeviceBridge:
+    def __init__(self):
+        self.calls = []
+
+    def mirror_to_esp(self, pkey: str, value: str):
+        self.calls.append((pkey, value))
+        return True, "OK"
+
+
+class Vj6530AsyncListenerTests(unittest.TestCase):
+    def test_sync_from_summary_pushes_tte_and_tts_to_microtom_and_esp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+
+            with db._conn() as c:
+                for pkey, ptype, pid, rw, esp_rw, mapping in (
+                    ("TTE1000", "TTE", "1000", "R", "W", "IRQ{LEI,ERR}/Fault[text^='E1000 ']"),
+                    ("TTS0001", "TTS", "0001", "R", "W", "STATUS[PRINTER_STATE_CODE]"),
+                ):
+                    c.execute(
+                        """INSERT INTO params(
+                            pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                            message,possible_cause,effects,remedy,updated_ts
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            pkey,
+                            ptype,
+                            pid,
+                            0,
+                            6,
+                            "0",
+                            "",
+                            rw,
+                            esp_rw,
+                            "unsigned int.",
+                            pkey,
+                            "NO",
+                            None,
+                            None,
+                            None,
+                            None,
+                            now_ts(),
+                        ),
+                    )
+                    c.execute(
+                        """INSERT INTO param_device_map(
+                            pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                            zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (pkey, None, mapping, None, None, None, None, None, None, None, None, now_ts()),
+                    )
+
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                http_timeout_s=5.0,
+                peer_base_url="https://10.27.67.135:9090",
+                peer_base_url_secondary="",
+                esp_host="192.168.2.101",
+                esp_port=3010,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            listener = Vj6530AsyncListener(cfg, params, logs, outbox)
+            fake_bridge = FakeDeviceBridge()
+            listener.device_bridge = fake_bridge
+
+            original_resolve = async_module.resolve_summary_mappings
+            async_module.resolve_summary_mappings = lambda mappings, summary, snapshot=None: {
+                "TTE1000": "1",
+                "TTS0001": "5",
+            }
+            try:
+                listener._sync_from_summary(object())
+            finally:
+                async_module.resolve_summary_mappings = original_resolve
+
+            self.assertEqual("1", params.get_effective_value("TTE1000"))
+            self.assertEqual("5", params.get_effective_value("TTS0001"))
+            self.assertEqual([("TTE1000", "1"), ("TTS0001", "5")], fake_bridge.calls)
+            self.assertEqual(2, outbox.count())
+
+            bodies = []
+            while True:
+                job = outbox.next_due()
+                if job is None:
+                    break
+                bodies.append(json.loads(job.body_json)["msg"])
+                outbox.delete(job.id)
+            self.assertEqual(["TTE1000=1", "TTS0001=5"], bodies)
+
+
+if __name__ == "__main__":
+    unittest.main()

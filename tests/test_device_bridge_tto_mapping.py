@@ -227,6 +227,85 @@ class DeviceBridgeTtoMappingTests(unittest.TestCase):
             self.assertEqual("TTP00073=1", read_resp)
             self.assertEqual([], fake.read_calls)
 
+    def test_tts_status_code_write_is_allowed_for_esp_actor(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO params(
+                        pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                        message,possible_cause,effects,remedy,updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        "TTS",
+                        "0001",
+                        0,
+                        6,
+                        "0",
+                        "enum",
+                        "R",
+                        "W",
+                        "unsigned int.",
+                        "PrinterStateCode",
+                        "NO",
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        None,
+                        "STATUS[PRINTER_STATE_CODE]",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            cfg = SimpleNamespace(
+                esp_host="",
+                esp_port=0,
+                http_timeout_s=2.0,
+                esp_watchdog_host="",
+                watchdog_timeout_s=1.0,
+                watchdog_down_after=3,
+                vj6530_host="10.0.0.5",
+                vj6530_port=3002,
+                vj3350_host="",
+                vj3350_port=0,
+                esp_simulation=True,
+                vj6530_simulation=False,
+                vj3350_simulation=True,
+            )
+
+            bridge = DeviceBridge(cfg, params, logs)
+            fake = FakeZbcBridgeClient()
+            bridge._zbc_bridge = fake
+
+            write_resp = bridge.execute("vj6530", "TTS0001", "TTS", "write", "3", actor="esp32")
+
+            self.assertEqual("ACK_TTS0001=3", write_resp)
+            self.assertEqual([("STATUS[PRINTER_STATE_CODE]", "3", True)], fake.write_calls)
+            self.assertEqual("3", params.get_effective_value("TTS0001"))
+
     def test_current_parameter_read_falls_back_to_cached_value(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = DB(str(Path(tmpdir) / "db.sqlite3"))

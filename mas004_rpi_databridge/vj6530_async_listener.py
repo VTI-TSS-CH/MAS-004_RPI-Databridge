@@ -88,6 +88,7 @@ class Vj6530AsyncListener:
         rows.extend(self.params.list_params(ptype="TTP", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTE", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTW", limit=5000, offset=0))
+        rows.extend(self.params.list_params(ptype="TTS", limit=5000, offset=0))
 
         mapping_by_key: dict[str, str] = {}
         current_by_key: dict[str, str] = {}
@@ -124,18 +125,19 @@ class Vj6530AsyncListener:
             self.logs.log("vj6530", "in", f"async: {line}")
             self.logs.log("raspi", "in", f"vj6530 async: {line}")
 
-            for url in targets:
-                self.outbox.enqueue(
-                    "POST",
-                    url,
-                    {},
-                    {"msg": line, "source": "raspi", "origin": "vj6530"},
-                    None,
-                    priority=100,
-                    dedupe_key=f"vj6530:{pkey}",
-                    drop_if_duplicate=True,
-                )
-            if targets:
+            if self.params.can_actor_read(pkey, actor="microtom"):
+                for url in targets:
+                    self.outbox.enqueue(
+                        "POST",
+                        url,
+                        {},
+                        {"msg": line, "source": "raspi", "origin": "vj6530"},
+                        None,
+                        priority=100,
+                        dedupe_key=f"vj6530:{pkey}",
+                        drop_if_duplicate=True,
+                    )
+            if targets and self.params.can_actor_read(pkey, actor="microtom"):
                 self.logs.log("raspi", "out", f"forward to microtom: {line}")
 
             if self.params.can_actor_read(pkey, actor="esp32"):

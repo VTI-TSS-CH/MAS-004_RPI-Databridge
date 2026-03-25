@@ -52,9 +52,16 @@
 - API health: `/health`
 - Outbox not growing unexpectedly
 - Shared-secret and peer URL still valid after config changes
+- `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
+- ESP write smoke test for `TTS0001`:
+  - `TTS0001=3` -> printer goes online
+  - `TTS0001=0` -> printer goes offline
+  - `TTS0001=6` -> printer shuts down
+- `TTE` / `TTW` / `TTS` printer-originated updates only forward to Microtom / ESP when the workbook `R/W:` / `ESP32 R/W:` flags allow it
 - NTP configured values visible in `/ui/settings` and service logs contain `[NTP]` entries
 - TCP relay listeners started as configured (service logs contain `[FWD] listen ...` for required ports)
 - After reboot, verify that `[FWD]` listeners appear even if `eth0` carrier comes up late and that `[NTP]` retries continue until sync succeeds
+- Do not expect arbitrary printer-side `TTP` edits from the CLARiTY UI to arrive via async push; ZBC still requires polling/readback for generic `CURRENT_PARAMETERS` deltas
 
 ## 6. Ownership
 - Main project owner context: MAS-004_RPI-Databridge

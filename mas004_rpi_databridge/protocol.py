@@ -19,6 +19,7 @@ _WIDTH = {
     "TTP": 5,
     "MAP": 4,
     "MAS": 4,
+    "TTS": 4,
     "TTE": 4, "TTW": 4,
     "LSE": 4, "LSW": 4,
     "MAE": 4, "MAW": 4,

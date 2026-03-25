@@ -97,11 +97,16 @@
 - The Videojet 6530 TTO mapping now uses the live-readable CLARiTY parameter archive from `MAS-004_ZBC-Library`:
   - `FRQ[CURRENT_PARAMETERS]` on the 6530 returns the UTF-16 parameter XML
   - `FTX[CURRENT_PARAMETERS]` writeback has been live-verified against the real 6530
-  - the MAS workbook `..\Parameterliste SAR41-MAS-004_V11.11.25.xlsx` contains a dedicated `ZBC Mapping:` column for `TTP`, `TTE`, `TTW`
+  - the MAS workbook `..\Parameterliste SAR41-MAS-004_V11.11.25.xlsx` contains a dedicated `ZBC Mapping:` column for `TTP`, `TTE`, `TTW`, `TTS`
   - the helper `..\MAS-004_ZBC-Library\tools\update_tto_workbook.py` refreshes this column and the added TTO rows from a live printer or saved archive
   - `MAS-004_VJ6530-ZBC-Bridge` now consumes the shared library instead of maintaining a separate transport stack
   - the workbook now contains a dedicated `ESP32 R/W:` column in addition to Microtom `R/W:`
-  - `TTE` / `TTW` and printer status are primarily updated from the 6530 async channel; polling remains a fallback only
+  - `TTE` / `TTW` and printer status are primarily updated from the 6530 async channel; polling remains a fallback for workbook status/error mappings
+  - `TTS0001` is the dedicated numeric TTO status channel via `STATUS[PRINTER_STATE_CODE]`:
+    - `0=OFFLINE`, `1=OFFLINE_WARNING`, `2=OFFLINE_FAULT`, `3=ONLINE`, `4=ONLINE_WARNING`, `5=ONLINE_FAULT`, `6=SHUTDOWN`
+    - ESP writes `0`, `3`, `6` map to printer control commands `OFFLINE`, `ONLINE`, `SHUTDOWN`
+    - printer-originated state changes are fanned out to Microtom / ESP only when the workbook access flags allow it
+  - the ZBC spec does not expose a generic async delta event for arbitrary `CURRENT_PARAMETERS` changes from the printer UI; direct CLARiTY-side `TTP` edits still require polling/readback
 
 ## Sync/Support Policy
 - Before and after changes in this repo, run:

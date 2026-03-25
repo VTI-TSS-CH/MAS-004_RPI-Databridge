@@ -26,6 +26,14 @@ class FakeBridgeClient:
         }
 
 
+class FakeBridgeClientWithTts(FakeBridgeClient):
+    def read_mapped_values(self, mappings):
+        self.calls.append(dict(mappings))
+        return {
+            "TTS0001": "3",
+        }
+
+
 class Vj6530PollerTests(unittest.TestCase):
     def test_poll_once_updates_only_changed_states_and_enqueues_forward(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -98,6 +106,83 @@ class Vj6530PollerTests(unittest.TestCase):
             items = logs.list_logs("raspi", limit=20)
             messages = [entry["message"] for entry in items]
             self.assertTrue(any("vj6530 poll: TTE1000=1" in msg for msg in messages))
+
+    def test_poll_once_updates_tts_state_and_skips_microtom_without_access(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO params(
+                        pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                        message,possible_cause,effects,remedy,updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        "TTS",
+                        "0001",
+                        0,
+                        6,
+                        "0",
+                        "enum",
+                        "N",
+                        "W",
+                        "unsigned int.",
+                        "PrinterStateCode",
+                        "NO",
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+                c.execute(
+                    """INSERT INTO param_device_map(
+                        pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                        zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "TTS0001",
+                        None,
+                        "STATUS[PRINTER_STATE_CODE]",
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ts(),
+                    ),
+                )
+
+            cfg = SimpleNamespace(
+                vj6530_host="192.168.2.103",
+                vj6530_port=3002,
+                http_timeout_s=5.0,
+                peer_base_url="https://10.27.67.135:9090",
+                peer_base_url_secondary="",
+                esp_host="",
+                esp_port=0,
+            )
+
+            fake_client = FakeBridgeClientWithTts(cfg.vj6530_host, cfg.vj6530_port, timeout_s=cfg.http_timeout_s)
+            poller = Vj6530Poller(cfg, params, logs, outbox, client_factory=lambda *args, **kwargs: fake_client)
+
+            result = poller.poll_once()
+
+            self.assertEqual({"checked": 1, "changed": 1, "forwarded": 0}, result)
+            self.assertEqual("3", params.get_effective_value("TTS0001"))
+            self.assertEqual(0, outbox.count())
+
+            items = logs.list_logs("raspi", limit=20)
+            messages = [entry["message"] for entry in items]
+            self.assertTrue(any("skip microtom forward for TTS0001" in msg for msg in messages))
 
 
 if __name__ == "__main__":

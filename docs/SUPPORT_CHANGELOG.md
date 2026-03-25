@@ -1,5 +1,23 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (6530 Event Rights + `TTS0001` Status Channel)
+- Added protocol/runtime support for `TTS0001` as the dedicated numeric TTO status parameter (`STATUS[PRINTER_STATE_CODE]`).
+- Numeric state mapping is now:
+  - `0=OFFLINE`
+  - `1=OFFLINE_WARNING`
+  - `2=OFFLINE_FAULT`
+  - `3=ONLINE`
+  - `4=ONLINE_WARNING`
+  - `5=ONLINE_FAULT`
+  - `6=SHUTDOWN`
+- ESP writes to `TTS0001` now drive the printer through the existing 6530 control path for the directly commandable states `0`, `3`, `6`.
+- The 6530 async listener and fallback poller now respect the workbook access flags before forwarding printer-originated updates to Microtom.
+- The fallback poller now also keeps workbook status/error mappings from `TTP` / `TTS` in sync instead of only `TTE` / `TTW`.
+- Added regression coverage for:
+  - `TTS0001` protocol normalization and ESP write handling
+  - active async push of `TTE` and `TTS`
+  - poller-side `TTS` updates with Microtom access denied
+
 ## 2026-03-25 (Retry Once Before `NAK_DeviceComm` on VJ6530)
 - Current-parameter reads and writes on the 6530 live path now retry once before falling back to cached values or bubbling up to the generic `NAK_DeviceComm`.
 - Goal: absorb transient profile-detect / session timeouts on `3002` that would otherwise fail a user write even though the immediate retry succeeds.

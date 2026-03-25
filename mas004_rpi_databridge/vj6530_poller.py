@@ -28,15 +28,20 @@ class Vj6530Poller:
 
     def poll_once(self) -> dict[str, int]:
         rows = []
+        rows.extend(self.params.list_params(ptype="TTP", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTE", limit=5000, offset=0))
         rows.extend(self.params.list_params(ptype="TTW", limit=5000, offset=0))
+        rows.extend(self.params.list_params(ptype="TTS", limit=5000, offset=0))
 
         mapping_by_key: dict[str, str] = {}
         current_by_key: dict[str, str] = {}
         for row in rows:
             pkey = str(row.get("pkey") or "").strip()
             mapping = str(row.get("zbc_mapping") or "").strip()
+            upper = mapping.upper()
             if not pkey or not mapping:
+                continue
+            if not (upper.startswith("STATUS[") or upper.startswith("STS[") or upper.startswith("IRQ{")):
                 continue
             mapping_by_key[pkey] = mapping
             current_by_key[pkey] = str(row.get("effective_v") if row.get("effective_v") is not None else "0")
@@ -70,7 +75,7 @@ class Vj6530Poller:
             self.logs.log("vj6530", "in", f"poll: {line}")
             self.logs.log("raspi", "in", f"vj6530 poll: {line}")
 
-            if targets:
+            if targets and self.params.can_actor_read(pkey, actor="microtom"):
                 for url in targets:
                     self.outbox.enqueue(
                         "POST",
@@ -84,6 +89,8 @@ class Vj6530Poller:
                     )
                     forwarded += 1
                 self.logs.log("raspi", "out", f"forward to microtom: {line}")
+            elif not self.params.can_actor_read(pkey, actor="microtom"):
+                self.logs.log("raspi", "info", f"skip microtom forward for {pkey}: microtom-no-access")
             else:
                 self.logs.log("raspi", "error", f"no peer_base_url configured; cannot forward VJ6530 poll {line}")
 
