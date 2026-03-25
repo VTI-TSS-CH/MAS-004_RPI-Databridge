@@ -42,6 +42,20 @@
 - Script target metadata can be overridden via environment variables:
   - `MAS004_TEST_SSH`, `MAS004_LIVE_SSH`, `MAS004_TEST_WEB`, `MAS004_LIVE_WEB`
 
+## Current LIVE Runtime Snapshot (2026-03-25)
+- Captured from `/etc/mas004_rpi_databridge/config.json` on the Microtom LIVE Raspberry.
+- This runtime configuration is intentionally not version-controlled and must not be overwritten by a code-only deployment.
+- Current operational values:
+  - `eth0_ip = 192.168.210.20`
+  - `eth1_ip = 192.168.2.100`
+  - `peer_base_url = http://192.168.210.10:81`
+  - `peer_base_url_secondary = https://192.168.5.2:9090`
+  - `peer_watchdog_host = 192.168.210.10`
+  - `esp_host = 192.168.2.101`, `esp_port = 3007`, `esp_simulation = true`
+  - `vj3350_host = 192.168.2.102`, `vj3350_port = 3008`, `vj3350_simulation = true`
+  - `vj6530_host = 192.168.2.103`, `vj6530_port = 3009`, `vj6530_simulation = true`
+- When the TEST Raspberry becomes reachable again, mirror these values manually via the Settings UI or a controlled config export/import, not via repo deployment.
+
 ## Persistent Paths
 - Config: `/etc/mas004_rpi_databridge/config.json`
 - DB: `/var/lib/mas004_rpi_databridge/databridge.db`
@@ -82,7 +96,7 @@
   - `scripts/mas004_multirepo_sync.ps1 -Target live -AllowLive -RestartServices`
 
 ## Last Reviewed
-- Date: 2026-03-13
+- Date: 2026-03-25
 - Local HEAD baseline during creation: `af82b02`
 
 ## Current Sync Snapshot (2026-03-04)

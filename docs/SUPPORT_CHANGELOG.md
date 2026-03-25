@@ -1,5 +1,16 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (LIVE/Test State Merge for Microtom Rollout)
+- Reconciled the code baseline between the TEST branch work and the current Microtom LIVE system.
+- Confirmed that LIVE runtime settings remain external in `/etc/mas004_rpi_databridge/config.json` and are not touched by repo deployment.
+- Captured the current LIVE runtime snapshot in `docs/PROJECT_CONTEXT.md` so the same values can later be mirrored to TEST when the TEST Raspberry is reachable again.
+- Prepared LIVE deployment to bring these repo states in line:
+  - `MAS-004_RPI-Databridge`
+  - `MAS-004_ESP32-PLC-Bridge`
+  - `MAS-004_VJ3350-Ultimate-Bridge`
+  - `MAS-004_VJ6530-ZBC-Bridge`
+  - `MAS-004_ZBC-Library`
+
 ## 2026-03-17 (TEST IP Change to 10.27.67.68)
 - Changed the TEST target from `10.27.67.69` to `10.27.67.68`.
 - Updated deployment target metadata, project context and runbook documentation.
