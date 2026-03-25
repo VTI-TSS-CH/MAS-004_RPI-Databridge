@@ -36,7 +36,7 @@
   - UI/API: `https://10.27.67.68:8080`
   - Policy: default sync target (always keep aligned with local + git)
 - LIVE Raspberry:
-  - SSH: `pi@192.168.1.20`
+  - SSH: `pi@192.168.210.20`
   - UI/API: `https://192.168.210.20:8080`
 - Policy: update only on explicit release command
 - Script target metadata can be overridden via environment variables:

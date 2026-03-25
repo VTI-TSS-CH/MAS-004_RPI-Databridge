@@ -72,7 +72,16 @@ class Vj6530Poller:
 
             if targets:
                 for url in targets:
-                    self.outbox.enqueue("POST", url, {}, {"msg": line, "source": "raspi", "origin": "vj6530"}, None)
+                    self.outbox.enqueue(
+                        "POST",
+                        url,
+                        {},
+                        {"msg": line, "source": "raspi", "origin": "vj6530"},
+                        None,
+                        priority=100,
+                        dedupe_key=f"vj6530:{pkey}",
+                        drop_if_duplicate=True,
+                    )
                     forwarded += 1
                 self.logs.log("raspi", "out", f"forward to microtom: {line}")
             else:

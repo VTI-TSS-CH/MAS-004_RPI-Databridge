@@ -125,7 +125,16 @@ class Vj6530AsyncListener:
             self.logs.log("raspi", "in", f"vj6530 async: {line}")
 
             for url in targets:
-                self.outbox.enqueue("POST", url, {}, {"msg": line, "source": "raspi", "origin": "vj6530"}, None)
+                self.outbox.enqueue(
+                    "POST",
+                    url,
+                    {},
+                    {"msg": line, "source": "raspi", "origin": "vj6530"},
+                    None,
+                    priority=100,
+                    dedupe_key=f"vj6530:{pkey}",
+                    drop_if_duplicate=True,
+                )
             if targets:
                 self.logs.log("raspi", "out", f"forward to microtom: {line}")
 

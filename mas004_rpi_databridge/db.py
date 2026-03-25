@@ -12,10 +12,14 @@ CREATE TABLE IF NOT EXISTS outbox (
   headers_json TEXT NOT NULL,
   body_json TEXT,
   idempotency_key TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 100,
+  dedupe_key TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0,
   next_attempt_ts REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_next ON outbox(next_attempt_ts, created_ts);
+CREATE INDEX IF NOT EXISTS idx_outbox_sched ON outbox(next_attempt_ts, priority, retry_count, created_ts);
+CREATE INDEX IF NOT EXISTS idx_outbox_dedupe ON outbox(method, url, dedupe_key);
 
 CREATE TABLE IF NOT EXISTS inbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +137,11 @@ def now_ts() -> float:
 
 
 def _apply_migrations(conn: sqlite3.Connection):
+    outbox_cols = {row[1] for row in conn.execute("PRAGMA table_info(outbox)").fetchall()}
+    if "priority" not in outbox_cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN priority INTEGER NOT NULL DEFAULT 100")
+    if "dedupe_key" not in outbox_cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN dedupe_key TEXT")
     param_cols = {row[1] for row in conn.execute("PRAGMA table_info(params)").fetchall()}
     if "esp_rw" not in param_cols:
         conn.execute("ALTER TABLE params ADD COLUMN esp_rw TEXT")

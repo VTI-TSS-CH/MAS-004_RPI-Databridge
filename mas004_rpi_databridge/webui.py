@@ -423,6 +423,20 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             }
         }
 
+    @app.post("/api/queues/outbox/clear")
+    def clear_outbox_queue(x_token: Optional[str] = Header(default=None)):
+        cfg2 = Settings.load(cfg_path)
+        require_token(x_token, cfg2)
+        deleted = outbox.clear()
+        return {"ok": True, "queue": "outbox", "deleted": deleted, "outbox_count": outbox.count()}
+
+    @app.post("/api/queues/inbox/clear")
+    def clear_inbox_queue(x_token: Optional[str] = Header(default=None)):
+        cfg2 = Settings.load(cfg_path)
+        require_token(x_token, cfg2)
+        deleted = inbox.clear()
+        return {"ok": True, "queue": "inbox", "deleted": deleted, "inbox_pending": inbox.count_pending()}
+
     # -----------------------------
     # Config API (Databridge + device endpoints)
     # -----------------------------
@@ -557,7 +571,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
         items = []
         for url in targets:
-            idem = outbox.enqueue(req.method, url, req.headers, req.body, req.idempotency_key)
+            idem = outbox.enqueue(req.method, url, req.headers, req.body, req.idempotency_key, priority=50)
             items.append({"url": url, "idempotency_key": idem})
         return {
             "ok": True,
@@ -603,7 +617,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 logs.log("raspi", "out", f"manual->microtom: {line}")
                 idems = []
                 for url in targets:
-                    idem = outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
+                    idem = outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None, priority=20)
                     idems.append({"url": url, "idempotency_key": idem})
                 items.append({
                     "source": src,
@@ -627,6 +641,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     headers,
                     {"msg": line, "source": "raspi", "origin": src},
                     None,
+                    priority=50,
                 )
                 idems.append({"url": url, "idempotency_key": idem})
             logs.log("raspi", "out", f"forward to microtom: {line}")
@@ -1411,6 +1426,21 @@ load();
       </table>
     </div>
   </fieldset>
+
+  <fieldset>
+    <legend>Queue Maintenance</legend>
+    <div class="grid cols-3b">
+      <div class="field"><label>Outbox count</label><input id="queue_outbox" readonly/></div>
+      <div class="field"><label>Inbox pending</label><input id="queue_inbox" readonly/></div>
+      <div class="field"><label>Last action</label><input id="queue_action" readonly placeholder="none"/></div>
+    </div>
+    <div class="actions">
+      <button onclick="refreshQueueStatus()">Reload Queue Status</button>
+      <button onclick="clearQueue('outbox')">Clear Outbox</button>
+      <button onclick="clearQueue('inbox')">Clear Inbox</button>
+      <span class="muted">Clear Inbox leert die komplette Inbox-Tabelle, nicht nur pending.</span>
+    </div>
+  </fieldset>
   </div>
 
 <script>
@@ -1521,6 +1551,11 @@ function effectivePrefix(iface){
 async function reloadAll(){
   showTok();
 
+  const st = await api("/api/ui/status");
+  document.getElementById("queue_outbox").value = String(st.outbox_count ?? 0);
+  document.getElementById("queue_inbox").value = String(st.inbox_pending ?? 0);
+  document.getElementById("queue_action").value = "reloaded";
+
   // config
   const cfg = await api("/api/config");
   const c = cfg.config;
@@ -1585,6 +1620,24 @@ async function reloadAll(){
 
   document.getElementById("netinfo").textContent = JSON.stringify(net.status, null, 2);
   await loadDailyLogFiles();
+}
+
+async function refreshQueueStatus(){
+  const st = await api("/api/ui/status");
+  document.getElementById("queue_outbox").value = String(st.outbox_count ?? 0);
+  document.getElementById("queue_inbox").value = String(st.inbox_pending ?? 0);
+  document.getElementById("queue_action").value = "status reloaded";
+}
+
+async function clearQueue(which){
+  const target = (which || "").trim().toLowerCase();
+  if(target !== "outbox" && target !== "inbox"){
+    return;
+  }
+  if(!confirm(`Really clear ${target}?`)) return;
+  const j = await api(`/api/queues/${target}/clear`, {method:"POST"});
+  await refreshQueueStatus();
+  document.getElementById("queue_action").value = `${target} cleared: ${j.deleted ?? 0}`;
 }
 
 async function saveNetwork(){

@@ -77,3 +77,13 @@ class Inbox:
     def count_pending(self) -> int:
         with self.db._conn() as c:
             return int(c.execute("SELECT COUNT(*) FROM inbox WHERE state='pending'").fetchone()[0])
+
+    def clear(self, state: Optional[str] = None) -> int:
+        with self.db._conn() as c:
+            if state:
+                deleted = int(c.execute("SELECT COUNT(*) FROM inbox WHERE state=?", (state,)).fetchone()[0])
+                c.execute("DELETE FROM inbox WHERE state=?", (state,))
+                return deleted
+            deleted = int(c.execute("SELECT COUNT(*) FROM inbox").fetchone()[0])
+            c.execute("DELETE FROM inbox")
+            return deleted

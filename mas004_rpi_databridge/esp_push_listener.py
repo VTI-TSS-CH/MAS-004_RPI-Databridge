@@ -181,8 +181,22 @@ class EspPushListener:
         if not targets:
             logs.log("raspi", "error", f"no peer_base_url configured; cannot forward ESP push {line}")
         else:
+            dedupe_key = None
+            drop_if_duplicate = False
+            if ptype in {"MAS", "MAE", "MAW"}:
+                dedupe_key = f"esp-plc:{pkey}"
+                drop_if_duplicate = True
             for url in targets:
-                outbox.enqueue("POST", url, {}, {"msg": forwarded_line, "source": "raspi", "origin": "esp-plc"}, None)
+                outbox.enqueue(
+                    "POST",
+                    url,
+                    {},
+                    {"msg": forwarded_line, "source": "raspi", "origin": "esp-plc"},
+                    None,
+                    priority=100,
+                    dedupe_key=dedupe_key,
+                    drop_if_duplicate=drop_if_duplicate,
+                )
             logs.log("raspi", "out", f"forward to microtom: {forwarded_line}")
 
         resp = f"ACK_{pkey}={value}"

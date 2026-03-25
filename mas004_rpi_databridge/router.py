@@ -61,7 +61,14 @@ class Router:
             headers["X-Correlation-Id"] = correlation
 
         for url in targets:
-            self.outbox.enqueue("POST", url, headers, {"msg": line, "source": "raspi"}, None)
+            self.outbox.enqueue(
+                "POST",
+                url,
+                headers,
+                {"msg": line, "source": "raspi"},
+                None,
+                priority=10,
+            )
 
     def handle_microtom_line(self, line: str, correlation: Optional[str]) -> Optional[str]:
         parsed = parse_operation_line(line)
