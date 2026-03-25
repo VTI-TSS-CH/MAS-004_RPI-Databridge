@@ -2248,8 +2248,9 @@ function setLogStatus(source, msg, isErr=false){
 }
 function appendOutput(source, line){
   const node = el(`out_${sid(source)}`);
-  node.textContent += line + "\\n";
-  node.scrollTop = node.scrollHeight;
+  const existing = node.textContent || "";
+  node.textContent = line + "\\n" + existing;
+  node.scrollTop = 0;
 }
 function clearOutput(source){
   el(`out_${sid(source)}`).textContent = "";

@@ -211,7 +211,7 @@ class LogStore:
 
     def list_logs(self, channel: str, limit: int = 200) -> List[Dict[str, Any]]:
         """
-        Returns logs oldest->newest (UI-friendly).
+        Returns logs newest->oldest (UI-friendly).
         For channel='all' it returns aggregated logs including the channel field.
         """
         limit = max(1, min(int(limit), 2000))
@@ -231,7 +231,7 @@ class LogStore:
                         "direction": r[2],
                         "message": r[3],
                     }
-                    for r in rows[::-1]
+                    for r in rows
                 ]
 
             rows = c.execute(
@@ -247,7 +247,7 @@ class LogStore:
                 "direction": r[2],
                 "message": r[3],
             }
-            for r in rows[::-1]
+            for r in rows
         ]
 
     def read_logfile(self, channel: str, max_bytes: int = 500_000) -> str:
