@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (Local Timezone for Log UI and Logfiles)
+- Added `mas004_rpi_databridge/timeutil.py` as the central source for local system timezone resolution.
+- Daily logfiles, production logfiles and DB-backed log downloads now format timestamps via the current Raspi timezone instead of relying on implicit process-local UTC behavior.
+- Test UI log windows now use server-provided `ts_display` values instead of browser-side `toISOString()` formatting.
+- Goal: all log windows and logfile exports follow the synchronized Raspi local time consistently.
+
 ## 2026-03-25 (Settings UI: System Time / Timezone / NTP Status)
 - Added token-protected endpoint `GET /api/system/time`.
 - `ui/settings` now shows:

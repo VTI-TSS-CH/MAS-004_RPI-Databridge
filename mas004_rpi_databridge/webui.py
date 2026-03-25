@@ -24,6 +24,7 @@ from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager
+from mas004_rpi_databridge.timeutil import format_local_timestamp, local_from_timestamp
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
@@ -331,14 +332,13 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             lines = []
             for it in items:
                 ts = float(it.get("ts") or 0.0)
-                dt = datetime.fromtimestamp(ts)
                 direction = str(it.get("direction") or "").upper()
                 msg = str(it.get("message") or "")
                 if channel == "all":
                     src = str(it.get("channel") or "")
-                    lines.append(f"[{dt:%Y-%m-%d %H:%M:%S}] [{src}] {direction} {msg}")
+                    lines.append(f"[{format_local_timestamp(ts, include_ms=False)}] [{src}] {direction} {msg}")
                 else:
-                    lines.append(f"[{dt:%Y-%m-%d %H:%M:%S}] {direction} {msg}")
+                    lines.append(f"[{format_local_timestamp(ts, include_ms=False)}] {direction} {msg}")
             body = "\n".join(lines) if lines else "(keine Eintraege)"
             return (
                 '<section class="log-card">'
@@ -444,7 +444,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "path": path,
             "exists": exists,
             "size_bytes": int(stat.st_size) if stat else 0,
-            "mtime_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
+            "mtime_iso": local_from_timestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
         }
 
     @app.get("/ui", response_class=HTMLResponse)
@@ -689,6 +689,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         items = []
 
         for line in lines:
+            item_ts = format_local_timestamp(datetime.now().timestamp())
             parsed = re.match(r"^\s*([A-Za-z]{3})([0-9A-Za-z_]+)\s*=\s*(.+?)\s*$", line)
             persisted = None
             persist_msg = None
@@ -722,6 +723,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     "line": line,
                     "route": "raspi->microtom",
                     "ack": "ACK_QUEUED",
+                    "ts_display": item_ts,
                     "idempotency_key": idems[0]["idempotency_key"],
                     "idempotency_keys": idems,
                     "persisted_local": persisted,
@@ -748,6 +750,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "line": line,
                 "route": f"{src}->raspi->microtom",
                 "ack": "ACK_QUEUED",
+                "ts_display": item_ts,
                 "idempotency_key": idems[0]["idempotency_key"],
                 "idempotency_keys": idems,
                 "persisted_local": persisted,
@@ -764,6 +767,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "line": first["line"],
             "route": first["route"],
             "ack": first["ack"],
+            "ts_display": first["ts_display"],
             "idempotency_key": first["idempotency_key"],
             "persisted_local": first["persisted_local"],
             "persist_msg": first["persist_msg"],
@@ -2231,7 +2235,7 @@ async function api(path, opt={}){
   }
   return j;
 }
-function ts(){ return new Date().toISOString().replace("T"," ").replace("Z",""); }
+function displayTs(value){ return String(value || "").trim() || "time-n/a"; }
 function setStatus(source, msg, isErr=false){
   const node = el(`st_${sid(source)}`);
   node.textContent = msg || "";
@@ -2285,9 +2289,10 @@ async function sendFrom(source){
       const route = it.route || (source === "raspi" ? "raspi->microtom" : `${source}->raspi->microtom`);
       const ack = it.ack || "ACK_QUEUED";
       const idem = it.idempotency_key || "-";
-      appendOutput(source, `[${ts()}] ${route}: ${line} (${ack}, idem=${idem})`);
+      const t = displayTs(it.ts_display);
+      appendOutput(source, `[${t}] ${route}: ${line} (${ack}, idem=${idem})`);
       if(source !== "raspi"){
-        appendOutput("raspi", `[${ts()}] incoming from ${source}: ${line}`);
+        appendOutput("raspi", `[${t}] incoming from ${source}: ${line}`);
       }
     }
     setStatus(source, items.length > 1 ? `ok (${items.length})` : "ok");

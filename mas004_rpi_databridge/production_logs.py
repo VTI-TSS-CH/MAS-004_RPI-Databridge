@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
+from mas004_rpi_databridge.timeutil import local_now
 
 DEFAULT_PRODUCTION_LOG_DIR = "/var/lib/mas004_rpi_databridge/production_logs"
 PRODUCTION_STATE_FILE = "_production_state.json"
@@ -32,11 +32,11 @@ PRODUCTION_GROUP_PREFIX = {
 def sanitize_production_label(raw: Optional[str]) -> str:
     txt = (raw or "").strip()
     if not txt:
-        txt = datetime.now().strftime("produktion_%Y%m%d_%H%M%S")
+        txt = local_now().strftime("produktion_%Y%m%d_%H%M%S")
     txt = re.sub(r"\s+", "_", txt)
     txt = re.sub(r"[^A-Za-z0-9._-]+", "_", txt)
     txt = txt.strip("._-")
-    return txt or datetime.now().strftime("produktion_%Y%m%d_%H%M%S")
+    return txt or local_now().strftime("produktion_%Y%m%d_%H%M%S")
 
 
 def production_file_name(group: str, label: str) -> str:

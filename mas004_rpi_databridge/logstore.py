@@ -7,6 +7,7 @@ from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager, DEFAULT_PRODUCTION_LOG_DIR
+from mas004_rpi_databridge.timeutil import format_local_timestamp, local_date
 
 DEFAULT_LOG_DIR = "/var/lib/mas004_rpi_databridge/logs"
 
@@ -84,9 +85,8 @@ class LogStore:
         self._maybe_housekeeping(ts)
 
     def _log_line(self, ts: float, channel: str, direction: str, message: str) -> str:
-        dt = datetime.fromtimestamp(ts)
         enriched = self._enrich_message(message)
-        return f"[{dt:%Y-%m-%d %H:%M:%S}.{int(dt.microsecond/1000):03d}] [{channel}] {direction} {enriched}\n"
+        return f"[{format_local_timestamp(ts)}] [{channel}] {direction} {enriched}\n"
 
     def _extract_pkey(self, message: str) -> Optional[str]:
         s = (message or "").strip()
@@ -137,7 +137,7 @@ class LogStore:
         return os.path.join(self.log_dir, f"{prefix}_{d:%Y-%m-%d}.txt")
 
     def _write_daily_logfiles(self, ts: float, channel: str, direction: str, message: str):
-        d = datetime.fromtimestamp(ts).date()
+        d = local_date(ts)
         line = self._log_line(ts, channel, direction, message)
         for group in self._groups_for_channel(channel):
             fn = self._daily_path(group, d)
@@ -182,7 +182,7 @@ class LogStore:
 
     def apply_retention(self, cfg: Optional[Settings] = None):
         keep_map = self.retention_map_from_settings(cfg)
-        today = datetime.now().date()
+        today = local_date()
         items = self.list_daily_files()
 
         for it in items:
@@ -224,7 +224,13 @@ class LogStore:
                     (limit,),
                 ).fetchall()
                 return [
-                    {"ts": r[0], "channel": r[1], "direction": r[2], "message": r[3]}
+                    {
+                        "ts": r[0],
+                        "ts_display": format_local_timestamp(r[0]),
+                        "channel": r[1],
+                        "direction": r[2],
+                        "message": r[3],
+                    }
                     for r in rows[::-1]
                 ]
 
@@ -234,7 +240,13 @@ class LogStore:
             ).fetchall()
 
         return [
-            {"ts": r[0], "channel": r[1], "direction": r[2], "message": r[3]}
+            {
+                "ts": r[0],
+                "ts_display": format_local_timestamp(r[0]),
+                "channel": r[1],
+                "direction": r[2],
+                "message": r[3],
+            }
             for r in rows[::-1]
         ]
 
@@ -252,11 +264,10 @@ class LogStore:
             ch = str(it.get("channel") or "")
             direction = str(it.get("direction") or "").upper()
             msg = str(it.get("message") or "")
-            dt = datetime.fromtimestamp(ts)
             if channel == "all":
-                lines.append(f"[{dt:%Y-%m-%d %H:%M:%S}.{int(dt.microsecond/1000):03d}] [{ch}] {direction} {msg}")
+                lines.append(f"[{format_local_timestamp(ts)}] [{ch}] {direction} {msg}")
             else:
-                lines.append(f"[{dt:%Y-%m-%d %H:%M:%S}.{int(dt.microsecond/1000):03d}] {direction} {msg}")
+                lines.append(f"[{format_local_timestamp(ts)}] {direction} {msg}")
 
         txt = "\n".join(lines) + ("\n" if lines else "")
         data = txt.encode("utf-8", errors="replace")
