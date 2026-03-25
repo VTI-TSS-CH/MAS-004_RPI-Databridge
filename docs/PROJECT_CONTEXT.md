@@ -104,7 +104,12 @@
   - `TTE` / `TTW` and printer status are primarily updated from the 6530 async channel; polling remains a fallback for workbook status/error mappings
   - `TTS0001` is the dedicated numeric TTO status channel via `STATUS[PRINTER_STATE_CODE]`:
     - `0=OFFLINE`, `1=OFFLINE_WARNING`, `2=OFFLINE_FAULT`, `3=ONLINE`, `4=ONLINE_WARNING`, `5=ONLINE_FAULT`, `6=SHUTDOWN`
-    - ESP writes `0`, `3`, `6` map to printer control commands `OFFLINE`, `ONLINE`, `SHUTDOWN`
+    - ESP writes `0`, `3`, `6` map to printer control transitions, not just one fixed command:
+      - `6 -> 0` via `STARTUP`
+      - `0 -> 3` via `START`
+      - `6 -> 3` via `STARTUP` then `START`
+      - `6` via `SHUTDOWN`
+    - the derived states `1`, `2`, `4`, `5` are observed Warning/Fault combinations and are not direct write targets
     - printer-originated state changes are fanned out to Microtom / ESP only when the workbook access flags allow it
   - the ZBC spec does not expose a generic async delta event for arbitrary `CURRENT_PARAMETERS` changes from the printer UI; direct CLARiTY-side `TTP` edits still require polling/readback
 

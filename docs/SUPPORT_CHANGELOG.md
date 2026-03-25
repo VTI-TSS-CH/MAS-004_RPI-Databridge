@@ -11,6 +11,10 @@
   - `5=ONLINE_FAULT`
   - `6=SHUTDOWN`
 - ESP writes to `TTS0001` now drive the printer through the existing 6530 control path for the directly commandable states `0`, `3`, `6`.
+- Live refinement on TEST:
+  - `TTS0001=3` from `SHUTDOWN (6)` now executes as `STARTUP` then `START`
+  - `TTS0001=0` from `SHUTDOWN (6)` now executes as `STARTUP`
+  - the derived state targets `1`, `2`, `4`, `5` are now rejected cleanly instead of surfacing as misleading `NAK_DeviceComm`
 - The 6530 async listener and fallback poller now respect the workbook access flags before forwarding printer-originated updates to Microtom.
 - The fallback poller now also keeps workbook status/error mappings from `TTP` / `TTS` in sync instead of only `TTE` / `TTW`.
 - Added regression coverage for:

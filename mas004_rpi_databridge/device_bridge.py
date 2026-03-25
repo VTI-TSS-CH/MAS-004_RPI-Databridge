@@ -170,11 +170,15 @@ class DeviceBridge:
                     return f"{pkey}={msg}"
                 return f"{pkey}={resolved}"
 
-            message_id, verified = self._call_zbc_bridge(
-                lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
-                pkey,
-                "write",
-            )
+            try:
+                message_id, verified = self._call_zbc_bridge(
+                    lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
+                    pkey,
+                    "write",
+                )
+            except ValueError as exc:
+                self.logs.log("vj6530", "info", f"live write rejected for {pkey}: {repr(exc)}")
+                return f"{pkey}=NAK_DeviceRejected"
             if int(message_id) != 0:
                 return f"{pkey}=NAK_ZBC_{int(message_id):04X}"
             stored_value = verified if verified is not None else str(value)

@@ -54,9 +54,11 @@
 - Shared-secret and peer URL still valid after config changes
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - ESP write smoke test for `TTS0001`:
-  - `TTS0001=3` -> printer goes online
-  - `TTS0001=0` -> printer goes offline
+  - from `6`: `TTS0001=0` -> printer starts up into `0 OFFLINE`
+  - from `0`: `TTS0001=3` -> printer goes online
+  - from `6`: `TTS0001=3` -> printer runs `STARTUP` then `START`
   - `TTS0001=6` -> printer shuts down
+- Expect direct rejection for `TTS0001=1`, `2`, `4`, `5`; these are observed composite warning/fault states, not direct control targets
 - `TTE` / `TTW` / `TTS` printer-originated updates only forward to Microtom / ESP when the workbook `R/W:` / `ESP32 R/W:` flags allow it
 - NTP configured values visible in `/ui/settings` and service logs contain `[NTP]` entries
 - TCP relay listeners started as configured (service logs contain `[FWD] listen ...` for required ports)
