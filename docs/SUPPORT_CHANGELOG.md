@@ -9,6 +9,7 @@
 - Successful 6530 writes from Microtom or ESP now trigger an immediate workbook status resync so related status rows such as `TTP00073`, `TTP00076`, `TTS0001`, `TTE*`, `TTW*` do not wait for the next background cycle.
 - The async loop now proactively rotates 6530 subscriptions every 30s and reconnects near-immediately after printer-driven `socket closed` events, reducing blind windows between state pushes.
 - The async listener now marks the channel healthy immediately after a successful subscription, so the fallback poller does not race the first startup summary refresh.
+- The service now starts the 6530 async thread before the fallback poller and gives it a short head start during boot, removing another startup race on `3002`.
 - The multi-repo sync script now skips restarting services that are explicitly `disabled` or `masked` on the target, so intentionally parked side daemons do not reappear during routine sync.
 - Outbox dedupe is now lossless for non-consecutive state changes:
   - consecutive duplicate values may still collapse

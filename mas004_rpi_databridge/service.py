@@ -246,10 +246,19 @@ def main():
     push_t = threading.Thread(target=esp_push_listener_loop, args=(cfg_path, push_mgr), daemon=True)
     push_t.start()
 
-    vj6530_poll_t = threading.Thread(target=vj6530_poll_loop, args=(cfg_path,), daemon=True)
-    vj6530_poll_t.start()
     vj6530_async_t = threading.Thread(target=vj6530_async_loop, args=(cfg_path,), daemon=True)
     vj6530_async_t.start()
+    if (
+        bool(getattr(cfg, "vj6530_async_enabled", True))
+        and not bool(cfg.vj6530_simulation)
+        and (cfg.vj6530_host or "").strip()
+        and int(cfg.vj6530_port or 0) > 0
+    ):
+        # Give the async subscriber a short head start so the fallback poller
+        # does not race the first live 3002 session during service startup.
+        time.sleep(1.0)
+    vj6530_poll_t = threading.Thread(target=vj6530_poll_loop, args=(cfg_path,), daemon=True)
+    vj6530_poll_t.start()
 
     app = build_app(cfg_path)
     app.state.tcp_forwarder_manager = fwd_mgr
