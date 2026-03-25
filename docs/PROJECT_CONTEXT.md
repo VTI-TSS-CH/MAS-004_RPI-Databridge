@@ -77,6 +77,8 @@
 - This repo is the orchestration authority.
 - Subprojects must be treated as extensions of this repo, not peers.
 - All multi-repo operations should start here.
+- The recommended long-term master orchestration prompt and sub-agent topology live in:
+  - `docs/MAS-004_Roche_Master_Chat.md`
 
 ## Multi-Repo Dependency Map
 - `MAS-004_ESP32-PLC-Bridge`: ESP32 transport/probe subproject

@@ -1,5 +1,19 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-25 (Master Chat / Sub-Agent Orchestration Blueprint)
+- Added `docs/MAS-004_Roche_Master_Chat.md` as the recommended bootstrap instruction for the future master chat `MAS-004_Roche`.
+- Defined a stable long-term sub-agent topology with dedicated owners for:
+  - documentation
+  - main Databridge core
+  - parameter master data / Excel mappings
+  - ESP32 bridge
+  - ESP32 firmware
+  - VJ3350 bridge
+  - VJ6530 bridge
+  - ZBC shared protocol library
+  - release / deployment operations
+- Documented coordination rules so future multi-repo work can scale without overlapping file ownership or mixing protocol, business and deployment responsibilities.
+
 ## 2026-03-25 (Local Timezone for Log UI and Logfiles)
 - Added `mas004_rpi_databridge/timeutil.py` as the central source for local system timezone resolution.
 - Daily logfiles, production logfiles and DB-backed log downloads now format timestamps via the current Raspi timezone instead of relying on implicit process-local UTC behavior.
