@@ -148,7 +148,10 @@
       - `6 -> 3` in about `3.2 s`
     - the derived states `1`, `2`, `4`, `5` are observed Warning/Fault combinations and are not direct write targets
     - printer-originated state changes are fanned out to Microtom / ESP only when the workbook access flags allow it
-    - current TEST gap: the real ESP at `192.168.2.101:3010` still answers `NAK_UnknownParam` for `TTP00073`, `TTP00076` and `TTS0001`; the Microtom path is healthy, but ESP-side parameter support/mapping still needs alignment before those TTO updates can arrive there successfully
+    - TEST status after the 2026-03-26 ESP firmware refresh:
+      - the real ESP at `192.168.2.101:3010` now seeds and accepts `TTP00073`, `TTP00076` and `TTS0001`
+      - direct live smoke on TEST confirmed `ACK_TTP00073=1`, `ACK_TTP00076=ONLINE`, `ACK_TTS0001=3`
+      - the ESP firmware seed generator now includes `TTP` / `TTS` / `TTE` / `TTW` in addition to `MAP` / `MAS` / `MAE` / `MAW`, using workbook `ESP32 R/W:` as the writeability source
   - the ZBC spec does not expose a generic async delta event for arbitrary `CURRENT_PARAMETERS` changes from the printer UI; direct CLARiTY-side `TTP` edits still require polling/readback
 
 ## Sync/Support Policy

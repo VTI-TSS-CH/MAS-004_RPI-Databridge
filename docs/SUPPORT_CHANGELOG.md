@@ -1,5 +1,15 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-03-26 (ESP Firmware TTO Mirror Gap Closed)
+- The remaining TEST ESP gap for mirrored 6530 state rows is closed:
+  - `TTS0001`, `TTP00073`, `TTP00076` no longer fail with `NAK_UnknownParam` on the real ESP
+- Root cause was on the ESP firmware side, not in the Raspi async path:
+  - the ESP seed generator only covered `MAP` / `MAS` / `MAE` / `MAW`
+  - the real device therefore had no seeded slots for the mirrored 6530 rows
+- TEST proof after the firmware refresh:
+  - direct smoke on `192.168.2.101:3010` confirmed `ACK_TTS0001=3`, `ACK_TTP00073=1`, `ACK_TTP00076=ONLINE`
+- The async Raspi fanout logic stays unchanged; this entry closes the documented ESP-side limitation from the previous TEST runs.
+
 ## 2026-03-25 (6530 Async Proof + Background ESP Mirror)
 - Live raw ZBC verification on TEST now confirms that `AIS/AIR` is really active and immediate on the 6530:
   - `CMD_START` produced `AIR` tag `0x0002` in about `46 ms`
@@ -9,8 +19,8 @@
   - Microtom fanout no longer waits behind slow ESP writes
   - transient ESP communication failures retry in the worker
   - permanent ESP rejections such as `NAK_UnknownParam` remain visible in the logs instead of silently disappearing
-- Current TEST finding kept explicit:
-  - `TTP00073`, `TTP00076`, `TTS0001` are currently still rejected by the real ESP with `NAK_UnknownParam`, so the Microtom path is healthy but ESP-side parameter support is not yet aligned for those TTO state pushes.
+- Historical TEST finding before the 2026-03-26 firmware update:
+  - `TTP00073`, `TTP00076`, `TTS0001` were rejected by the real ESP with `NAK_UnknownParam`, even though the Microtom path itself was healthy.
 
 ## 2026-03-25 (6530 `6 -> 3` Confirmation Uses Live Summary)
 - Fixed the remaining `TTS0001=3` failure from `SHUTDOWN (6)`: the Raspi no longer trusts a stale shutdown snapshot while confirming the `STARTUP` step.

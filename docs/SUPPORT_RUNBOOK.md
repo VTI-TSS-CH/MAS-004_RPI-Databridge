@@ -69,9 +69,9 @@
   - from `0`: `TTS0001=3` -> printer goes online
   - from `6`: `TTS0001=3` -> printer runs `STARTUP` then `START`
   - `TTS0001=6` -> printer shuts down
-- Current TEST-only gap:
-  - the real ESP currently still answers `NAK_UnknownParam` for `TTS0001`, `TTP00073`, `TTP00076`
-  - do not misread that as a 6530 async timing problem; it is an ESP parameter-support / mapping gap
+- TEST validation after the 2026-03-26 ESP firmware update:
+  - direct smoke on `192.168.2.101:3010` should now accept and echo `TTS0001`, `TTP00073`, `TTP00076`
+  - if those three ever fall back to `NAK_UnknownParam` again, treat that as an ESP firmware/seed regression, not a 6530 async timing issue
 - Expect direct rejection for `TTS0001=1`, `2`, `4`, `5`; these are observed composite warning/fault states, not direct control targets
 - `TTE` / `TTW` / `TTS` printer-originated updates only forward to Microtom / ESP when the workbook `R/W:` / `ESP32 R/W:` flags allow it
 - After a successful 6530 write, verify that related status rows (`TTP00073`, `TTP00076`, `TTS0001`, relevant `TTE*` / `TTW*`) follow immediately without waiting for the next periodic poll cycle.
