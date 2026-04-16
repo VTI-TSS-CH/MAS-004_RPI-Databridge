@@ -258,7 +258,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     default_ptype_hint = {"raspi": "", "esp-plc": "MAS", "vj3350": "LSE", "vj6530": "TTE"}
     catalog_ids = [int(item["id"]) for item in motor_catalog()]
     motor_state_store = MotorStateStore(cfg)
-    motor_bindings_cache: dict[str, Any] = {"ts": 0.0, "value": {}}
+    motor_bindings_cache: dict[str, Any] = {"ts": 0.0, "value": {}, "loaded": False}
 
     def get_motor_client() -> EspMotorClient:
         return EspMotorClient(Settings.load(cfg_path))
@@ -268,13 +268,35 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     def get_motor_bindings() -> dict[int, dict[str, Any]]:
         now = time.monotonic()
-        cached = motor_bindings_cache.get("value") or {}
-        if cached and (now - float(motor_bindings_cache.get("ts") or 0.0)) < 10.0:
-            return cached
-        rows = params.list_params(limit=100000, offset=0)
-        value = {int(item["motor_id"]): item for item in build_motor_bindings(rows)}
+        if bool(motor_bindings_cache.get("loaded")) and (now - float(motor_bindings_cache.get("ts") or 0.0)) < 30.0:
+            return motor_bindings_cache.get("value") or {}
+        with db._conn() as c:
+            rows = c.execute(
+                """SELECT p.pkey,p.ptype,p.pid,p.unit,p.rw,p.esp_rw,p.dtype,p.name,p.message,p.ai_instructions
+                   FROM params p
+                   WHERE p.ptype IN ('MAP','MAS','MAE')
+                     AND COALESCE(TRIM(p.ai_instructions), '') <> ''
+                   ORDER BY p.ptype ASC, p.pid ASC"""
+            ).fetchall()
+        compact_rows = [
+            {
+                "pkey": row[0],
+                "ptype": row[1],
+                "pid": row[2],
+                "unit": row[3],
+                "rw": row[4],
+                "esp_rw": row[5],
+                "dtype": row[6],
+                "name": row[7],
+                "message": row[8],
+                "ai_instructions": row[9],
+            }
+            for row in rows
+        ]
+        value = {int(item["motor_id"]): item for item in build_motor_bindings(compact_rows)}
         motor_bindings_cache["ts"] = now
         motor_bindings_cache["value"] = value
+        motor_bindings_cache["loaded"] = True
         return value
 
     def get_simulated_motor_ids(cfg2: Optional[Settings] = None) -> set[int]:
