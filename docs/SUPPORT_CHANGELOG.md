@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-16 (Per-Motor Simulation on Motors UI)
+- Added per-motor simulation toggles directly on `/ui/motors`.
+- Simulated motors are no longer queried through the ESP endpoint during the periodic UI refresh.
+- The Raspi now keeps a local motor UI cache and shows last known values or machine defaults while a motor stays in simulation.
+- Live-only motor actions are disabled in the UI when a motor is marked as simulated.
+
 ## 2026-04-16 (Motors UI Fallback + Smart Wickler Integration + Logo Restore)
 - The Raspi `Motors` page no longer depends on a live ESP motor endpoint to render:
   - all 9 Oriental motor cards are now shown from a fixed machine catalog even when the ESP endpoint is missing or still in simulation

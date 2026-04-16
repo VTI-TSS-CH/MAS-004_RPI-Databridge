@@ -99,6 +99,8 @@
 - If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
 - For the new Oriental motor setup page:
   - `/api/motors/overview` must return JSON with all 9 configured drives even when the ESP motor endpoint is offline or still in simulation
+  - a motor that is marked as simulated on `/ui/motors` must not trigger live ESP polling during the refresh cycle
+  - simulated motors must show last known cached values or defaults, not a repeated endpoint warning
   - while typing into `/ui/motors`, periodic refresh must not overwrite focused or dirty inputs
   - `MOTOR <id> SET ...` / `SAVE` / `MOVE_REL_*` must echo through the ESP endpoint before any TEST deployment is claimed successful
 - For Smart Wickler integration:

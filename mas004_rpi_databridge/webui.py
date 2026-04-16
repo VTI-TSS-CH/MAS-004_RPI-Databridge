@@ -22,8 +22,9 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_ip_info
 from mas004_rpi_databridge.esp_motors import EspMotorClient
-from mas004_rpi_databridge.motor_catalog import merge_motor_payload
+from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
+from mas004_rpi_databridge.motor_state_store import MotorStateStore
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -235,6 +236,10 @@ class MotorConfigReq(BaseModel):
     max_enabled: Optional[bool] = None
 
 
+class MotorSimulationReq(BaseModel):
+    enabled: bool
+
+
 def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     app = FastAPI(title="MAS-004_RPI-Databridge", version="0.3.0", docs_url=None)
     
@@ -250,26 +255,111 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         shutil.copyfile(REPO_MASTER_PARAMS_XLSX, cfg.master_params_xlsx_path)
     test_sources = {"raspi", "esp-plc", "vj3350", "vj6530"}
     default_ptype_hint = {"raspi": "", "esp-plc": "MAS", "vj3350": "LSE", "vj6530": "TTE"}
+    catalog_ids = [int(item["id"]) for item in motor_catalog()]
 
     def get_motor_client() -> EspMotorClient:
         return EspMotorClient(Settings.load(cfg_path))
+
+    def get_motor_state_store() -> MotorStateStore:
+        return MotorStateStore(Settings.load(cfg_path))
 
     def get_motor_bindings() -> dict[int, dict[str, Any]]:
         rows = params.list_params(limit=100000, offset=0)
         return {int(item["motor_id"]): item for item in build_motor_bindings(rows)}
 
+    def get_simulated_motor_ids(cfg2: Optional[Settings] = None) -> set[int]:
+        cfg_local = cfg2 or Settings.load(cfg_path)
+        stored = get_motor_state_store().simulation_ids()
+        if bool(getattr(cfg_local, "esp_simulation", False)):
+            return set(catalog_ids)
+        return stored
+
+    def motor_live_allowed(motor_id: int, cfg2: Optional[Settings] = None) -> bool:
+        return int(motor_id) not in get_simulated_motor_ids(cfg2)
+
+    def require_live_motor_or_raise(motor_id: int, cfg2: Optional[Settings] = None) -> Settings:
+        cfg_local = cfg2 or Settings.load(cfg_path)
+        if not motor_live_allowed(motor_id, cfg_local):
+            raise HTTPException(status_code=409, detail=f"Motor {int(motor_id)} ist im Simulationsbetrieb")
+        client = EspMotorClient(cfg_local)
+        if not client.available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
+        return cfg_local
+
     def get_motor_overview_payload() -> dict[str, Any]:
+        cfg2 = Settings.load(cfg_path)
         client = get_motor_client()
-        live_payload: dict[str, Any] | None = None
-        if client.available():
-            try:
-                live_payload = client.list_motors()
-                live_payload["live_available"] = True
-            except Exception as exc:
-                live_payload = {"ok": False, "motors": [], "error": str(exc), "live_available": False}
+        store = get_motor_state_store()
+        cached_motors = store.cached_motors()
+        simulated_ids = get_simulated_motor_ids(cfg2)
+        live_target_ids = [mid for mid in catalog_ids if mid not in simulated_ids]
+        live_items: list[dict[str, Any]] = []
+        live_successes: list[dict[str, Any]] = []
+        live_error_count = 0
+        live_error = ""
+
+        if live_target_ids:
+            if not client.available():
+                live_error = "ESP-Motor-Endpoint nicht erreichbar"
+            elif len(live_target_ids) == len(catalog_ids):
+                try:
+                    payload = client.list_motors()
+                    live_items = [dict(item) for item in (payload.get("motors") or []) if isinstance(item, dict)]
+                    live_successes = [dict(item) for item in live_items]
+                except Exception as exc:
+                    live_error = str(exc)
+            else:
+                for motor_id in live_target_ids:
+                    try:
+                        payload = client.status(motor_id)
+                        raw_motor = payload.get("motor") if isinstance(payload, dict) else None
+                        motor_item = raw_motor if isinstance(raw_motor, dict) else {}
+                        if not motor_item:
+                            raise RuntimeError("ESP returned no motor payload")
+                        motor_data = dict(motor_item)
+                        motor_data["id"] = int(motor_id)
+                        live_items.append(motor_data)
+                        live_successes.append(dict(motor_data))
+                    except Exception as exc:
+                        live_error_count += 1
+                        cached = cached_motors.get(int(motor_id))
+                        if isinstance(cached, dict):
+                            fallback = dict(cached)
+                            fallback["id"] = int(motor_id)
+                            state = dict(fallback.get("state") or {})
+                            state["link_ok"] = False
+                            state["last_error"] = str(exc)
+                            fallback["state"] = state
+                            fallback["last_reply"] = str(exc)
+                            live_items.append(fallback)
+                        else:
+                            live_items.append(
+                                {
+                                    "id": int(motor_id),
+                                    "state": {"link_ok": False, "last_error": str(exc)},
+                                    "last_reply": str(exc),
+                                }
+                            )
+
+        if live_successes:
+            store.remember_motors(live_successes)
+            cached_motors = store.cached_motors()
+
+        merged = merge_motor_payload(
+            {"ok": True, "motors": live_items, "error": live_error, "live_available": bool(live_successes)},
+            get_motor_bindings(),
+            simulated_ids=simulated_ids,
+            cached_motors=cached_motors,
+        )
+        if live_target_ids and live_error and not live_successes:
+            count = len(live_target_ids)
+            merged["message"] = f"{count} Live-Motor{'en' if count != 1 else ''} derzeit nicht erreichbar"
+        elif live_error_count:
+            merged["message"] = f"{live_error_count} Live-Motor{'en' if live_error_count != 1 else ''} derzeit nicht erreichbar"
         else:
-            live_payload = {"ok": False, "motors": [], "error": "ESP motor endpoint missing or simulation enabled", "live_available": False}
-        return merge_motor_payload(live_payload, get_motor_bindings())
+            merged["message"] = ""
+        merged["simulated_ids"] = sorted(simulated_ids)
+        return merged
 
     def get_winder_state(role: str) -> dict[str, Any]:
         normalized = normalize_winder_role(role)
@@ -1138,6 +1228,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        if not motor_live_allowed(motor_id, cfg2):
+            merged = get_motor_overview_payload()
+            for motor in merged.get("motors") or []:
+                if int(motor.get("id") or 0) == int(motor_id):
+                    return motor
+            raise HTTPException(status_code=404, detail=f"Unknown motor id {motor_id}")
         client = get_motor_client()
         if client.available():
             payload = client.status(motor_id)
@@ -1159,9 +1255,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        client = get_motor_client()
-        if not client.available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
+        require_live_motor_or_raise(motor_id, cfg2)
+        client = EspMotorClient(cfg2)
         mode = (body.mode or "").strip().lower()
         if mode == "relative_steps":
             return client.move_relative_steps(motor_id, int(round(body.value)))
@@ -1181,9 +1276,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         payload = body.model_dump(exclude_none=True)
-        client = get_motor_client()
-        if not client.available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
+        require_live_motor_or_raise(motor_id, cfg2)
+        client = EspMotorClient(cfg2)
         return client.set_config(motor_id, payload)
 
     @app.post("/api/motors/{motor_id}/save")
@@ -1194,9 +1288,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        if not get_motor_client().available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
-        return get_motor_client().save(motor_id)
+        require_live_motor_or_raise(motor_id, cfg2)
+        return EspMotorClient(cfg2).save(motor_id)
 
     @app.post("/api/motors/{motor_id}/zero")
     def api_motor_zero(
@@ -1206,9 +1299,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        if not get_motor_client().available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
-        return get_motor_client().zero(motor_id)
+        require_live_motor_or_raise(motor_id, cfg2)
+        return EspMotorClient(cfg2).zero(motor_id)
 
     @app.post("/api/motors/{motor_id}/min")
     def api_motor_min(
@@ -1218,9 +1310,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        if not get_motor_client().available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
-        return get_motor_client().set_min(motor_id)
+        require_live_motor_or_raise(motor_id, cfg2)
+        return EspMotorClient(cfg2).set_min(motor_id)
 
     @app.post("/api/motors/{motor_id}/max")
     def api_motor_max(
@@ -1230,9 +1321,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        if not get_motor_client().available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
-        return get_motor_client().set_max(motor_id)
+        require_live_motor_or_raise(motor_id, cfg2)
+        return EspMotorClient(cfg2).set_max(motor_id)
 
     @app.post("/api/motors/{motor_id}/reset-alarm")
     def api_motor_reset_alarm(
@@ -1242,9 +1332,23 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        if not get_motor_client().available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
-        return get_motor_client().reset_alarm(motor_id)
+        require_live_motor_or_raise(motor_id, cfg2)
+        return EspMotorClient(cfg2).reset_alarm(motor_id)
+
+    @app.post("/api/motors/{motor_id}/simulation")
+    def api_motor_simulation(
+        motor_id: int,
+        body: MotorSimulationReq,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        store = get_motor_state_store()
+        ids = sorted(store.set_simulation(motor_id, bool(body.enabled)))
+        merged = get_motor_overview_payload()
+        motor_payload = next((item for item in (merged.get("motors") or []) if int(item.get("id") or 0) == int(motor_id)), None)
+        return {"ok": True, "simulation_ids": ids, "motor": motor_payload}
 
     @app.get("/api/winders/{role}/state")
     def api_winder_state(
@@ -1608,6 +1712,12 @@ function statusKind(v){
   return "warn";
 }
 
+function setMotorSimulationUi(id, enabled){
+  document.querySelectorAll(`[data-motor-id="${id}"][data-live-only="1"]`).forEach(el => {
+    el.disabled = !!enabled;
+  });
+}
+
 function renderCard(motor){
   const bindings = motor.bindings || {};
   const related = (bindings.related_params || []).map(it => esc(it.pkey)).join(", ");
@@ -1624,6 +1734,7 @@ function renderCard(motor){
       <span class="pill">${esc(motor.controller || "")}</span>
       <span class="pill">${esc(motor.motor_type || "")}</span>
       <span class="pill">${motor.positional ? "Positionierachse" : "Transportachse"}</span>
+      <label class="pill"><input type="checkbox" id="m-${motor.id}-simulation" onchange="toggleSimulation(${motor.id}, this.checked)"/>Simulation</label>
     </div>
     <div class="status-grid">
       <div class="status-box">
@@ -1644,29 +1755,29 @@ function renderCard(motor){
     </div>
     <div class="section-title">Kalibrierung / Parameter</div>
     <div class="grid">
-      <div class="field"><label>Test-Schritte</label><input id="m-${motor.id}-test_steps" value="1000"/></div>
-      <div class="field"><label>Manuell bewegen [mm]</label><input id="m-${motor.id}-manual_mm" value="0"/></div>
-      <div class="field"><label>Steps / mm</label><input id="m-${motor.id}-steps_per_mm"/></div>
-      <div class="field"><label>Geschwindigkeit [mm/s]</label><input id="m-${motor.id}-speed_mm_s"/></div>
-      <div class="field"><label>Acceleration [mm/s²]</label><input id="m-${motor.id}-accel_mm_s2"/></div>
-      <div class="field"><label>Deceleration [mm/s²]</label><input id="m-${motor.id}-decel_mm_s2"/></div>
-      <div class="field"><label>Strom [%]</label><input id="m-${motor.id}-current_pct"/></div>
-      <div class="field"><label>Drehrichtung</label><select id="m-${motor.id}-invert_direction"><option value="0">Normal</option><option value="1">Invertiert</option></select></div>
-      <div class="field"><label>Min [1/10mm]</label><input id="m-${motor.id}-min_tenths_mm"/></div>
-      <div class="field"><label>Max [1/10mm]</label><input id="m-${motor.id}-max_tenths_mm"/></div>
-      <div class="field"><label>Min aktiv</label><select id="m-${motor.id}-min_enabled"><option value="0">Nein</option><option value="1">Ja</option></select></div>
-      <div class="field"><label>Max aktiv</label><select id="m-${motor.id}-max_enabled"><option value="0">Nein</option><option value="1">Ja</option></select></div>
+      <div class="field"><label>Test-Schritte</label><input id="m-${motor.id}-test_steps" data-motor-id="${motor.id}" data-live-only="1" value="1000"/></div>
+      <div class="field"><label>Manuell bewegen [mm]</label><input id="m-${motor.id}-manual_mm" data-motor-id="${motor.id}" data-live-only="1" value="0"/></div>
+      <div class="field"><label>Steps / mm</label><input id="m-${motor.id}-steps_per_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Geschwindigkeit [mm/s]</label><input id="m-${motor.id}-speed_mm_s" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Acceleration [mm/s2]</label><input id="m-${motor.id}-accel_mm_s2" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Deceleration [mm/s2]</label><input id="m-${motor.id}-decel_mm_s2" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Strom [%]</label><input id="m-${motor.id}-current_pct" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Drehrichtung</label><select id="m-${motor.id}-invert_direction" data-motor-id="${motor.id}" data-live-only="1"><option value="0">Normal</option><option value="1">Invertiert</option></select></div>
+      <div class="field"><label>Min [1/10mm]</label><input id="m-${motor.id}-min_tenths_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Max [1/10mm]</label><input id="m-${motor.id}-max_tenths_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Min aktiv</label><select id="m-${motor.id}-min_enabled" data-motor-id="${motor.id}" data-live-only="1"><option value="0">Nein</option><option value="1">Ja</option></select></div>
+      <div class="field"><label>Max aktiv</label><select id="m-${motor.id}-max_enabled" data-motor-id="${motor.id}" data-live-only="1"><option value="0">Nein</option><option value="1">Ja</option></select></div>
       <div class="field span-3"><label>Zuordnung aus Excel</label><input disabled value="${esc(related)}"/></div>
     </div>
     <div class="actions" style="margin-top:10px">
-      <button class="btn" onclick="moveSteps(${motor.id})">Schritte fahren</button>
-      <button class="btn" onclick="defineResolution(${motor.id})">Auflösung definieren</button>
-      <button class="btn" onclick="manualMove(${motor.id})">Move mm</button>
-      <button class="btn" onclick="setZero(${motor.id})">Nullpunkt setzen</button>
-      <button class="btn" onclick="setMin(${motor.id})">Min setzen</button>
-      <button class="btn" onclick="setMax(${motor.id})">Max setzen</button>
-      <button class="btn" onclick="resetAlarm(${motor.id})">Alarm Reset</button>
-      <button class="btn" onclick="saveConfig(${motor.id})">Parameter speichern</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="moveSteps(${motor.id})">Schritte fahren</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="defineResolution(${motor.id})">Auflösung definieren</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="manualMove(${motor.id})">Move mm</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setZero(${motor.id})">Nullpunkt setzen</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setMin(${motor.id})">Min setzen</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setMax(${motor.id})">Max setzen</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="resetAlarm(${motor.id})">Alarm Reset</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="saveConfig(${motor.id})">Parameter speichern</button>
     </div>
     <div class="section-title">Meldungen</div>
     <div class="status-box"><code id="live-${motor.id}-msg">${esc(state.last_error || motor.last_reply || "-")}</code></div>
@@ -1691,6 +1802,7 @@ function updateLiveText(id, suffix, value, cls){
 function updateCard(motor){
   const cfg = motor.config || {};
   const state = motor.state || {};
+  const sim = !!motor.simulation;
   setInputValueIfClean(motor.id, "steps_per_mm", cfg.steps_per_mm ?? "");
   setInputValueIfClean(motor.id, "speed_mm_s", cfg.speed_mm_s ?? "");
   setInputValueIfClean(motor.id, "accel_mm_s2", cfg.accel_mm_s2 ?? "");
@@ -1712,6 +1824,9 @@ function updateCard(motor){
   updateLiveText(motor.id, "inraw", state.input_raw_hex ?? "");
   updateLiveText(motor.id, "outraw", state.output_raw_hex ?? "");
   updateLiveText(motor.id, "msg", state.last_error || motor.last_reply || "-");
+  const simEl = document.getElementById(`m-${motor.id}-simulation`);
+  if(simEl){ simEl.checked = sim; }
+  setMotorSimulationUi(motor.id, sim);
 }
 
 function openWinder(role){
@@ -1728,6 +1843,12 @@ async function reloadAll(){
   }
   const suffix = data.message ? ` | ${data.message}` : "";
   document.getElementById("status").textContent = `${(data.motors || []).length} Motoren geladen${suffix}`;
+}
+
+async function toggleSimulation(id, enabled){
+  document.getElementById("status").textContent = `simulation motor ${id}...`;
+  await post(`/api/motors/${id}/simulation`, {enabled: !!enabled});
+  await reloadAll();
 }
 
 async function post(path, body){

@@ -116,19 +116,65 @@ def motor_catalog() -> list[dict[str, Any]]:
     for base in _CATALOG:
         item = deepcopy(base)
         item["config"] = _default_config()
-        item["state"] = _default_state("ESP-Motor-Endpoint nicht erreichbar oder Simulation aktiv")
+        item["state"] = _default_state("")
         item["bindings"] = None
         item["last_reply"] = ""
+        item["simulation"] = False
         items.append(item)
     return items
 
 
-def merge_motor_payload(payload: dict[str, Any] | None, bindings: dict[int, dict[str, Any]]) -> dict[str, Any]:
+def _overlay(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    for key, value in extra.items():
+        if key in ("config", "state"):
+            continue
+        base[key] = value
+    if isinstance(extra.get("config"), dict):
+        merged_cfg = dict(base.get("config") or {})
+        merged_cfg.update(extra.get("config") or {})
+        base["config"] = merged_cfg
+    if isinstance(extra.get("state"), dict):
+        merged_state = dict(base.get("state") or {})
+        merged_state.update(extra.get("state") or {})
+        base["state"] = merged_state
+    return base
+
+
+def merge_motor_payload(
+    payload: dict[str, Any] | None,
+    bindings: dict[int, dict[str, Any]],
+    *,
+    simulated_ids: set[int] | None = None,
+    cached_motors: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     motors = {int(item["id"]): item for item in motor_catalog()}
+    simulated_ids = {int(mid) for mid in (simulated_ids or set())}
+    cached_motors = cached_motors or {}
     live_payload = payload or {}
     live_items = live_payload.get("motors") or []
     live_error = str(live_payload.get("error") or "").strip()
     live_available = bool(live_payload.get("live_available")) or bool(live_items)
+
+    for mid, cached in cached_motors.items():
+        if not isinstance(cached, dict):
+            continue
+        base = motors.setdefault(
+            int(mid),
+            {
+                "id": int(mid),
+                "name": f"Motor {mid}",
+                "controller": "",
+                "motor_type": "",
+                "positional": True,
+                "description": "",
+                "config": _default_config(),
+                "state": _default_state(""),
+                "bindings": None,
+                "last_reply": "",
+                "simulation": False,
+            },
+        )
+        _overlay(base, cached)
 
     for live in live_items:
         try:
@@ -150,20 +196,10 @@ def merge_motor_payload(payload: dict[str, Any] | None, bindings: dict[int, dict
                 "state": _default_state(""),
                 "bindings": None,
                 "last_reply": "",
+                "simulation": False,
             },
         )
-        for key, value in live.items():
-            if key in ("config", "state"):
-                continue
-            base[key] = value
-        if isinstance(live.get("config"), dict):
-            merged_cfg = dict(base.get("config") or {})
-            merged_cfg.update(live.get("config") or {})
-            base["config"] = merged_cfg
-        if isinstance(live.get("state"), dict):
-            merged_state = dict(base.get("state") or {})
-            merged_state.update(live.get("state") or {})
-            base["state"] = merged_state
+        _overlay(base, live)
 
     for mid, binding in bindings.items():
         base = motors.setdefault(
@@ -179,22 +215,29 @@ def merge_motor_payload(payload: dict[str, Any] | None, bindings: dict[int, dict
                 "state": _default_state(""),
                 "bindings": None,
                 "last_reply": "",
+                "simulation": False,
             },
         )
         base["bindings"] = binding
 
-    if not live_available:
-        fallback_msg = live_error or "ESP-Motor-Endpoint nicht erreichbar oder Simulation aktiv"
-        for item in motors.values():
-            item.setdefault("state", {})
-            if not item["state"].get("last_error"):
-                item["state"]["last_error"] = fallback_msg
+    fallback_msg = live_error or "ESP-Motor-Endpoint nicht erreichbar oder Simulation aktiv"
+    for mid, item in motors.items():
+        item["simulation"] = mid in simulated_ids
+        item.setdefault("state", {})
+        if item["simulation"]:
+            item["state"]["last_error"] = "Simulation aktiv - letzte bekannte Werte"
+            item["state"]["link_ok"] = "SIM"
             if not item.get("last_reply"):
-                item["last_reply"] = fallback_msg
+                item["last_reply"] = "Simulation aktiv - letzte bekannte Werte"
+            continue
+        if not live_available and not item["state"].get("last_error"):
+            item["state"]["last_error"] = fallback_msg
+        if not live_available and not item.get("last_reply"):
+            item["last_reply"] = fallback_msg
 
     return {
         "ok": True,
         "live_available": live_available,
-        "message": "" if live_available else (live_error or "Simulation aktiv oder ESP-Motor-Endpoint nicht erreichbar"),
+        "message": "",
         "motors": [motors[mid] for mid in sorted(motors)],
     }
