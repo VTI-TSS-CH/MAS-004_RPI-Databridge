@@ -1,5 +1,20 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-16 (LIVE Deployed + Secondary VPN Callback Reverified)
+- Deployed the merged local Databridge mainline to the Microtom LIVE Raspberry:
+  - LIVE repo `/opt/MAS-004_RPI-Databridge` is now on `f660b69`
+  - runtime package was reinstalled and `mas004-rpi-databridge.service` restarted without changing the LIVE UI/config settings
+- Also aligned the currently reachable LIVE companion repos to the local merged basis:
+  - `MAS-004_VJ6530-ZBC-Bridge` -> `09f9397`
+  - `MAS-004_ZBC-Library` -> `c47563d`
+  - `MAS-004_ESP32-PLC-Firmware` -> `61e9ef0`
+- Reverified the secondary VPN callback path on LIVE against `peer_base_url_secondary = https://192.168.5.2:9090`:
+  - five consecutive `MAS0030=?` requests reached the secondary peer in about `31 ms`, `31 ms`, `35 ms`, `37 ms`, `54 ms`
+  - at the same time the primary peer `http://192.168.210.10:81/api/inbox` still timed out with the expected `~10 s` `ReadTimeout`, but no longer blocked the secondary lane
+- Corrected the LIVE workbook/DB access metadata for `MAS0029`:
+  - `esp_rw` changed from stale `R` to workbook-correct `N`
+  - the live value itself stayed untouched (`default_v = 987654` at time of correction)
+
 ## 2026-04-16 (Outbox Lane Split for Slow Microtom Inbox Callbacks)
 - Diagnosed the LIVE Microtom callback delay pattern on `192.168.210.20`:
   - the Databridge sender was single-threaded

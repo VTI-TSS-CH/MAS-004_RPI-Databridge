@@ -114,8 +114,14 @@
   - the live config still used `http_timeout_s = 10.0`
   - journal inspection showed repeated `ReadTimeout('timed out')` on `POST http://192.168.210.10:81/api/inbox`
   - the observed callback staircase at roughly `10s / 20s / 30s ...` matched that timeout exactly
-  - a direct live probe from the Raspi to `peer_base_url_secondary = https://192.168.5.2:9090` returned in about `49 ms`
-  - a locally prepared repo fix now isolates primary timeouts from non-primary callback targets; deployment remains pending until reachability/approval allow it
+  - the merged local mainline was deployed to LIVE on 2026-04-16; `/opt/MAS-004_RPI-Databridge` now runs `f660b69`
+  - direct live re-verification against `peer_base_url_secondary = https://192.168.5.2:9090` showed the aux lane delivering five consecutive callbacks in about `31-54 ms` while the primary lane continued timing out independently at `~10 s`
+  - live companion repos were aligned during the same maintenance window:
+    - `/opt/MAS-004_VJ6530-ZBC-Bridge` -> `09f9397`
+    - `/opt/MAS-004_ZBC-Library` -> `c47563d`
+    - `/opt/MAS-004_ESP32-PLC-Firmware` -> `61e9ef0`
+  - live metadata hotfix applied:
+    - `MAS0029.esp_rw = N` now matches the current workbook semantics
 - When the TEST Raspberry becomes reachable again, mirror these values manually via the Settings UI or a controlled config export/import, not via repo deployment.
 
 ## Persistent Paths

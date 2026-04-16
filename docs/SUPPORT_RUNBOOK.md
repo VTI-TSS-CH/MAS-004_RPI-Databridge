@@ -83,6 +83,8 @@
   - a slow/timing-out primary Microtom inbox may still back up primary jobs
   - but it must no longer delay secondary/custom callback targets
 - Shared-secret and peer URL still valid after config changes
+- When probing `POST /api/inbox` from Windows PowerShell, prefer `curl.exe --data-binary @payload.json` or `Invoke-RestMethod`:
+  - naive inline JSON quoting can arrive mangled as `{"msg":"{\\"}` and creates false routing/callback conclusions
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - Expect the 6530 async path to be primary for online/offline/warning/fault changes; the poller is fallback/reconciliation only.
 - Expect critical 6530 status flips (online/offline/warning/fault) to arrive via high-priority AIS and update `STATUS[...]` / `STS[...]` workbook rows immediately from the async snapshot, before the slower summary settle finishes.
