@@ -5,6 +5,8 @@
 - Simulated motors are no longer queried through the ESP endpoint during the periodic UI refresh.
 - The Raspi now keeps a local motor UI cache and shows last known values or machine defaults while a motor stays in simulation.
 - Live-only motor actions are disabled in the UI when a motor is marked as simulated.
+- When all motors are currently in simulation, the Motors UI now pauses auto-refresh instead of flipping the status text between `loading...` and the loaded state.
+- Motor binding lookup for `/api/motors/overview` is now cached in-process so the initial page load is lighter.
 
 ## 2026-04-16 (Motors UI Fallback + Smart Wickler Integration + Logo Restore)
 - The Raspi `Motors` page no longer depends on a live ESP motor endpoint to render:

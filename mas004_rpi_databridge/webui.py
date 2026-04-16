@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 
 from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
@@ -256,16 +257,25 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     test_sources = {"raspi", "esp-plc", "vj3350", "vj6530"}
     default_ptype_hint = {"raspi": "", "esp-plc": "MAS", "vj3350": "LSE", "vj6530": "TTE"}
     catalog_ids = [int(item["id"]) for item in motor_catalog()]
+    motor_state_store = MotorStateStore(cfg)
+    motor_bindings_cache: dict[str, Any] = {"ts": 0.0, "value": {}}
 
     def get_motor_client() -> EspMotorClient:
         return EspMotorClient(Settings.load(cfg_path))
 
     def get_motor_state_store() -> MotorStateStore:
-        return MotorStateStore(Settings.load(cfg_path))
+        return motor_state_store
 
     def get_motor_bindings() -> dict[int, dict[str, Any]]:
+        now = time.monotonic()
+        cached = motor_bindings_cache.get("value") or {}
+        if cached and (now - float(motor_bindings_cache.get("ts") or 0.0)) < 10.0:
+            return cached
         rows = params.list_params(limit=100000, offset=0)
-        return {int(item["motor_id"]): item for item in build_motor_bindings(rows)}
+        value = {int(item["motor_id"]): item for item in build_motor_bindings(rows)}
+        motor_bindings_cache["ts"] = now
+        motor_bindings_cache["value"] = value
+        return value
 
     def get_simulated_motor_ids(cfg2: Optional[Settings] = None) -> set[int]:
         cfg_local = cfg2 or Settings.load(cfg_path)
@@ -1675,6 +1685,8 @@ load();
 const TOKEN_KEY = "mas004_ui_token";
 const dirtyFields = new Set();
 const renderedIds = new Set();
+let autoRefreshHandle = null;
+let currentAutoRefreshMs = null;
 
 function token(){ try { return localStorage.getItem(TOKEN_KEY) || ""; } catch(e){ return ""; } }
 function fieldKey(id, name){ return `${id}:${name}`; }
@@ -1716,6 +1728,10 @@ function setMotorSimulationUi(id, enabled){
   document.querySelectorAll(`[data-motor-id="${id}"][data-live-only="1"]`).forEach(el => {
     el.disabled = !!enabled;
   });
+}
+
+function setStatus(text){
+  document.getElementById("status").textContent = text || "";
 }
 
 function renderCard(motor){
@@ -1834,19 +1850,8 @@ function openWinder(role){
   window.open(target, "_blank", "noopener");
 }
 
-async function reloadAll(){
-  document.getElementById("status").textContent = "loading...";
-  const data = await api("/api/motors/overview");
-  for(const motor of (data.motors || [])){
-    if(!renderedIds.has(motor.id)){ renderCard(motor); }
-    else { updateCard(motor); }
-  }
-  const suffix = data.message ? ` | ${data.message}` : "";
-  document.getElementById("status").textContent = `${(data.motors || []).length} Motoren geladen${suffix}`;
-}
-
 async function toggleSimulation(id, enabled){
-  document.getElementById("status").textContent = `simulation motor ${id}...`;
+  setStatus(`simulation motor ${id}...`);
   await post(`/api/motors/${id}/simulation`, {enabled: !!enabled});
   await reloadAll();
 }
@@ -1871,7 +1876,7 @@ function configPayload(id){
 }
 
 async function saveConfig(id){
-  document.getElementById("status").textContent = `saving motor ${id}...`;
+  setStatus(`saving motor ${id}...`);
   await post(`/api/motors/${id}/config`, configPayload(id));
   await post(`/api/motors/${id}/save`, {});
   ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
@@ -1881,7 +1886,7 @@ async function saveConfig(id){
 async function moveSteps(id){
   const value = numOrNull(document.getElementById(`m-${id}-test_steps`).value);
   if(value === null){ alert("Bitte Schrittzahl eingeben."); return; }
-  document.getElementById("status").textContent = `move steps motor ${id}...`;
+  setStatus(`move steps motor ${id}...`);
   await post(`/api/motors/${id}/move`, {mode:"relative_steps", value:value});
   await reloadAll();
 }
@@ -1904,7 +1909,7 @@ async function defineResolution(id){
     dir.value = dir.value === "1" ? "0" : "1";
     dirtyFields.add(fieldKey(id, "invert_direction"));
   }
-  document.getElementById("status").textContent = `Motor ${id}: neue Aufloesung berechnet, bitte speichern`;
+  setStatus(`Motor ${id}: neue Aufloesung berechnet, bitte speichern`);
 }
 
 async function manualMove(id){
@@ -1919,8 +1924,36 @@ async function setMin(id){ await post(`/api/motors/${id}/min`, {}); await reload
 async function setMax(id){ await post(`/api/motors/${id}/max`, {}); await reloadAll(); }
 async function resetAlarm(id){ await post(`/api/motors/${id}/reset-alarm`, {}); await reloadAll(); }
 
-reloadAll();
-setInterval(() => { reloadAll().catch(err => { document.getElementById("status").textContent = err.message; }); }, 2000);
+function scheduleAutoRefresh(ms){
+  if(autoRefreshHandle){
+    clearInterval(autoRefreshHandle);
+    autoRefreshHandle = null;
+  }
+  currentAutoRefreshMs = ms;
+  if(!ms || ms <= 0){ return; }
+  autoRefreshHandle = setInterval(() => {
+    reloadAll({silent:true}).catch(err => { setStatus(err.message); });
+  }, ms);
+}
+
+async function reloadAll(opts = {}){
+  const silent = !!opts.silent;
+  if(!silent){ setStatus("loading..."); }
+  const data = await api("/api/motors/overview");
+  for(const motor of (data.motors || [])){
+    if(!renderedIds.has(motor.id)){ renderCard(motor); }
+    else { updateCard(motor); }
+  }
+  const allSimulated = (data.motors || []).length > 0 && (data.motors || []).every(m => !!m.simulation);
+  const suffix = data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "");
+  setStatus(`${(data.motors || []).length} Motoren geladen${suffix}`);
+  const desiredMs = allSimulated ? 0 : 2000;
+  if(currentAutoRefreshMs !== desiredMs){
+    scheduleAutoRefresh(desiredMs);
+  }
+}
+
+reloadAll().catch(err => { setStatus(err.message); });
 </script>
 </body>
 </html>

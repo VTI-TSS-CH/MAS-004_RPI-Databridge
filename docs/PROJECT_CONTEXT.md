@@ -27,6 +27,7 @@
   - dirty-field protection so UI refreshes do not overwrite operator input while typing
   - the motor cards are now also available when the ESP endpoint is missing or still in simulation; a fixed machine catalog acts as the baseline view and live ESP data only overlays when reachable
   - each motor now also has its own local simulation toggle on the Raspi UI; simulated motors are excluded from live polling and instead use last known cached values or the fixed catalog defaults
+  - if all visible motors are simulated, the page pauses its background refresh loop to avoid `loading...` flicker and unnecessary overview calls
 - New Smart Wickler proxy surface on the Raspi web UI:
   - `/ui/winders/unwinder`
   - `/ui/winders/rewinder`

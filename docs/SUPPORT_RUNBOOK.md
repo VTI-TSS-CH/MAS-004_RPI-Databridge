@@ -101,6 +101,7 @@
   - `/api/motors/overview` must return JSON with all 9 configured drives even when the ESP motor endpoint is offline or still in simulation
   - a motor that is marked as simulated on `/ui/motors` must not trigger live ESP polling during the refresh cycle
   - simulated motors must show last known cached values or defaults, not a repeated endpoint warning
+  - if all 9 motors are currently simulated, the page should settle on a stable loaded status and pause background refresh instead of alternating with `loading...`
   - while typing into `/ui/motors`, periodic refresh must not overwrite focused or dirty inputs
   - `MOTOR <id> SET ...` / `SAVE` / `MOVE_REL_*` must echo through the ESP endpoint before any TEST deployment is claimed successful
 - For Smart Wickler integration:
