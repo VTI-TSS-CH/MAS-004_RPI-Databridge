@@ -12,6 +12,13 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.http_client import HttpClient
+from mas004_rpi_databridge.peers import (
+    SenderLane,
+    primary_peer_base_url,
+    secondary_peer_base_url,
+    sender_lanes,
+    url_matches_peer_base,
+)
 from mas004_rpi_databridge.watchdog import Watchdog
 from mas004_rpi_databridge.webui import build_app
 from mas004_rpi_databridge.ntp_sync import ntp_loop
@@ -31,61 +38,71 @@ def backoff_s(retry_count: int, base: float, cap: float) -> float:
     n = min(retry_count, 10)
     return min(cap, base * (2 ** n))
 
-def sender_loop(cfg_path: str):
+
+def sender_loop(cfg_path: str, lane: SenderLane):
     while True:
         cfg = Settings.load(cfg_path)
         db = DB(cfg.db_path)
         outbox = Outbox(db)
 
-        health_url = None
-        if cfg.peer_health_path:
-            health_url = cfg.peer_base_url.rstrip("/") + cfg.peer_health_path
+        watchdog = None
+        if lane.use_primary_watchdog:
+            health_url = None
+            primary_base = primary_peer_base_url(cfg)
+            if cfg.peer_health_path and primary_base:
+                health_url = primary_base + cfg.peer_health_path
 
-        watchdog = Watchdog(
-            host=cfg.peer_watchdog_host,
-            interval_s=cfg.watchdog_interval_s,
-            timeout_s=cfg.watchdog_timeout_s,
-            down_after=cfg.watchdog_down_after,
-            health_url=health_url,
-            tls_verify=cfg.tls_verify
-        )
+            watchdog = Watchdog(
+                host=cfg.peer_watchdog_host,
+                interval_s=cfg.watchdog_interval_s,
+                timeout_s=cfg.watchdog_timeout_s,
+                down_after=cfg.watchdog_down_after,
+                health_url=health_url,
+                tls_verify=cfg.tls_verify
+            )
 
         client = HttpClient(timeout_s=cfg.http_timeout_s, source_ip=cfg.eth0_source_ip, verify_tls=cfg.tls_verify)
 
         while True:
-            up = watchdog.tick()
-            if not up:
+            if watchdog and not watchdog.tick():
                 # Schnell erneut pruefen; Watchdog selbst drosselt intern ueber interval_s.
                 time.sleep(0.2)
                 continue
 
-            job = outbox.next_due()
+            job = outbox.next_due(
+                url_prefixes=lane.url_prefixes,
+                exclude_url_prefixes=lane.exclude_url_prefixes,
+            )
             if not job:
                 time.sleep(0.05)
                 continue
 
-            secondary_base = (getattr(cfg, "peer_base_url_secondary", "") or "").strip().rstrip("/")
-            is_secondary_target = bool(secondary_base) and (job.url or "").startswith(secondary_base + "/")
+            secondary_base = secondary_peer_base_url(cfg)
+            is_secondary_target = url_matches_peer_base(job.url or "", secondary_base)
 
             try:
+                started_at = time.time()
                 if not (job.url or "").lower().startswith(("http://", "https://")):
-                    print(f"[OUTBOX] drop id={job.id} invalid_url={job.url!r}", flush=True)
+                    print(f"[OUTBOX:{lane.name}] drop id={job.id} invalid_url={job.url!r}", flush=True)
                     outbox.delete(job.id)
                     continue
 
                 headers = json.loads(job.headers_json)
                 body = json.loads(job.body_json) if job.body_json else None
 
-                print(f"[OUTBOX] send id={job.id} rc={job.retry_count} {job.method} {job.url}", flush=True)
+                print(f"[OUTBOX:{lane.name}] send id={job.id} rc={job.retry_count} {job.method} {job.url}", flush=True)
                 resp = client.request(job.method, job.url, headers, body)
-                print(f"[OUTBOX] ok   id={job.id} resp={resp}", flush=True)
+                elapsed_ms = int((time.time() - started_at) * 1000)
+                print(f"[OUTBOX:{lane.name}] ok   id={job.id} elapsed_ms={elapsed_ms} resp={resp}", flush=True)
 
                 outbox.delete(job.id)
 
             except Exception as e:
+                elapsed_ms = int((time.time() - started_at) * 1000)
                 if is_secondary_target:
                     print(
-                        f"[OUTBOX] drop secondary id={job.id} err={repr(e)} url={job.url}",
+                        f"[OUTBOX:{lane.name}] drop secondary id={job.id} elapsed_ms={elapsed_ms} "
+                        f"err={repr(e)} url={job.url}",
                         flush=True,
                     )
                     outbox.delete(job.id)
@@ -93,7 +110,11 @@ def sender_loop(cfg_path: str):
 
                 rc = job.retry_count + 1
                 next_ts = time.time() + backoff_s(rc, cfg.retry_base_s, cfg.retry_cap_s)
-                print(f"[OUTBOX] FAIL id={job.id} rc={rc} next_in={int(next_ts-time.time())}s err={repr(e)}", flush=True)
+                print(
+                    f"[OUTBOX:{lane.name}] FAIL id={job.id} rc={rc} next_in={int(next_ts-time.time())}s "
+                    f"elapsed_ms={elapsed_ms} err={repr(e)}",
+                    flush=True,
+                )
                 outbox.reschedule(job.id, rc, next_ts)
 
 
@@ -225,8 +246,9 @@ def main():
     ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True)
     ntp_t.start()
 
-    sender_t = threading.Thread(target=sender_loop, args=(cfg_path,), daemon=True)
-    sender_t.start()
+    for lane in sender_lanes(cfg):
+        sender_t = threading.Thread(target=sender_loop, args=(cfg_path, lane), daemon=True)
+        sender_t.start()
     router_t = threading.Thread(target=router_loop, args=(cfg_path,), daemon=True)
     router_t.start()
 

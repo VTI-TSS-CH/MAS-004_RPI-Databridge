@@ -130,6 +130,7 @@ class ParamStore:
         c_cause = col_any("Possible Cause", "Possible cause")
         c_eff = col_any("Effects", "Effect")
         c_rem = col_any("Remedy")
+        c_ai = col_any("KI-Anweisungen:", "KI-Anweisungen", "KI Anweisungen", "AI Instructions")
 
         # Optional mapping columns for live device protocols.
         c_esp_key = col_any("ESP Key", "ESP_Key", "ESP Param", "ESP Parameter")
@@ -191,6 +192,7 @@ class ParamStore:
                 cause = _to_str(ws.cell(r, c_cause).value) if c_cause else None
                 eff = _to_str(ws.cell(r, c_eff).value) if c_eff else None
                 rem = _to_str(ws.cell(r, c_rem).value) if c_rem else None
+                ai = _to_str(ws.cell(r, c_ai).value) if c_ai else None
 
                 ts = now_ts()
 
@@ -200,19 +202,58 @@ class ParamStore:
                         """UPDATE params SET
                            ptype=?, pid=?, min_v=?, max_v=?, default_v=?, unit=?, rw=?, esp_rw=?, dtype=?,
                            name=?, format_relevant=?, message=?, possible_cause=?, effects=?, remedy=?,
+                           ai_instructions=?,
                            updated_ts=?
                            WHERE pkey=?""",
-                        (ptype, pid, min_v, max_v, default_v, unit, rw, esp_rw, dtype, name, fmt, msg, cause, eff, rem, ts, pkey),
+                        (
+                            ptype,
+                            pid,
+                            min_v,
+                            max_v,
+                            default_v,
+                            unit,
+                            rw,
+                            esp_rw,
+                            dtype,
+                            name,
+                            fmt,
+                            msg,
+                            cause,
+                            eff,
+                            rem,
+                            ai,
+                            ts,
+                            pkey,
+                        ),
                     )
                     updated += 1
                 else:
                     c.execute(
                         """INSERT INTO params(
                            pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
-                           message,possible_cause,effects,remedy,updated_ts
+                           message,possible_cause,effects,remedy,ai_instructions,updated_ts
                            )
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (pkey, ptype, pid, min_v, max_v, default_v, unit, rw, esp_rw, dtype, name, fmt, msg, cause, eff, rem, ts),
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            pkey,
+                            ptype,
+                            pid,
+                            min_v,
+                            max_v,
+                            default_v,
+                            unit,
+                            rw,
+                            esp_rw,
+                            dtype,
+                            name,
+                            fmt,
+                            msg,
+                            cause,
+                            eff,
+                            rem,
+                            ai,
+                            ts,
+                        ),
                     )
                     inserted += 1
 
@@ -274,13 +315,28 @@ class ParamStore:
     def get_meta(self, pkey: str) -> Optional[Dict[str, Any]]:
         with self.db._conn() as c:
             row = c.execute(
-                """SELECT pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,message
+                """SELECT pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,message,ai_instructions
                    FROM params WHERE pkey=?""",
                 (pkey,),
             ).fetchone()
         if not row:
             return None
-        keys = ["pkey", "ptype", "pid", "min_v", "max_v", "default_v", "unit", "rw", "esp_rw", "dtype", "name", "format_relevant", "message"]
+        keys = [
+            "pkey",
+            "ptype",
+            "pid",
+            "min_v",
+            "max_v",
+            "default_v",
+            "unit",
+            "rw",
+            "esp_rw",
+            "dtype",
+            "name",
+            "format_relevant",
+            "message",
+            "ai_instructions",
+        ]
         return dict(zip(keys, row))
 
     def get_device_map(self, pkey: str) -> Dict[str, Any]:
@@ -485,11 +541,12 @@ class ParamStore:
 
         if q:
             q2 = f"%{q}%"
-            where.append("(p.pkey LIKE ? OR p.name LIKE ? OR p.message LIKE ?)")
-            args.extend([q2, q2, q2])
+            where.append("(p.pkey LIKE ? OR p.name LIKE ? OR p.message LIKE ? OR p.ai_instructions LIKE ?)")
+            args.extend([q2, q2, q2, q2])
 
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
         sql = f"""SELECT p.pkey,p.ptype,p.pid,p.min_v,p.max_v,p.default_v,p.unit,p.rw,p.esp_rw,p.dtype,p.name,p.message,
+                         p.ai_instructions,
                          m.esp_key,m.zbc_mapping,m.zbc_message_id,m.zbc_command_id,m.zbc_value_codec,m.zbc_scale,m.zbc_offset,
                          m.ultimate_set_cmd,m.ultimate_get_cmd,m.ultimate_var_name
                   FROM params p
@@ -523,16 +580,17 @@ class ParamStore:
                     "dtype": r[9],
                     "name": r[10],
                     "message": r[11],
-                    "esp_key": r[12],
-                    "zbc_mapping": r[13],
-                    "zbc_message_id": r[14],
-                    "zbc_command_id": r[15],
-                    "zbc_value_codec": r[16],
-                    "zbc_scale": r[17],
-                    "zbc_offset": r[18],
-                    "ultimate_set_cmd": r[19],
-                    "ultimate_get_cmd": r[20],
-                    "ultimate_var_name": r[21],
+                    "ai_instructions": r[12],
+                    "esp_key": r[13],
+                    "zbc_mapping": r[14],
+                    "zbc_message_id": r[15],
+                    "zbc_command_id": r[16],
+                    "zbc_value_codec": r[17],
+                    "zbc_scale": r[18],
+                    "zbc_offset": r[19],
+                    "ultimate_set_cmd": r[20],
+                    "ultimate_get_cmd": r[21],
+                    "ultimate_var_name": r[22],
                 }
             )
         return out
@@ -558,6 +616,7 @@ class ParamStore:
             "Data Type",
             "Name",
             "Message",
+            "KI-Anweisungen:",
             "ESP Key",
             "ZBC Mapping",
             "VJ6530 Msg ID",
@@ -587,6 +646,7 @@ class ParamStore:
                     r.get("dtype"),
                     r.get("name"),
                     r.get("message"),
+                    r.get("ai_instructions"),
                     r.get("esp_key"),
                     r.get("zbc_mapping"),
                     r.get("zbc_message_id"),

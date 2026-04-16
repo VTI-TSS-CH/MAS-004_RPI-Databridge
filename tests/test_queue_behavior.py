@@ -88,6 +88,34 @@ class QueueBehaviorTests(unittest.TestCase):
 
             self.assertEqual(3, outbox.count())
 
+    def test_outbox_can_select_primary_and_non_primary_lanes_independently(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            outbox = Outbox(db)
+
+            outbox.enqueue("POST", "http://primary/api/inbox", {}, {"msg": "PRIMARY", "source": "raspi"}, priority=10)
+            outbox.enqueue("POST", "https://secondary/api/inbox", {}, {"msg": "SECONDARY", "source": "raspi"}, priority=10)
+
+            primary = outbox.next_due(url_prefixes=["http://primary"])
+            self.assertIsNotNone(primary)
+            self.assertEqual("http://primary/api/inbox", primary.url)
+
+            non_primary = outbox.next_due(exclude_url_prefixes=["http://primary"])
+            self.assertIsNotNone(non_primary)
+            self.assertEqual("https://secondary/api/inbox", non_primary.url)
+
+    def test_outbox_lane_filter_matches_exact_base_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            outbox = Outbox(db)
+
+            outbox.enqueue("POST", "https://secondary", {}, {"msg": "BASE", "source": "raspi"}, priority=10)
+            outbox.enqueue("POST", "https://secondary/api/inbox", {}, {"msg": "PATH", "source": "raspi"}, priority=20)
+
+            job = outbox.next_due(url_prefixes=["https://secondary"])
+            self.assertIsNotNone(job)
+            self.assertEqual("https://secondary", job.url)
+
     def test_inbox_and_outbox_can_be_cleared(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = DB(str(Path(tmpdir) / "db.sqlite3"))

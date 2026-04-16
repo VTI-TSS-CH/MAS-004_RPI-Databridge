@@ -21,6 +21,8 @@ from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_ip_info
+from mas004_rpi_databridge.esp_motors import EspMotorClient
+from mas004_rpi_databridge.motor_bindings import build_motor_bindings
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -28,7 +30,7 @@ from mas004_rpi_databridge.timeutil import format_local_timestamp, local_from_ti
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
-REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "Parameterliste SAR41-MAS-004_V11.11.25.xlsx")
+REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "Parameterliste SAR41-MAS-004.xlsx")
 
 
 def require_token(x_token: Optional[str], cfg: Settings):
@@ -198,6 +200,24 @@ class TestSendReq(BaseModel):
     ptype_hint: Optional[str] = None
 
 
+class MotorMoveReq(BaseModel):
+    mode: str
+    value: float
+
+
+class MotorConfigReq(BaseModel):
+    steps_per_mm: Optional[float] = None
+    speed_mm_s: Optional[float] = None
+    accel_mm_s2: Optional[float] = None
+    decel_mm_s2: Optional[float] = None
+    current_pct: Optional[float] = None
+    invert_direction: Optional[bool] = None
+    min_tenths_mm: Optional[int] = None
+    max_tenths_mm: Optional[int] = None
+    min_enabled: Optional[bool] = None
+    max_enabled: Optional[bool] = None
+
+
 def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     app = FastAPI(title="MAS-004_RPI-Databridge", version="0.3.0", docs_url=None)
     
@@ -213,6 +233,27 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         shutil.copyfile(REPO_MASTER_PARAMS_XLSX, cfg.master_params_xlsx_path)
     test_sources = {"raspi", "esp-plc", "vj3350", "vj6530"}
     default_ptype_hint = {"raspi": "", "esp-plc": "MAS", "vj3350": "LSE", "vj6530": "TTE"}
+
+    def get_motor_client() -> EspMotorClient:
+        client = EspMotorClient(Settings.load(cfg_path))
+        if not client.available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
+        return client
+
+    def get_motor_bindings() -> dict[int, dict[str, Any]]:
+        rows = params.list_params(limit=100000, offset=0)
+        return {int(item["motor_id"]): item for item in build_motor_bindings(rows)}
+
+    def enrich_motor_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        bindings = get_motor_bindings()
+        motors = payload.get("motors") or []
+        enriched = []
+        for motor in motors:
+            mid = int(motor.get("id") or 0)
+            item = dict(motor)
+            item["bindings"] = bindings.get(mid)
+            enriched.append(item)
+        return {"ok": bool(payload.get("ok", True)), "motors": enriched}
 
     def normalize_test_source(source: str) -> str:
         s = (source or "").strip().lower()
@@ -261,6 +302,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             ("home", "/", "Home"),
             ("docs", "/docs", "API Docs"),
             ("params", "/ui/params", "Parameter"),
+            ("motors", "/ui/motors", "Motors"),
             ("test", "/ui/test", "Test UI"),
             ("settings", "/ui/settings", "Settings"),
         ]
@@ -1046,6 +1088,116 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         return logs.acknowledge_production_files()
 
     # =========================
+    # ===== Motors API ========
+    # =========================
+    @app.get("/api/motors/overview")
+    def api_motors_overview(
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        client = get_motor_client()
+        payload = client.list_motors()
+        return enrich_motor_payload(payload)
+
+    @app.get("/api/motors/{motor_id}")
+    def api_motor_status(
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        client = get_motor_client()
+        payload = client.status(motor_id)
+        bindings = get_motor_bindings().get(int(motor_id))
+        payload["bindings"] = bindings
+        return payload
+
+    @app.post("/api/motors/{motor_id}/move")
+    def api_motor_move(
+        motor_id: int,
+        body: MotorMoveReq,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        client = get_motor_client()
+        mode = (body.mode or "").strip().lower()
+        if mode == "relative_steps":
+            return client.move_relative_steps(motor_id, int(round(body.value)))
+        if mode == "relative_mm":
+            return client.move_relative_mm(motor_id, float(body.value))
+        if mode == "absolute_mm":
+            return client.move_absolute_mm(motor_id, float(body.value))
+        raise HTTPException(status_code=400, detail="Unsupported motor move mode")
+
+    @app.post("/api/motors/{motor_id}/config")
+    def api_motor_config(
+        motor_id: int,
+        body: MotorConfigReq,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        payload = body.model_dump(exclude_none=True)
+        client = get_motor_client()
+        return client.set_config(motor_id, payload)
+
+    @app.post("/api/motors/{motor_id}/save")
+    def api_motor_save(
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        return get_motor_client().save(motor_id)
+
+    @app.post("/api/motors/{motor_id}/zero")
+    def api_motor_zero(
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        return get_motor_client().zero(motor_id)
+
+    @app.post("/api/motors/{motor_id}/min")
+    def api_motor_min(
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        return get_motor_client().set_min(motor_id)
+
+    @app.post("/api/motors/{motor_id}/max")
+    def api_motor_max(
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        return get_motor_client().set_max(motor_id)
+
+    @app.post("/api/motors/{motor_id}/reset-alarm")
+    def api_motor_reset_alarm(
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        return get_motor_client().reset_alarm(motor_id)
+
+    # =========================
     # ===== SIMPLE UI =========
     # =========================
     @app.get("/ui/params", response_class=HTMLResponse)
@@ -1119,7 +1271,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     <thead>
       <tr>
         <th>pkey</th><th>min</th><th>max</th><th>default</th><th>rw</th><th>esp_rw</th>
-        <th>current</th><th>effective</th><th>name</th><th>message</th><th>edit</th>
+        <th>current</th><th>effective</th><th>name</th><th>message</th><th>KI</th><th>edit</th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
@@ -1179,6 +1331,7 @@ async function load(){
       <td>${it.effective_v ?? ""}</td>
       <td>${it.name ?? ""}</td>
       <td>${it.message ?? ""}</td>
+      <td>${it.ai_instructions ?? ""}</td>
       <td><button class="btn" onclick="edit('${it.pkey}','${it.min_v ?? ""}','${it.max_v ?? ""}','${it.default_v ?? ""}','${it.rw ?? ""}','${it.esp_rw ?? ""}')">edit</button></td>
     `;
     tb.appendChild(tr);
@@ -1280,6 +1433,292 @@ function exportXlsx(){
 }
 
 load();
+</script>
+</body>
+</html>
+        """.replace("__NAV__", nav)
+
+    @app.get("/ui/motors", response_class=HTMLResponse)
+    def ui_motors():
+        nav = nav_html("motors")
+        return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Motor Setup</title>
+  <style>
+    :root{
+      --bg:#f4f6f9; --card:#fff; --text:#1f2933; --muted:#5f6b7a; --border:#d6dde7; --blue:#005eb8;
+      --good:#2e7d32; --warn:#ed6c02; --bad:#c62828;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font-family:Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text)}
+    .wrap{max-width:1600px; margin:0 auto; padding:16px}
+    .topnav{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}
+    .navbtn{padding:8px 12px; border:1px solid #c2d2e4; border-radius:8px; background:#e8f0f8; color:#1f2933; text-decoration:none}
+    .navbtn.active{background:#005eb8; color:#fff; border-color:#005eb8}
+    .toolbar,.row,.actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .toolbar{margin-bottom:12px}
+    .muted{color:var(--muted)}
+    .btn{min-height:38px; padding:8px 12px; border:1px solid #aec4db; border-radius:10px; background:#e8f0f8; color:#17324b; font-weight:600; cursor:pointer}
+    .btn:hover{background:#dce8f5}
+    .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(470px,1fr)); gap:12px}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px}
+    .card h3{margin:0 0 6px 0}
+    .meta{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+    .pill{display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid var(--border); background:#eef3f8; font-size:12px}
+    .ok{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+    .grid{display:grid; gap:10px; grid-template-columns:repeat(3,minmax(0,1fr))}
+    .field{display:flex; flex-direction:column; gap:4px}
+    .field label{font-size:12px; color:var(--muted); font-weight:600}
+    input,select{width:100%; min-height:38px; padding:9px 10px; border:1px solid var(--border); border-radius:10px; background:#fff}
+    input:focus,select:focus{outline:none; border-color:var(--blue); box-shadow:0 0 0 3px rgba(0,94,184,.12)}
+    .span-2{grid-column:span 2}
+    .span-3{grid-column:span 3}
+    .status-grid{display:grid; gap:8px; grid-template-columns:repeat(2,minmax(0,1fr)); margin-bottom:10px}
+    .status-box{background:#f8fafc; border:1px solid var(--border); border-radius:10px; padding:10px}
+    .status-box strong{display:block; margin-bottom:6px}
+    .status-box code{font-size:12px; white-space:pre-wrap; word-break:break-word}
+    .section-title{margin:12px 0 8px 0; font-size:14px; font-weight:700}
+    @media(max-width:980px){ .grid,.status-grid{grid-template-columns:1fr} .span-2,.span-3{grid-column:auto} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    __NAV__
+    <div class="toolbar">
+      <button class="btn" onclick="reloadAll()">Reload</button>
+      <span id="status" class="muted">loading...</span>
+    </div>
+    <div class="cards" id="cards"></div>
+  </div>
+<script>
+const TOKEN_KEY = "mas004_ui_token";
+const dirtyFields = new Set();
+const renderedIds = new Set();
+
+function token(){ try { return localStorage.getItem(TOKEN_KEY) || ""; } catch(e){ return ""; } }
+function fieldKey(id, name){ return `${id}:${name}`; }
+function esc(v){ return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+function numOrNull(v){ const t = String(v ?? "").trim(); return t === "" ? null : Number(t); }
+function boolFromInput(id){ return document.getElementById(id).value === "1"; }
+
+async function api(path, opt={}){
+  opt.headers = opt.headers || {};
+  const t = token();
+  if(t) opt.headers["X-Token"] = t;
+  const r = await fetch(path, opt);
+  const txt = await r.text();
+  let j = null; try { j = JSON.parse(txt); } catch(e) {}
+  if(!r.ok){ throw new Error((j && j.detail) ? j.detail : (`HTTP ${r.status} ${txt}`)); }
+  return j;
+}
+
+function bindDirty(input, motorId, field){
+  const key = fieldKey(motorId, field);
+  ["input","change"].forEach(evt => input.addEventListener(evt, () => dirtyFields.add(key)));
+}
+
+function setInputValueIfClean(motorId, field, value){
+  const el = document.getElementById(`m-${motorId}-${field}`);
+  if(!el) return;
+  const key = fieldKey(motorId, field);
+  if(dirtyFields.has(key) || document.activeElement === el){ return; }
+  el.value = value ?? "";
+}
+
+function statusKind(v){
+  if(v === true || v === 1 || v === "1"){ return "ok"; }
+  if(v === false || v === 0 || v === "0"){ return "muted"; }
+  return "warn";
+}
+
+function renderCard(motor){
+  const bindings = motor.bindings || {};
+  const related = (bindings.related_params || []).map(it => esc(it.pkey)).join(", ");
+  const cfg = motor.config || {};
+  const state = motor.state || {};
+  const card = document.createElement("div");
+  card.className = "card";
+  card.id = `motor-card-${motor.id}`;
+  card.innerHTML = `
+    <h3>${esc(motor.name || ("Motor " + motor.id))}</h3>
+    <div class="meta">
+      <span class="pill">ID ${esc(motor.id)}</span>
+      <span class="pill">${esc(motor.controller || "")}</span>
+      <span class="pill">${esc(motor.motor_type || "")}</span>
+      <span class="pill">${motor.positional ? "Positionierachse" : "Transportachse"}</span>
+    </div>
+    <div class="status-grid">
+      <div class="status-box">
+        <strong>Live</strong>
+        <div>Link: <span id="live-${motor.id}-link" class="${statusKind(state.link_ok)}">${esc(state.link_ok)}</span></div>
+        <div>Ready: <span id="live-${motor.id}-ready" class="${statusKind(state.ready)}">${esc(state.ready)}</span></div>
+        <div>Move: <span id="live-${motor.id}-move" class="${statusKind(state.move)}">${esc(state.move)}</span></div>
+        <div>InPos: <span id="live-${motor.id}-inpos" class="${statusKind(state.in_pos)}">${esc(state.in_pos)}</span></div>
+        <div>Alarm: <span id="live-${motor.id}-alarm" class="${statusKind(!state.alarm ? 1 : 0)}">${esc(state.alarm_code ?? state.alarm ?? "")}</span></div>
+      </div>
+      <div class="status-box">
+        <strong>Position / IO</strong>
+        <div>Ist: <span id="live-${motor.id}-pos">${esc(state.feedback_tenths_mm ?? "")}</span> 1/10mm</div>
+        <div>Command: <span id="live-${motor.id}-cmd">${esc(state.command_tenths_mm ?? "")}</span> 1/10mm</div>
+        <div>Input raw: <span id="live-${motor.id}-inraw">${esc(state.input_raw_hex ?? "")}</span></div>
+        <div>Output raw: <span id="live-${motor.id}-outraw">${esc(state.output_raw_hex ?? "")}</span></div>
+      </div>
+    </div>
+    <div class="section-title">Kalibrierung / Parameter</div>
+    <div class="grid">
+      <div class="field"><label>Test-Schritte</label><input id="m-${motor.id}-test_steps" value="1000"/></div>
+      <div class="field"><label>Manuell bewegen [mm]</label><input id="m-${motor.id}-manual_mm" value="0"/></div>
+      <div class="field"><label>Steps / mm</label><input id="m-${motor.id}-steps_per_mm"/></div>
+      <div class="field"><label>Geschwindigkeit [mm/s]</label><input id="m-${motor.id}-speed_mm_s"/></div>
+      <div class="field"><label>Acceleration [mm/s²]</label><input id="m-${motor.id}-accel_mm_s2"/></div>
+      <div class="field"><label>Deceleration [mm/s²]</label><input id="m-${motor.id}-decel_mm_s2"/></div>
+      <div class="field"><label>Strom [%]</label><input id="m-${motor.id}-current_pct"/></div>
+      <div class="field"><label>Drehrichtung</label><select id="m-${motor.id}-invert_direction"><option value="0">Normal</option><option value="1">Invertiert</option></select></div>
+      <div class="field"><label>Min [1/10mm]</label><input id="m-${motor.id}-min_tenths_mm"/></div>
+      <div class="field"><label>Max [1/10mm]</label><input id="m-${motor.id}-max_tenths_mm"/></div>
+      <div class="field"><label>Min aktiv</label><select id="m-${motor.id}-min_enabled"><option value="0">Nein</option><option value="1">Ja</option></select></div>
+      <div class="field"><label>Max aktiv</label><select id="m-${motor.id}-max_enabled"><option value="0">Nein</option><option value="1">Ja</option></select></div>
+      <div class="field span-3"><label>Zuordnung aus Excel</label><input disabled value="${esc(related)}"/></div>
+    </div>
+    <div class="actions" style="margin-top:10px">
+      <button class="btn" onclick="moveSteps(${motor.id})">Schritte fahren</button>
+      <button class="btn" onclick="defineResolution(${motor.id})">Auflösung definieren</button>
+      <button class="btn" onclick="manualMove(${motor.id})">Move mm</button>
+      <button class="btn" onclick="setZero(${motor.id})">Nullpunkt setzen</button>
+      <button class="btn" onclick="setMin(${motor.id})">Min setzen</button>
+      <button class="btn" onclick="setMax(${motor.id})">Max setzen</button>
+      <button class="btn" onclick="resetAlarm(${motor.id})">Alarm Reset</button>
+      <button class="btn" onclick="saveConfig(${motor.id})">Parameter speichern</button>
+    </div>
+    <div class="section-title">Meldungen</div>
+    <div class="status-box"><code id="live-${motor.id}-msg">${esc(state.last_error || motor.last_reply || "-")}</code></div>
+  `;
+  document.getElementById("cards").appendChild(card);
+
+  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled","test_steps","manual_mm"].forEach(field => {
+    const el = document.getElementById(`m-${motor.id}-${field}`);
+    if(el) bindDirty(el, motor.id, field);
+  });
+  renderedIds.add(motor.id);
+  updateCard(motor);
+}
+
+function updateLiveText(id, suffix, value, cls){
+  const el = document.getElementById(`live-${id}-${suffix}`);
+  if(!el) return;
+  el.textContent = value ?? "";
+  if(cls !== undefined){ el.className = cls; }
+}
+
+function updateCard(motor){
+  const cfg = motor.config || {};
+  const state = motor.state || {};
+  setInputValueIfClean(motor.id, "steps_per_mm", cfg.steps_per_mm ?? "");
+  setInputValueIfClean(motor.id, "speed_mm_s", cfg.speed_mm_s ?? "");
+  setInputValueIfClean(motor.id, "accel_mm_s2", cfg.accel_mm_s2 ?? "");
+  setInputValueIfClean(motor.id, "decel_mm_s2", cfg.decel_mm_s2 ?? "");
+  setInputValueIfClean(motor.id, "current_pct", cfg.current_pct ?? "");
+  setInputValueIfClean(motor.id, "invert_direction", cfg.invert_direction ? "1" : "0");
+  setInputValueIfClean(motor.id, "min_tenths_mm", cfg.min_tenths_mm ?? "");
+  setInputValueIfClean(motor.id, "max_tenths_mm", cfg.max_tenths_mm ?? "");
+  setInputValueIfClean(motor.id, "min_enabled", cfg.min_enabled ? "1" : "0");
+  setInputValueIfClean(motor.id, "max_enabled", cfg.max_enabled ? "1" : "0");
+
+  updateLiveText(motor.id, "link", String(state.link_ok ?? ""), statusKind(state.link_ok));
+  updateLiveText(motor.id, "ready", String(state.ready ?? ""), statusKind(state.ready));
+  updateLiveText(motor.id, "move", String(state.move ?? ""), statusKind(state.move));
+  updateLiveText(motor.id, "inpos", String(state.in_pos ?? ""), statusKind(state.in_pos));
+  updateLiveText(motor.id, "alarm", String(state.alarm_code ?? state.alarm ?? ""), statusKind(!state.alarm ? 1 : 0));
+  updateLiveText(motor.id, "pos", state.feedback_tenths_mm ?? "");
+  updateLiveText(motor.id, "cmd", state.command_tenths_mm ?? "");
+  updateLiveText(motor.id, "inraw", state.input_raw_hex ?? "");
+  updateLiveText(motor.id, "outraw", state.output_raw_hex ?? "");
+  updateLiveText(motor.id, "msg", state.last_error || motor.last_reply || "-");
+}
+
+async function reloadAll(){
+  document.getElementById("status").textContent = "loading...";
+  const data = await api("/api/motors/overview");
+  for(const motor of (data.motors || [])){
+    if(!renderedIds.has(motor.id)){ renderCard(motor); }
+    else { updateCard(motor); }
+  }
+  document.getElementById("status").textContent = `${(data.motors || []).length} Motoren geladen`;
+}
+
+async function post(path, body){
+  return api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : null});
+}
+
+function configPayload(id){
+  return {
+    steps_per_mm: numOrNull(document.getElementById(`m-${id}-steps_per_mm`).value),
+    speed_mm_s: numOrNull(document.getElementById(`m-${id}-speed_mm_s`).value),
+    accel_mm_s2: numOrNull(document.getElementById(`m-${id}-accel_mm_s2`).value),
+    decel_mm_s2: numOrNull(document.getElementById(`m-${id}-decel_mm_s2`).value),
+    current_pct: numOrNull(document.getElementById(`m-${id}-current_pct`).value),
+    invert_direction: boolFromInput(`m-${id}-invert_direction`),
+    min_tenths_mm: numOrNull(document.getElementById(`m-${id}-min_tenths_mm`).value),
+    max_tenths_mm: numOrNull(document.getElementById(`m-${id}-max_tenths_mm`).value),
+    min_enabled: boolFromInput(`m-${id}-min_enabled`),
+    max_enabled: boolFromInput(`m-${id}-max_enabled`)
+  };
+}
+
+async function saveConfig(id){
+  document.getElementById("status").textContent = `saving motor ${id}...`;
+  await post(`/api/motors/${id}/config`, configPayload(id));
+  await post(`/api/motors/${id}/save`, {});
+  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
+  await reloadAll();
+}
+
+async function moveSteps(id){
+  const value = numOrNull(document.getElementById(`m-${id}-test_steps`).value);
+  if(value === null){ alert("Bitte Schrittzahl eingeben."); return; }
+  document.getElementById("status").textContent = `move steps motor ${id}...`;
+  await post(`/api/motors/${id}/move`, {mode:"relative_steps", value:value});
+  await reloadAll();
+}
+
+async function defineResolution(id){
+  const stepValue = numOrNull(document.getElementById(`m-${id}-test_steps`).value);
+  if(stepValue === null || stepValue === 0){ alert("Bitte eine Schrittzahl ungleich 0 eingeben."); return; }
+  await post(`/api/motors/${id}/move`, {mode:"relative_steps", value:stepValue});
+  const mmRaw = prompt("Wie viele mm hat sich der Motor bewegt?");
+  if(mmRaw === null) return;
+  const measured = Number(mmRaw);
+  if(!Number.isFinite(measured) || measured <= 0){ alert("Ungueltiger mm-Wert."); return; }
+  const directionOk = confirm("War die Bewegungsrichtung korrekt?");
+  const stepsPerMm = Math.abs(stepValue) / measured;
+  const spmm = document.getElementById(`m-${id}-steps_per_mm`);
+  spmm.value = String(stepsPerMm.toFixed(6)).replace(/0+$/,"").replace(/\\.$/,"");
+  dirtyFields.add(fieldKey(id, "steps_per_mm"));
+  if(!directionOk){
+    const dir = document.getElementById(`m-${id}-invert_direction`);
+    dir.value = dir.value === "1" ? "0" : "1";
+    dirtyFields.add(fieldKey(id, "invert_direction"));
+  }
+  document.getElementById("status").textContent = `Motor ${id}: neue Aufloesung berechnet, bitte speichern`;
+}
+
+async function manualMove(id){
+  const value = numOrNull(document.getElementById(`m-${id}-manual_mm`).value);
+  if(value === null){ alert("Bitte mm-Wert eingeben."); return; }
+  await post(`/api/motors/${id}/move`, {mode:"relative_mm", value:value});
+  await reloadAll();
+}
+
+async function setZero(id){ await post(`/api/motors/${id}/zero`, {}); await reloadAll(); }
+async function setMin(id){ await post(`/api/motors/${id}/min`, {}); await reloadAll(); }
+async function setMax(id){ await post(`/api/motors/${id}/max`, {}); await reloadAll(); }
+async function resetAlarm(id){ await post(`/api/motors/${id}/reset-alarm`, {}); await reloadAll(); }
+
+reloadAll();
+setInterval(() => { reloadAll().catch(err => { document.getElementById("status").textContent = err.message; }); }, 2000);
 </script>
 </body>
 </html>

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS params (
   possible_cause TEXT,
   effects TEXT,
   remedy TEXT,
+  ai_instructions TEXT,
   updated_ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_params_type_id ON params(ptype, pid);
@@ -149,6 +150,8 @@ def _apply_migrations(conn: sqlite3.Connection):
     param_cols = {row[1] for row in conn.execute("PRAGMA table_info(params)").fetchall()}
     if "esp_rw" not in param_cols:
         conn.execute("ALTER TABLE params ADD COLUMN esp_rw TEXT")
+    if "ai_instructions" not in param_cols:
+        conn.execute("ALTER TABLE params ADD COLUMN ai_instructions TEXT")
     cols = {row[1] for row in conn.execute("PRAGMA table_info(param_device_map)").fetchall()}
     if "zbc_mapping" not in cols:
         conn.execute("ALTER TABLE param_device_map ADD COLUMN zbc_mapping TEXT")

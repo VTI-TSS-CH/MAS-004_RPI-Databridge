@@ -19,6 +19,12 @@
   - `production_logs.py` manages start/stop state from `MAS0002`, batch label from `MAS0029` and ready flag `MAS0030`
   - `logstore.py` mirrors active communication into production-specific TXT logs (`Gesamtanlage`, `ESP`, `TTO`, `Laser`)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
+- The Databridge now persists the workbook column `KI-Anweisungen:` as `ai_instructions` and derives Oriental motor bindings from it for the new setup UI.
+- New motor operator surface:
+  - `/ui/motors` on the Raspi web UI
+  - live status/config view for all 9 Oriental drives behind the ESP32-PLC
+  - calibration/runtime parameter editing over the dedicated ESP `MOTOR ...` command channel
+  - dirty-field protection so UI refreshes do not overwrite operator input while typing
 - Routing detail for `MA*` parameters:
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path
@@ -36,6 +42,10 @@
 - The Databridge owner-session timeout for queued 6530 writes is intentionally larger than the shared-library state-settle window, so slow `6 -> 3` transitions are not aborted prematurely at the Raspi layer.
 - Printer-state writes now trigger an immediate workbook status resync so related follow-up values can be forwarded without waiting for the next background cycle.
 - Async summary fanout is ordered so all Microtom notifications are queued before any ESP mirror attempt starts, preventing ESP-side delays from holding back Microtom state delivery.
+- The outbound callback sender is now lane-split:
+  - `primary` lane handles only `peer_base_url` and keeps the existing watchdog/retry behavior
+  - `aux` lane handles `peer_base_url_secondary` plus any other non-primary targets
+  - result: a timing-out primary Microtom inbox no longer blocks secondary/custom callback delivery
 - 6530 async fanout now uses a dedicated background ESP mirror worker during the live owner session:
   - Microtom callbacks are queued immediately on the async thread
   - ESP mirrors run in order on the background worker and no longer block `AIR` handling
@@ -77,6 +87,7 @@
   - Policy: default sync target (always keep aligned with local + git)
 - LIVE Raspberry:
   - SSH: `pi@192.168.210.20`
+  - Preferred SSH alias: `mas004-rpi-live`
   - UI/API: `https://192.168.210.20:8080`
 - Policy: update only on explicit release command
 - Script target metadata can be overridden via environment variables:
@@ -95,6 +106,16 @@
   - `esp_host = 192.168.2.101`, `esp_port = 3007`, `esp_simulation = true`
   - `vj3350_host = 192.168.2.102`, `vj3350_port = 3008`, `vj3350_simulation = true`
   - `vj6530_host = 192.168.2.103`, `vj6530_port = 3009`, `vj6530_simulation = true`
+- Current SSH access notes for LIVE:
+  - fallback password: `raspberry`
+  - preferred private key on this laptop: `C:/Users/Egli_Erwin/.ssh/mas004_rpi210_ed25519`
+  - configured aliases on this laptop: `mas004-rpi`, `mas004-rpi-live`
+- LIVE callback-delay diagnosis on 2026-04-16:
+  - the live config still used `http_timeout_s = 10.0`
+  - journal inspection showed repeated `ReadTimeout('timed out')` on `POST http://192.168.210.10:81/api/inbox`
+  - the observed callback staircase at roughly `10s / 20s / 30s ...` matched that timeout exactly
+  - a direct live probe from the Raspi to `peer_base_url_secondary = https://192.168.5.2:9090` returned in about `49 ms`
+  - a locally prepared repo fix now isolates primary timeouts from non-primary callback targets; deployment remains pending until reachability/approval allow it
 - When the TEST Raspberry becomes reachable again, mirror these values manually via the Settings UI or a controlled config export/import, not via repo deployment.
 
 ## Persistent Paths
@@ -116,8 +137,30 @@
 - If the tool session drops or parks a sub-agent thread, the master chat must rehydrate it under the same name before delegation continues.
 - Current platform behavior may cap the number of simultaneously live sub-agent threads below the full MAS-004 role map; this does not change ownership boundaries.
 
+## Current Coordination Mode (2026-04-16)
+- Current workshop coordination is in offline mode.
+- From this workstation, the following are currently not reachable:
+  - TEST Raspberry
+  - LIVE Raspberry
+  - Microtom peers
+  - field subcomponents such as ESP32-PLC, TTO, Laser and SmartWickler devices
+- While offline:
+  - local repos and their Git state are the authoritative working baseline
+  - no TEST/LIVE runtime setting changes may be assumed or applied
+  - TEST/LIVE sync must be reported as pending until reachability is restored
+- Current local repo snapshot:
+  - `MAS-004_RPI-Databridge`: HEAD `3bcaaf0`, local support docs modified
+  - `MAS-004_ESP32-PLC-Bridge`: HEAD `fa1c9d3`, working tree clean
+  - `MAS-004_ESP32-PLC-Firmware`: HEAD `0050cba`, working tree clean
+  - `MAS-004_VJ3350-Ultimate-Bridge`: HEAD `0e5b7aa`, working tree clean
+  - `MAS-004_VJ6530-ZBC-Bridge`: HEAD `09f9397`, working tree clean
+  - `MAS-004_ZBC-Library`: HEAD `c47563d`, working tree clean
+  - `MAS-004_SmartWickler`: local scaffold present, no commits yet
+  - local master workbook copy for current parameter work: `master_data/Parameterliste SAR41-MAS-004.xlsx`
+
 ## Multi-Repo Dependency Map
 - `MAS-004_ESP32-PLC-Bridge`: ESP32 transport/probe subproject
+- `MAS-004_SmartWickler`: ESP32-S3 smart unwinder/rewinder module with local control loop, W5500 UI/API and AZD-CD integration
 - `MAS-004_VJ3350-Ultimate-Bridge`: VJ3350 transport/probe subproject
 - `MAS-004_VJ6530-ZBC-Bridge`: VJ6530 transport/probe subproject
 - `MAS-004_ZBC-Library`: shared ZBC transport/message library for the 6530 stack
@@ -126,7 +169,7 @@
 - The Videojet 6530 TTO mapping now uses the live-readable CLARiTY parameter archive from `MAS-004_ZBC-Library`:
   - `FRQ[CURRENT_PARAMETERS]` on the 6530 returns the UTF-16 parameter XML
   - `FTX[CURRENT_PARAMETERS]` writeback has been live-verified against the real 6530
-  - the MAS workbook `..\Parameterliste SAR41-MAS-004_V11.11.25.xlsx` contains a dedicated `ZBC Mapping:` column for `TTP`, `TTE`, `TTW`, `TTS`
+  - the MAS workbook `..\Parameterliste SAR41-MAS-004.xlsx` contains the current `ZBC Mapping:` column for `TTP`, `TTE`, `TTW`, `TTS` and the new `KI-Anweisungen:` guidance column
   - the helper `..\MAS-004_ZBC-Library\tools\update_tto_workbook.py` refreshes this column and the added TTO rows from a live printer or saved archive
   - `MAS-004_VJ6530-ZBC-Bridge` now consumes the shared library instead of maintaining a separate transport stack
   - the workbook now contains a dedicated `ESP32 R/W:` column in addition to Microtom `R/W:`

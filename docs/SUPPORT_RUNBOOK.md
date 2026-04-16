@@ -30,12 +30,34 @@
   - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
 - LIVE update (only if explicitly approved):
   - `ssh pi@192.168.210.20 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
+  - preferred alias on this laptop: `ssh mas004-rpi-live "cd /opt/MAS-004_RPI-Databridge && git status -sb"`
 - Reinstall package safely after pull (prevents stale `build/` artifacts):
   - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && rm -rf build && ./.venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall ."`
 - Restart:
   - `ssh pi@10.27.67.68 "sudo systemctl restart mas004-rpi-databridge.service"`
 - Logs:
   - `ssh pi@10.27.67.68 "sudo journalctl -u mas004-rpi-databridge.service -n 120 --no-pager"`
+
+## 3.1 LIVE SSH Access Notes
+- Preferred access method on this laptop:
+  - key: `C:/Users/Egli_Erwin/.ssh/mas004_rpi210_ed25519`
+  - aliases: `mas004-rpi`, `mas004-rpi-live`
+- Direct host access `ssh pi@192.168.210.20` is also configured to use the same key automatically.
+- Fallback password for LIVE when key-based access is unavailable: `raspberry`
+
+## 3.2 Offline Mode
+- If TEST and LIVE are both unreachable, continue in local offline mode only.
+- Before starting substantial work, capture the local multi-repo state:
+  - `powershell -ExecutionPolicy Bypass -File scripts/mas004_multirepo_status.ps1`
+  - `git -C ..\\MAS-004_ESP32-PLC-Bridge status --short --branch`
+  - `git -C ..\\MAS-004_ESP32-PLC-Firmware status --short --branch`
+  - `git -C ..\\MAS-004_VJ3350-Ultimate-Bridge status --short --branch`
+  - `git -C ..\\MAS-004_VJ6530-ZBC-Bridge status --short --branch`
+  - `git -C ..\\MAS-004_ZBC-Library status --short --branch`
+  - `git -C ..\\MAS-004_SmartWickler status --short --branch`
+- Do not claim TEST/LIVE synchronization while reachability is missing.
+- Do not infer or overwrite runtime settings from stale exports while offline.
+- `mas004_release_ops` owns the deferred TEST/LIVE sync backlog until connectivity returns.
 
 ## 4. Safety Rules
 - Do not run `git reset --hard` or `git checkout --` on Pi repos.
@@ -48,9 +70,18 @@
 - Keep this file and `PROJECT_CONTEXT.md` up to date whenever architecture, API surface, or deployment flow changes.
 
 ## 5. Verification Checklist
-- UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/settings`
+- UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/motors`, `/ui/settings`
 - API health: `/health`
 - Outbox not growing unexpectedly
+- If Microtom callback delivery shows a staircase delay pattern around `10s / 20s / 30s ...`, inspect `journalctl` for `[OUTBOX:primary]` timeouts:
+  - this indicates the primary peer `POST /api/inbox` is not returning a `2xx` within `http_timeout_s`
+  - the expected Microtom contract is: answer `2xx` immediately, then process asynchronously
+- The sender runtime is now split into two lanes:
+  - `[OUTBOX:primary]` handles only `peer_base_url`
+  - `[OUTBOX:aux]` handles `peer_base_url_secondary` and any other non-primary callback targets
+- Expectation after the lane split:
+  - a slow/timing-out primary Microtom inbox may still back up primary jobs
+  - but it must no longer delay secondary/custom callback targets
 - Shared-secret and peer URL still valid after config changes
 - `TTS0001` present in `/ui/params` and resolves to the expected numeric printer state
 - Expect the 6530 async path to be primary for online/offline/warning/fault changes; the poller is fallback/reconciliation only.
@@ -61,6 +92,10 @@
   - `CMD_SHUTDOWN` / `CMD_STARTUP` have no dedicated async state tag on TEST, so `6 <-> 0` confirmation must come from fresh summary state
 - Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
 - If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
+- For the new Oriental motor setup page:
+  - `/api/motors/overview` must return JSON with all 9 configured drives
+  - while typing into `/ui/motors`, periodic refresh must not overwrite focused or dirty inputs
+  - `MOTOR <id> SET ...` / `SAVE` / `MOVE_REL_*` must echo through the ESP endpoint before any TEST deployment is claimed successful
 - If `TTS0001=3` ever returns `ACK_TTS0001=0`, treat that as a regression: the ACK must follow the async-observed settled workbook state, not a stale synchronous verify snapshot.
 - If a 6530 state change reaches Microtom late, inspect whether the delay came from ESP mirror attempts rather than the ZBC async path; Microtom delivery should now be queued before ESP mirroring starts.
 - If `TTS0001=3` fails only from `6 SHUTDOWN`, treat that as a regression in live-summary confirmation for the `STARTUP -> START` sequence.

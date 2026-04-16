@@ -1,7 +1,7 @@
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 from mas004_rpi_databridge.db import DB, now_ts
 
 @dataclass
@@ -21,6 +21,15 @@ class OutboxJob:
 class Outbox:
     def __init__(self, db: DB):
         self.db = db
+
+    @staticmethod
+    def _normalize_prefixes(prefixes: Optional[Iterable[str]]) -> list[str]:
+        items = []
+        for raw in prefixes or []:
+            base = (raw or "").strip().rstrip("/")
+            if base and base not in items:
+                items.append(base)
+        return items
 
     def enqueue(
         self,
@@ -69,16 +78,39 @@ class Outbox:
             )
         return idempotency_key
 
-    def next_due(self) -> Optional[OutboxJob]:
+    def next_due(
+        self,
+        url_prefixes: Optional[Iterable[str]] = None,
+        exclude_url_prefixes: Optional[Iterable[str]] = None,
+    ) -> Optional[OutboxJob]:
+        where = ["next_attempt_ts <= ?"]
+        params: list[object] = [now_ts()]
+
+        include_prefixes = self._normalize_prefixes(url_prefixes)
+        if include_prefixes:
+            parts = []
+            for prefix in include_prefixes:
+                parts.append("(url = ? OR url LIKE ?)")
+                params.extend([prefix, prefix + "/%"])
+            where.append("(" + " OR ".join(parts) + ")")
+
+        excluded_prefixes = self._normalize_prefixes(exclude_url_prefixes)
+        if excluded_prefixes:
+            parts = []
+            for prefix in excluded_prefixes:
+                parts.append("(url = ? OR url LIKE ?)")
+                params.extend([prefix, prefix + "/%"])
+            where.append("NOT (" + " OR ".join(parts) + ")")
+
+        sql = f"""
+            SELECT id,created_ts,method,url,headers_json,body_json,idempotency_key,priority,dedupe_key,retry_count,next_attempt_ts
+            FROM outbox
+            WHERE {" AND ".join(where)}
+            ORDER BY next_attempt_ts ASC, priority ASC, retry_count ASC, created_ts ASC
+            LIMIT 1
+        """
         with self.db._conn() as c:
-            row = c.execute(
-                """SELECT id,created_ts,method,url,headers_json,body_json,idempotency_key,priority,dedupe_key,retry_count,next_attempt_ts
-                   FROM outbox
-                   WHERE next_attempt_ts <= ?
-                   ORDER BY next_attempt_ts ASC, priority ASC, retry_count ASC, created_ts ASC
-                   LIMIT 1""",
-                (now_ts(),)
-            ).fetchone()
+            row = c.execute(sql, params).fetchone()
         return OutboxJob(*row) if row else None
 
     def delete(self, job_id: int):

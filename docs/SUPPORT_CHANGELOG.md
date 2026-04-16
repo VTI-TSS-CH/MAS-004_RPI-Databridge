@@ -1,5 +1,68 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-16 (Outbox Lane Split for Slow Microtom Inbox Callbacks)
+- Diagnosed the LIVE Microtom callback delay pattern on `192.168.210.20`:
+  - the Databridge sender was single-threaded
+  - `http_timeout_s = 10.0`
+  - repeated `ReadTimeout('timed out')` on `http://192.168.210.10:81/api/inbox` produced the observed `10s / 20s / 30s ...` stagger
+- Added URL-filtered outbox selection so sender lanes can work independently per target bucket.
+- Split the sender runtime into:
+  - `primary` lane for `peer_base_url` with the existing watchdog/retry behavior
+  - `aux` lane for all non-primary targets, including `peer_base_url_secondary`
+- Result:
+  - a slow or timing-out primary Microtom inbox no longer blocks secondary or custom callback targets
+  - primary retries remain intact
+  - secondary still drops on failure as before
+- Added regression coverage for:
+  - filtered `Outbox.next_due(...)` selection
+  - sender lane topology with and without a configured primary peer
+
+## 2026-04-16 (Oriental Motor Setup Layer Added Offline)
+- Switched the repository-default master workbook copy to `master_data/Parameterliste SAR41-MAS-004.xlsx`.
+- Extended parameter import/export so the workbook column `KI-Anweisungen:` is stored as `ai_instructions`.
+- Added workbook-driven motor binding derivation from `KI-Anweisungen:` for the Oriental motor set:
+  - `MAP0056..MAP0064` as Sollwerte
+  - `MAS0011`, `MAS0012`, `MAS0013`, `MAS0014`, `MAS0015`, `MAS0016`, `MAS0017`, `MAS0031`, `MAS0032` as Istwerte
+  - `MAE0004..MAE0010`, `MAE0046`, `MAE0047` as controller fault mirrors
+- Added a new Raspi operator tab `/ui/motors` plus matching `/api/motors/*` endpoints for:
+  - live overview of the 9 Oriental motors behind the ESP32-PLC
+  - manual move in steps/mm
+  - zero/min/max capture
+  - editable motion defaults (`steps/mm`, speed, current, acceleration, deceleration, soft limits, direction)
+- The new motor UI explicitly protects focused/dirty inputs from being overwritten by the refresh loop.
+
+## 2026-04-16 (Offline Coordination Mode Reconfirmed)
+- Reconfirmed the canonical MAS-004 sub-agent roster for the master chat:
+  - `mas004_docs`
+  - `mas004_rpi_core`
+  - `mas004_param_master`
+  - `mas004_esp32_bridge`
+  - `mas004_esp32_firmware`
+  - `mas004_smartwickler`
+  - `mas004_vj3350_bridge`
+  - `mas004_vj6530_bridge`
+  - `mas004_zbc_library`
+  - `mas004_release_ops`
+- Recorded that current workshop work continues in offline mode because TEST, LIVE, Microtom peers and field devices are all unreachable from this workstation.
+- Captured the current local repo/Git snapshot in `PROJECT_CONTEXT.md`.
+- TEST/LIVE synchronization remains intentionally open and must be revisited once connectivity returns.
+
+## 2026-04-16 (LIVE SSH Access Standardized)
+- Standardized LIVE Raspberry SSH access on this laptop:
+  - direct `ssh pi@192.168.210.20` now uses the dedicated MAS-004 key automatically
+  - alias `mas004-rpi-live` added alongside existing `mas004-rpi`
+- Confirmed the working LIVE key path:
+  - `C:/Users/Egli_Erwin/.ssh/mas004_rpi210_ed25519`
+- Documented the current LIVE fallback password and the preferred key-based path in `PROJECT_CONTEXT.md` and `SUPPORT_RUNBOOK.md`.
+
+## 2026-04-09 (SmartWickler Subproject Added)
+- Added the new subproject `MAS-004_SmartWickler` to the MAS-004 orchestration landscape.
+- The canonical new owner role is `mas004_smartwickler`.
+- The preferred architecture for the wicklers is now documented as:
+  - local real-time control loop on the SmartWickler ESP32-S3
+  - direct Ethernet/API coupling to `MAS-004_RPI-Databridge`
+  - no real-time winding-control detour through `MAS-004_ESP32-PLC`
+
 ## 2026-03-26 (ESP Firmware TTO Mirror Gap Closed)
 - The remaining TEST ESP gap for mirrored 6530 state rows is closed:
   - `TTS0001`, `TTP00073`, `TTP00076` no longer fail with `NAK_UnknownParam` on the real ESP

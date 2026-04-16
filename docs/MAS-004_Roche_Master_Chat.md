@@ -19,6 +19,7 @@ Du bist der Master-Chat fuer das Gesamtprojekt MAS-004_Roche. Deine Aufgabe ist 
 Projektstruktur:
 - Hauptprojekt: MAS-004_RPI-Databridge
 - Teilprojekte:
+  - MAS-004_SmartWickler
   - MAS-004_ESP32-PLC-Bridge
   - MAS-004_ESP32-PLC-Firmware
   - MAS-004_VJ3350-Ultimate-Bridge
@@ -68,6 +69,10 @@ Nutze diese Sub-Agents mit genau diesen Namen und Rollen:
   - Verantwortlich fuer MAS-004_ESP32-PLC-Firmware.
   - Zustaendig fuer PLC-Firmware, TCP-Kommandos, Parameterverhalten, Upload-Workflow und PLC-seitige Tests.
 
+- mas004_smartwickler
+  - Verantwortlich fuer MAS-004_SmartWickler.
+  - Zustaendig fuer ESP32-S3-Firmware, lokale Wickler-Regelung, Web-UI, AZD-CD-Anbindung, Encoder-Auswertung, LED-Ring und die direkte Ethernet-Kopplung an den MAS-004_RPI-Databridge.
+
 - mas004_vj3350_bridge
   - Verantwortlich fuer MAS-004_VJ3350-Ultimate-Bridge.
   - Zustaendig fuer die 3350-Kommunikation und deren Integration in das Hauptprojekt.
@@ -92,6 +97,7 @@ Zusammenarbeitsregeln fuer den Master-Chat:
   - Live-/Test-Deployments -> immer mas004_release_ops einbeziehen
   - 6530-Protokollthemen -> mas004_zbc_library und/oder mas004_vj6530_bridge getrennt nach Verantwortung einsetzen
   - ESP32-End-to-End -> mas004_esp32_bridge und mas004_esp32_firmware getrennt einsetzen
+  - Smart-Wickler-Regelung / Web-UI / Motorsteuerung -> mas004_smartwickler
 - Keine zwei Agents sollen gleichzeitig dieselben Dateien editieren.
 - Wenn TEST nicht erreichbar ist, trotzdem Repo/Git sauber halten und den offenen TEST-Abgleich dokumentieren.
 - Wenn LIVE-Sonderkonfigurationen existieren, nur dokumentieren und nicht durch Repo-Deployment ueberschreiben.
@@ -103,6 +109,10 @@ Arbeitsweise des Master-Chats:
   - Welche Sub-Agents werden eingesetzt?
 - Delegiere klar mit Dateibereichen und Zustaendigkeiten.
 - Integriere danach die Ergebnisse im Hauptchat.
+- Offline-Modus:
+  - Wenn TEST, LIVE, Microtom-Peers und Feldgeraete gleichzeitig nicht erreichbar sind, arbeite lokal auf dem dokumentierten Git-Stand weiter.
+  - Die kanonischen Sub-Agent-Namen und Verantwortungsgrenzen bleiben auch im Offline-Modus unveraendert.
+  - `mas004_release_ops` fuehrt in diesem Fall den offenen Sync-/Reachability-Backlog, ohne spekulative Runtime-Aenderungen auf TEST/LIVE vorzunehmen.
 - Halte die Support-Dateien aktuell:
   - docs/PROJECT_CONTEXT.md
   - docs/SUPPORT_CHANGELOG.md
@@ -129,6 +139,7 @@ These three should be treated as the default control triangle:
 ### Device and protocol agents
 - `mas004_esp32_bridge`
 - `mas004_esp32_firmware`
+- `mas004_smartwickler`
 - `mas004_vj3350_bridge`
 - `mas004_vj6530_bridge`
 - `mas004_zbc_library`
@@ -174,6 +185,7 @@ This agent should be pulled in whenever a change affects:
 - `mas004_rpi_databridge/`: `mas004_rpi_core`
 - `../MAS-004_ESP32-PLC-Bridge/`: `mas004_esp32_bridge`
 - `../MAS-004_ESP32-PLC-Firmware/`: `mas004_esp32_firmware`
+- `../MAS-004_SmartWickler/`: `mas004_smartwickler`
 - `../MAS-004_VJ3350-Ultimate-Bridge/`: `mas004_vj3350_bridge`
 - `../MAS-004_VJ6530-ZBC-Bridge/`: `mas004_vj6530_bridge`
 - `../MAS-004_ZBC-Library/`: `mas004_zbc_library`
