@@ -1,5 +1,24 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-16 (Motors UI Fallback + Smart Wickler Integration + Logo Restore)
+- The Raspi `Motors` page no longer depends on a live ESP motor endpoint to render:
+  - all 9 Oriental motor cards are now shown from a fixed machine catalog even when the ESP endpoint is missing or still in simulation
+  - live ESP motor data overlays onto that catalog only when reachable
+- Added Raspi-side Smart Wickler integration:
+  - new device endpoint settings for `Abwickler` and `Aufwickler`
+  - each endpoint has `host`, `port` and `simulation`
+  - recommended sequential defaults:
+    - `Abwickler` -> `192.168.2.104:3011`
+    - `Aufwickler` -> `192.168.2.105:3012`
+- Added new Raspi UI proxy pages:
+  - `/ui/winders/unwinder`
+  - `/ui/winders/rewinder`
+  - the `Motors` page now opens these in a new window via the `Abwickler` / `Aufwickler` buttons
+- The Raspi Wickler pages read `/api/state` from the configured Smart Wickler endpoint when live is enabled and fall back to a stable local simulation/offline visualization otherwise.
+- Restored robust Videojet logo delivery:
+  - `videojet-logo.jpg` is now included as package data for installed Raspi builds
+  - the web UI additionally falls back to the repo asset path on the Raspberry if needed
+
 ## 2026-04-16 (LIVE Deployed + Secondary VPN Callback Reverified)
 - Deployed the merged local Databridge mainline to the Microtom LIVE Raspberry:
   - LIVE repo `/opt/MAS-004_RPI-Databridge` is now on `f660b69`

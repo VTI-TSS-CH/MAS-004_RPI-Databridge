@@ -26,3 +26,6 @@ mas004-databridge = "mas004_rpi_databridge.service:main"
 
 [tool.setuptools]
 packages = ["mas004_rpi_databridge"]
+
+[tool.setuptools.package-data]
+mas004_rpi_databridge = ["assets/*.jpg"]

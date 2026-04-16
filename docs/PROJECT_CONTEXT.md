@@ -25,6 +25,19 @@
   - live status/config view for all 9 Oriental drives behind the ESP32-PLC
   - calibration/runtime parameter editing over the dedicated ESP `MOTOR ...` command channel
   - dirty-field protection so UI refreshes do not overwrite operator input while typing
+  - the motor cards are now also available when the ESP endpoint is missing or still in simulation; a fixed machine catalog acts as the baseline view and live ESP data only overlays when reachable
+- New Smart Wickler proxy surface on the Raspi web UI:
+  - `/ui/winders/unwinder`
+  - `/ui/winders/rewinder`
+  - opened from `/ui/motors` via dedicated `Abwickler` / `Aufwickler` buttons
+  - each page reads the configured Smart Wickler endpoint `/api/state` when live is enabled, otherwise it shows a stable local simulation/offline view
+- New Smart Wickler endpoint settings in the Databridge config:
+  - `smart_unwinder_host`, `smart_unwinder_port`, `smart_unwinder_simulation`
+  - `smart_rewinder_host`, `smart_rewinder_port`, `smart_rewinder_simulation`
+  - recommended sequential defaults on the eth1 device network:
+    - `Abwickler`: `192.168.2.104:3011`
+    - `Aufwickler`: `192.168.2.105:3012`
+- The Videojet logo is now packaged with the installed Raspi build and has a repo-path fallback so `/ui/assets/videojet-logo.jpg` survives a normal service reinstall.
 - Routing detail for `MA*` parameters:
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path

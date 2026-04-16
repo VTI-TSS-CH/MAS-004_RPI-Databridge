@@ -22,15 +22,26 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_ip_info
 from mas004_rpi_databridge.esp_motors import EspMotorClient
+from mas004_rpi_databridge.motor_catalog import merge_motor_payload
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager
+from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient, normalize_winder_role
+from mas004_rpi_databridge.smart_wickler_ui import build_winder_ui_html
 from mas004_rpi_databridge.timeutil import format_local_timestamp, local_from_timestamp
 
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
 REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "Parameterliste SAR41-MAS-004.xlsx")
+FALLBACK_VIDEOJET_LOGO_PATH = os.path.join("/opt", "MAS-004_RPI-Databridge", "mas004_rpi_databridge", "assets", "videojet-logo.jpg")
+
+
+def resolve_videojet_logo_path() -> Optional[str]:
+    for candidate in (VIDEOJET_LOGO_PATH, FALLBACK_VIDEOJET_LOGO_PATH):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
 
 
 def require_token(x_token: Optional[str], cfg: Settings):
@@ -156,6 +167,12 @@ class ConfigUpdate(BaseModel):
     vj6530_poll_interval_s: Optional[float] = None
     vj6530_async_enabled: Optional[bool] = None
     esp_forward_ports: Optional[str] = None
+    smart_unwinder_host: Optional[str] = None
+    smart_unwinder_port: Optional[int] = None
+    smart_unwinder_simulation: Optional[bool] = None
+    smart_rewinder_host: Optional[str] = None
+    smart_rewinder_port: Optional[int] = None
+    smart_rewinder_simulation: Optional[bool] = None
 
     # daily logfile retention
     logs_keep_days_all: Optional[int] = None
@@ -235,25 +252,28 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     default_ptype_hint = {"raspi": "", "esp-plc": "MAS", "vj3350": "LSE", "vj6530": "TTE"}
 
     def get_motor_client() -> EspMotorClient:
-        client = EspMotorClient(Settings.load(cfg_path))
-        if not client.available():
-            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
-        return client
+        return EspMotorClient(Settings.load(cfg_path))
 
     def get_motor_bindings() -> dict[int, dict[str, Any]]:
         rows = params.list_params(limit=100000, offset=0)
         return {int(item["motor_id"]): item for item in build_motor_bindings(rows)}
 
-    def enrich_motor_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        bindings = get_motor_bindings()
-        motors = payload.get("motors") or []
-        enriched = []
-        for motor in motors:
-            mid = int(motor.get("id") or 0)
-            item = dict(motor)
-            item["bindings"] = bindings.get(mid)
-            enriched.append(item)
-        return {"ok": bool(payload.get("ok", True)), "motors": enriched}
+    def get_motor_overview_payload() -> dict[str, Any]:
+        client = get_motor_client()
+        live_payload: dict[str, Any] | None = None
+        if client.available():
+            try:
+                live_payload = client.list_motors()
+                live_payload["live_available"] = True
+            except Exception as exc:
+                live_payload = {"ok": False, "motors": [], "error": str(exc), "live_available": False}
+        else:
+            live_payload = {"ok": False, "motors": [], "error": "ESP motor endpoint missing or simulation enabled", "live_available": False}
+        return merge_motor_payload(live_payload, get_motor_bindings())
+
+    def get_winder_state(role: str) -> dict[str, Any]:
+        normalized = normalize_winder_role(role)
+        return SmartWicklerClient(Settings.load(cfg_path), normalized).fetch_state()
 
     def normalize_test_source(source: str) -> str:
         s = (source or "").strip().lower()
@@ -321,9 +341,10 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     @app.get("/ui/assets/videojet-logo.jpg", include_in_schema=False)
     def ui_logo_asset():
-        if not os.path.exists(VIDEOJET_LOGO_PATH):
+        logo_path = resolve_videojet_logo_path()
+        if not logo_path:
             raise HTTPException(status_code=404, detail="Logo asset missing")
-        return FileResponse(VIDEOJET_LOGO_PATH, media_type="image/jpeg")
+        return FileResponse(logo_path, media_type="image/jpeg")
 
     # -----------------------------
     # Home
@@ -546,6 +567,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     "forward_ports": getattr(cfg2, "vj6530_forward_ports", ""),
                     "poll_interval_s": getattr(cfg2, "vj6530_poll_interval_s", 15.0),
                     "async_enabled": bool(getattr(cfg2, "vj6530_async_enabled", True)),
+                },
+                "smart_unwinder": {
+                    "host": getattr(cfg2, "smart_unwinder_host", ""),
+                    "port": getattr(cfg2, "smart_unwinder_port", 0),
+                    "simulation": bool(getattr(cfg2, "smart_unwinder_simulation", True)),
+                },
+                "smart_rewinder": {
+                    "host": getattr(cfg2, "smart_rewinder_host", ""),
+                    "port": getattr(cfg2, "smart_rewinder_port", 0),
+                    "simulation": bool(getattr(cfg2, "smart_rewinder_simulation", True)),
                 },
             }
         }
@@ -1097,9 +1128,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
-        client = get_motor_client()
-        payload = client.list_motors()
-        return enrich_motor_payload(payload)
+        return get_motor_overview_payload()
 
     @app.get("/api/motors/{motor_id}")
     def api_motor_status(
@@ -1110,10 +1139,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         client = get_motor_client()
-        payload = client.status(motor_id)
-        bindings = get_motor_bindings().get(int(motor_id))
-        payload["bindings"] = bindings
-        return payload
+        if client.available():
+            payload = client.status(motor_id)
+            bindings = get_motor_bindings().get(int(motor_id))
+            payload["bindings"] = bindings
+            return payload
+        merged = get_motor_overview_payload()
+        for motor in merged.get("motors") or []:
+            if int(motor.get("id") or 0) == int(motor_id):
+                return motor
+        raise HTTPException(status_code=404, detail=f"Unknown motor id {motor_id}")
 
     @app.post("/api/motors/{motor_id}/move")
     def api_motor_move(
@@ -1125,6 +1160,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         client = get_motor_client()
+        if not client.available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         mode = (body.mode or "").strip().lower()
         if mode == "relative_steps":
             return client.move_relative_steps(motor_id, int(round(body.value)))
@@ -1145,6 +1182,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
         payload = body.model_dump(exclude_none=True)
         client = get_motor_client()
+        if not client.available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         return client.set_config(motor_id, payload)
 
     @app.post("/api/motors/{motor_id}/save")
@@ -1155,6 +1194,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        if not get_motor_client().available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         return get_motor_client().save(motor_id)
 
     @app.post("/api/motors/{motor_id}/zero")
@@ -1165,6 +1206,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        if not get_motor_client().available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         return get_motor_client().zero(motor_id)
 
     @app.post("/api/motors/{motor_id}/min")
@@ -1175,6 +1218,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        if not get_motor_client().available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         return get_motor_client().set_min(motor_id)
 
     @app.post("/api/motors/{motor_id}/max")
@@ -1185,6 +1230,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        if not get_motor_client().available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         return get_motor_client().set_max(motor_id)
 
     @app.post("/api/motors/{motor_id}/reset-alarm")
@@ -1195,11 +1242,36 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        if not get_motor_client().available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
         return get_motor_client().reset_alarm(motor_id)
+
+    @app.get("/api/winders/{role}/state")
+    def api_winder_state(
+        role: str,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        try:
+            return get_winder_state(role)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     # =========================
     # ===== SIMPLE UI =========
     # =========================
+    @app.get("/ui/winders/{role}", response_class=HTMLResponse)
+    def ui_winder(role: str):
+        try:
+            normalized = normalize_winder_role(role)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Unknown winder role")
+        nav = nav_html("motors")
+        label = "Abwickler" if normalized == "unwinder" else "Aufwickler"
+        return build_winder_ui_html(normalized, label, nav)
+
     @app.get("/ui/params", response_class=HTMLResponse)
     def ui_params():
         nav = nav_html("params")
@@ -1489,6 +1561,8 @@ load();
     __NAV__
     <div class="toolbar">
       <button class="btn" onclick="reloadAll()">Reload</button>
+      <button class="btn" onclick="openWinder('unwinder')">Abwickler</button>
+      <button class="btn" onclick="openWinder('rewinder')">Aufwickler</button>
       <span id="status" class="muted">loading...</span>
     </div>
     <div class="cards" id="cards"></div>
@@ -1542,10 +1616,11 @@ function renderCard(motor){
   const card = document.createElement("div");
   card.className = "card";
   card.id = `motor-card-${motor.id}`;
-  card.innerHTML = `
-    <h3>${esc(motor.name || ("Motor " + motor.id))}</h3>
-    <div class="meta">
-      <span class="pill">ID ${esc(motor.id)}</span>
+    card.innerHTML = `
+      <h3>${esc(motor.name || ("Motor " + motor.id))}</h3>
+      <div class="muted" style="margin-bottom:8px">${esc(motor.description || "")}</div>
+      <div class="meta">
+        <span class="pill">ID ${esc(motor.id)}</span>
       <span class="pill">${esc(motor.controller || "")}</span>
       <span class="pill">${esc(motor.motor_type || "")}</span>
       <span class="pill">${motor.positional ? "Positionierachse" : "Transportachse"}</span>
@@ -1639,6 +1714,11 @@ function updateCard(motor){
   updateLiveText(motor.id, "msg", state.last_error || motor.last_reply || "-");
 }
 
+function openWinder(role){
+  const target = role === "rewinder" ? "/ui/winders/rewinder" : "/ui/winders/unwinder";
+  window.open(target, "_blank", "noopener");
+}
+
 async function reloadAll(){
   document.getElementById("status").textContent = "loading...";
   const data = await api("/api/motors/overview");
@@ -1646,7 +1726,8 @@ async function reloadAll(){
     if(!renderedIds.has(motor.id)){ renderCard(motor); }
     else { updateCard(motor); }
   }
-  document.getElementById("status").textContent = `${(data.motors || []).length} Motoren geladen`;
+  const suffix = data.message ? ` | ${data.message}` : "";
+  document.getElementById("status").textContent = `${(data.motors || []).length} Motoren geladen${suffix}`;
 }
 
 async function post(path, body){
@@ -1949,8 +2030,8 @@ setInterval(() => { reloadAll().catch(err => { document.getElementById("status")
   </fieldset>
 
   <fieldset>
-    <legend>Device Endpoints (ESP / VJ3350 / VJ6530)</legend>
-    <div class="muted">TCP Forwarding: Die hier eingestellten Geraeteports werden auf die jeweilige eth1 Ziel-IP 1:1 weitergeleitet. Zusaetzliche Ports koennen pro Geraet als Liste (Komma/Semikolon/Leerzeichen) parallel geroutet werden.</div>
+    <legend>Device Endpoints (ESP / VJ3350 / VJ6530 / Wickler)</legend>
+    <div class="muted">TCP Forwarding: Die hier eingestellten Geraeteports werden fuer ESP/VJ3350/VJ6530 auf die jeweilige eth1 Ziel-IP 1:1 weitergeleitet. Die beiden Smart-Wickler werden direkt per HTTP-State-Endpunkt angesprochen und benoetigen kein Port-Routing.</div>
     <div class="grid cols-device">
       <div class="field"><label>ESP host</label><input id="esp_host"/></div>
       <div class="field"><label>ESP port</label><input id="esp_port"/></div>
@@ -1975,6 +2056,20 @@ setInterval(() => { reloadAll().catch(err => { document.getElementById("status")
     <div class="actions">
       <label class="checkline"><input type="checkbox" id="vj6530_async_enabled"/>VJ6530 async ZBC Events aktiv</label>
       <span class="muted">Async ist der Primaerpfad fuer Online/Offline/Warning/Fault/Buzy/Print-Events. Polling bleibt als Fallback.</span>
+    </div>
+    <div class="grid cols-device">
+      <div class="field"><label>Abwickler host</label><input id="smart_unwinder_host"/></div>
+      <div class="field"><label>Abwickler port</label><input id="smart_unwinder_port"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="kein Routing erforderlich"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="oeffnet /api/state bzw. /"/></div>
+      <label class="checkline"><input type="checkbox" id="smart_unwinder_simulation"/>Simulation</label>
+    </div>
+    <div class="grid cols-device">
+      <div class="field"><label>Aufwickler host</label><input id="smart_rewinder_host"/></div>
+      <div class="field"><label>Aufwickler port</label><input id="smart_rewinder_port"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="kein Routing erforderlich"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="oeffnet /api/state bzw. /"/></div>
+      <label class="checkline"><input type="checkbox" id="smart_rewinder_simulation"/>Simulation</label>
     </div>
     <div class="actions">
       <button onclick="saveDevices()">Save Devices + Restart</button>
@@ -2208,6 +2303,12 @@ async function reloadAll(){
   document.getElementById("vj6530_poll_interval_s").value = c.vj6530_poll_interval_s ?? 15.0;
   document.getElementById("vj6530_simulation").checked = !!c.vj6530_simulation;
   document.getElementById("vj6530_async_enabled").checked = !!(c.vj6530_async_enabled ?? true);
+  document.getElementById("smart_unwinder_host").value = c.smart_unwinder_host || "";
+  document.getElementById("smart_unwinder_port").value = c.smart_unwinder_port ?? "";
+  document.getElementById("smart_unwinder_simulation").checked = !!(c.smart_unwinder_simulation ?? true);
+  document.getElementById("smart_rewinder_host").value = c.smart_rewinder_host || "";
+  document.getElementById("smart_rewinder_port").value = c.smart_rewinder_port ?? "";
+  document.getElementById("smart_rewinder_simulation").checked = !!(c.smart_rewinder_simulation ?? true);
   document.getElementById("logs_keep_days_all").value = c.logs_keep_days_all ?? 30;
   document.getElementById("logs_keep_days_esp").value = c.logs_keep_days_esp ?? 30;
   document.getElementById("logs_keep_days_tto").value = c.logs_keep_days_tto ?? 30;
@@ -2347,7 +2448,13 @@ async function saveDevices(){
     vj6530_forward_ports: document.getElementById("vj6530_forward_ports").value.trim(),
     vj6530_poll_interval_s: Number(document.getElementById("vj6530_poll_interval_s").value.trim()),
     vj6530_simulation: document.getElementById("vj6530_simulation").checked,
-    vj6530_async_enabled: document.getElementById("vj6530_async_enabled").checked
+    vj6530_async_enabled: document.getElementById("vj6530_async_enabled").checked,
+    smart_unwinder_host: document.getElementById("smart_unwinder_host").value.trim(),
+    smart_unwinder_port: Number(document.getElementById("smart_unwinder_port").value.trim()),
+    smart_unwinder_simulation: document.getElementById("smart_unwinder_simulation").checked,
+    smart_rewinder_host: document.getElementById("smart_rewinder_host").value.trim(),
+    smart_rewinder_port: Number(document.getElementById("smart_rewinder_port").value.trim()),
+    smart_rewinder_simulation: document.getElementById("smart_rewinder_simulation").checked
   };
   await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
   document.getElementById("dev_status").textContent = "saved (service restarted)";

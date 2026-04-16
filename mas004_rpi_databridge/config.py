@@ -70,6 +70,12 @@ class Settings:
     vj6530_poll_interval_s: float = 15.0
     vj6530_async_enabled: bool = True
     esp_forward_ports: str = ""
+    smart_unwinder_host: str = "192.168.2.104"
+    smart_unwinder_port: int = 3011
+    smart_unwinder_simulation: bool = True
+    smart_rewinder_host: str = "192.168.2.105"
+    smart_rewinder_port: int = 3012
+    smart_rewinder_simulation: bool = True
 
     # Daily log-file retention (days)
     logs_keep_days_all: int = 30

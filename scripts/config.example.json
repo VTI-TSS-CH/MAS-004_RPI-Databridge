@@ -53,6 +53,12 @@
   "vj6530_simulation": false,
   "vj6530_poll_interval_s": 15.0,
   "vj6530_async_enabled": true,
+  "smart_unwinder_host": "192.168.2.104",
+  "smart_unwinder_port": 3011,
+  "smart_unwinder_simulation": true,
+  "smart_rewinder_host": "192.168.2.105",
+  "smart_rewinder_port": 3012,
+  "smart_rewinder_simulation": true,
 
   "logs_keep_days_all": 30,
   "logs_keep_days_esp": 30,

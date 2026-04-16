@@ -71,6 +71,9 @@
 
 ## 5. Verification Checklist
 - UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/motors`, `/ui/settings`
+- Smart Wickler proxy UIs reachable when needed:
+  - `/ui/winders/unwinder`
+  - `/ui/winders/rewinder`
 - API health: `/health`
 - Outbox not growing unexpectedly
 - If Microtom callback delivery shows a staircase delay pattern around `10s / 20s / 30s ...`, inspect `journalctl` for `[OUTBOX:primary]` timeouts:
@@ -95,9 +98,16 @@
 - Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
 - If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
 - For the new Oriental motor setup page:
-  - `/api/motors/overview` must return JSON with all 9 configured drives
+  - `/api/motors/overview` must return JSON with all 9 configured drives even when the ESP motor endpoint is offline or still in simulation
   - while typing into `/ui/motors`, periodic refresh must not overwrite focused or dirty inputs
   - `MOTOR <id> SET ...` / `SAVE` / `MOVE_REL_*` must echo through the ESP endpoint before any TEST deployment is claimed successful
+- For Smart Wickler integration:
+  - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
+  - expected defaults are `192.168.2.104:3011` and `192.168.2.105:3012`
+  - no TCP forwarding is expected for these two devices
+  - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open and show a stable simulation/offline state instead of failing hard
+- If the Videojet logo disappears from the Raspi UI again, check `/ui/assets/videojet-logo.jpg` first:
+  - the asset should now come either from the installed package data or from the repo fallback path on the Raspberry
 - If `TTS0001=3` ever returns `ACK_TTS0001=0`, treat that as a regression: the ACK must follow the async-observed settled workbook state, not a stale synchronous verify snapshot.
 - If a 6530 state change reaches Microtom late, inspect whether the delay came from ESP mirror attempts rather than the ZBC async path; Microtom delivery should now be queued before ESP mirroring starts.
 - If `TTS0001=3` fails only from `6 SHUTDOWN`, treat that as a regression in live-summary confirmation for the `STARTUP -> START` sequence.
