@@ -48,6 +48,19 @@
 - Direct host access `ssh pi@192.168.210.20` is also configured to use the same key automatically.
 - Fallback password for LIVE when key-based access is unavailable: `raspberry`
 
+## 3.3 Machine-Setup Login
+- Protected menu entry: `/ui/machine-setup`
+- Protected credentials:
+  - user: `Admin`
+  - password: `VideojetMAS004!`
+- Scope:
+  - `/ui/machine-setup/motors`
+  - `/ui/machine-setup/winders/unwinder`
+  - `/ui/machine-setup/winders/rewinder`
+  - `/api/motors/*`
+  - `/api/winders/*`
+- Legacy `/ui/motors` and `/ui/winders/*` URLs are only compatibility redirects into the protected section.
+
 ## 3.2 Offline Mode
 - If TEST and LIVE are both unreachable, continue in local offline mode only.
 - Before starting substantial work, capture the local multi-repo state:
@@ -73,10 +86,10 @@
 - Keep this file and `PROJECT_CONTEXT.md` up to date whenever architecture, API surface, or deployment flow changes.
 
 ## 5. Verification Checklist
-- UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/motors`, `/ui/settings`
+- UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/machine-setup`, `/ui/settings`
 - Smart Wickler proxy UIs reachable when needed:
-  - `/ui/winders/unwinder`
-  - `/ui/winders/rewinder`
+  - `/ui/machine-setup/winders/unwinder`
+  - `/ui/machine-setup/winders/rewinder`
 - API health: `/health`
 - Outbox not growing unexpectedly
 - If Microtom callback delivery shows a staircase delay pattern around `10s / 20s / 30s ...`, inspect `journalctl` for `[OUTBOX:primary]` timeouts:
@@ -102,16 +115,17 @@
 - If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
 - For the new Oriental motor setup page:
   - `/api/motors/overview` must return JSON with all 9 configured drives even when the ESP motor endpoint is offline or still in simulation
-  - a motor that is marked as simulated on `/ui/motors` must not trigger live ESP polling during the refresh cycle
+  - the Machine-Setup login must be required before `/ui/machine-setup/motors` and `/api/motors/*` become reachable
+  - a motor that is marked as simulated on `/ui/machine-setup/motors` must not trigger live ESP polling during the refresh cycle
   - simulated motors must show last known cached values or defaults, not a repeated endpoint warning
   - if all 9 motors are currently simulated, the page should settle on a stable loaded status and pause background refresh instead of alternating with `loading...`
-  - while typing into `/ui/motors`, periodic refresh must not overwrite focused or dirty inputs
+  - while typing into `/ui/machine-setup/motors`, periodic refresh must not overwrite focused or dirty inputs
   - `MOTOR <id> SET ...` / `SAVE` / `MOVE_REL_*` must echo through the ESP endpoint before any TEST deployment is claimed successful
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
   - expected defaults are `192.168.2.104:3011` and `192.168.2.105:3012`
   - no TCP forwarding is expected for these two devices
-  - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open and show a stable simulation/offline state instead of failing hard
+  - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open inside the main Machine-Setup shell and show a stable simulation/offline state instead of failing hard
 - If the Videojet logo disappears from the Raspi UI again, check `/ui/assets/videojet-logo.jpg` first:
   - the asset should now come either from the installed package data or from the repo fallback path on the Raspberry
 - If `TTS0001=3` ever returns `ACK_TTS0001=0`, treat that as a regression: the ACK must follow the async-observed settled workbook state, not a stale synchronous verify snapshot.

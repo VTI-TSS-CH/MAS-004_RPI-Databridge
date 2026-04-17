@@ -1,15 +1,18 @@
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, Request, HTTPException, Header, UploadFile, File, Query
-from fastapi.responses import HTMLResponse, Response, FileResponse
+from fastapi.responses import HTMLResponse, Response, FileResponse, RedirectResponse
 from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel
 from datetime import datetime
+import hashlib
+import hmac
 import json
 import html
 import subprocess
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
@@ -37,6 +40,10 @@ ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
 REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "Parameterliste SAR41-MAS-004.xlsx")
 FALLBACK_VIDEOJET_LOGO_PATH = os.path.join("/opt", "MAS-004_RPI-Databridge", "mas004_rpi_databridge", "assets", "videojet-logo.jpg")
+MACHINE_SETUP_USER = "Admin"
+MACHINE_SETUP_PASSWORD = "VideojetMAS004!"
+MACHINE_SETUP_COOKIE = "mas004_machine_setup"
+MACHINE_SETUP_SESSION_MAX_AGE_S = 12 * 60 * 60
 
 
 def resolve_videojet_logo_path() -> Optional[str]:
@@ -60,6 +67,59 @@ def require_token_or_shared_secret(x_token: Optional[str], x_shared_secret: Opti
     if cfg.ui_token and x_token == cfg.ui_token:
         return
     require_shared_secret(x_shared_secret, cfg)
+
+
+def sanitize_machine_setup_target(path: Optional[str]) -> str:
+    target = (path or "").strip()
+    if not target.startswith("/ui/machine-setup"):
+        return "/ui/machine-setup/motors"
+    return target
+
+
+def machine_setup_secret(cfg: Settings) -> bytes:
+    seed = f"mas004-machine-setup|{cfg.shared_secret}|{cfg.ui_token}|{cfg.db_path}"
+    return hashlib.sha256(seed.encode("utf-8")).digest()
+
+
+def build_machine_setup_cookie(cfg: Settings, issued_at: Optional[int] = None) -> str:
+    ts = int(issued_at or time.time())
+    payload = f"{MACHINE_SETUP_USER}|{ts}"
+    sig = hmac.new(machine_setup_secret(cfg), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}|{sig}"
+
+
+def has_machine_setup_session(request: Request, cfg: Settings) -> bool:
+    raw = (request.cookies.get(MACHINE_SETUP_COOKIE) or "").strip()
+    if not raw:
+        return False
+    try:
+        username, issued_raw, signature = raw.split("|", 2)
+        issued_at = int(issued_raw)
+    except Exception:
+        return False
+    if username != MACHINE_SETUP_USER:
+        return False
+    payload = f"{username}|{issued_at}"
+    expected = hmac.new(machine_setup_secret(cfg), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not secrets.compare_digest(expected, signature):
+        return False
+    return (int(time.time()) - issued_at) <= MACHINE_SETUP_SESSION_MAX_AGE_S
+
+
+def require_machine_setup_session(request: Request, cfg: Settings):
+    if not has_machine_setup_session(request, cfg):
+        raise HTTPException(status_code=401, detail="Machine-Setup login required")
+
+
+def machine_setup_cookie_kwargs(request: Request, cfg: Settings) -> dict[str, Any]:
+    scheme = (request.url.scheme or "").lower()
+    return {
+        "httponly": True,
+        "max_age": MACHINE_SETUP_SESSION_MAX_AGE_S,
+        "samesite": "lax",
+        "secure": bool(cfg.webui_https or scheme == "https"),
+        "path": "/",
+    }
 
 
 def get_current_time_info() -> dict[str, Any]:
@@ -239,6 +299,12 @@ class MotorConfigReq(BaseModel):
 
 class MotorSimulationReq(BaseModel):
     enabled: bool
+
+
+class MachineSetupLoginReq(BaseModel):
+    username: str
+    password: str
+    next: Optional[str] = "/ui/machine-setup/motors"
 
 
 def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
@@ -444,7 +510,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             ("home", "/", "Home"),
             ("docs", "/docs", "API Docs"),
             ("params", "/ui/params", "Parameter"),
-            ("motors", "/ui/motors", "Motors"),
+            ("machine_setup", "/ui/machine-setup", "Machine-Setup"),
             ("test", "/ui/test", "Test UI"),
             ("settings", "/ui/settings", "Settings"),
         ]
@@ -460,6 +526,108 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             + "".join(links)
             + "</nav></div>"
         )
+
+    def machine_setup_nav_html(active: str) -> str:
+        items = [
+            ("motors", "/ui/machine-setup/motors", "Motors"),
+            ("unwinder", "/ui/machine-setup/winders/unwinder", "Abwickler"),
+            ("rewinder", "/ui/machine-setup/winders/rewinder", "Aufwickler"),
+        ]
+        links = []
+        for key, href, label in items:
+            cls = "navbtn active" if key == active else "navbtn"
+            links.append(f'<a class="{cls}" href="{href}">{label}</a>')
+        links.append('<a class="navbtn" href="/ui/machine-setup/logout">Logout</a>')
+        return (
+            '<div style="margin:-2px 0 14px 0;">'
+            '<div style="font-size:12px; font-weight:700; color:#5f6b7a; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px;">'
+            'Machine-Setup'
+            '</div>'
+            '<nav class="topnav">'
+            + "".join(links)
+            + "</nav></div>"
+        )
+
+    def machine_setup_login_html(next_path: str, error: str = "") -> str:
+        nav = nav_html("machine_setup")
+        error_html = ""
+        if error:
+            error_html = f'<div style="padding:10px 12px; border:1px solid #f3c4c4; background:#fdecec; color:#8a1c1c; border-radius:10px; margin-bottom:12px;">{html.escape(error)}</div>'
+        hidden_next = html.escape(next_path, quote=True)
+        return f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Machine-Setup Login</title>
+  <style>
+    body{{margin:0; font-family:Segoe UI,Arial,sans-serif; background:#f4f6f9; color:#1f2933}}
+    .wrap{{max-width:1500px; margin:0 auto; padding:16px}}
+    .topnav{{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px}}
+    .navbtn{{padding:8px 12px; border:1px solid #d6dde7; border-radius:8px; background:#fff; color:#1f2933; text-decoration:none}}
+    .navbtn.active{{background:#005eb8; color:#fff; border-color:#005eb8}}
+    .card{{max-width:480px; background:#fff; border:1px solid #d6dde7; border-radius:12px; padding:18px}}
+    .field{{display:flex; flex-direction:column; gap:4px; margin-bottom:12px}}
+    .field label{{font-size:12px; color:#5f6b7a; font-weight:700}}
+    input{{width:100%; min-height:40px; padding:10px 12px; border:1px solid #d6dde7; border-radius:10px}}
+    button{{min-height:40px; padding:9px 14px; border:1px solid #a8bfd8; border-radius:10px; background:#e8f0f8; color:#17324b; font-weight:700; cursor:pointer}}
+    button:hover{{background:#d9e7f5}}
+    .muted{{color:#5f6b7a}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    {nav}
+    <div class="card">
+      <h2 style="margin-top:0">Machine-Setup Login</h2>
+      <p class="muted">Dieser Bereich ist separat geschuetzt. Bitte mit dem Machine-Setup-Admin anmelden.</p>
+      {error_html}
+      <form onsubmit="return submitLogin(event)">
+        <input type="hidden" name="next" value="{hidden_next}"/>
+        <div class="field">
+          <label>Benutzer</label>
+          <input id="machineSetupUser" name="username" autocomplete="username" required/>
+        </div>
+        <div class="field">
+          <label>Passwort</label>
+          <input id="machineSetupPassword" name="password" type="password" autocomplete="current-password" required/>
+        </div>
+        <button type="submit">Anmelden</button>
+      </form>
+      <div id="machineSetupError" style="display:none; padding:10px 12px; border:1px solid #f3c4c4; background:#fdecec; color:#8a1c1c; border-radius:10px; margin-top:12px;"></div>
+    </div>
+  </div>
+  <script>
+    async function submitLogin(event) {{
+      event.preventDefault();
+      const payload = {{
+        username: document.getElementById("machineSetupUser").value.trim(),
+        password: document.getElementById("machineSetupPassword").value,
+        next: document.querySelector('input[name="next"]').value || "/ui/machine-setup/motors"
+      }};
+      const errorBox = document.getElementById("machineSetupError");
+      errorBox.style.display = "none";
+      errorBox.textContent = "";
+      const r = await fetch("/ui/machine-setup/login", {{
+        method: "POST",
+        headers: {{"Content-Type":"application/json"}},
+        body: JSON.stringify(payload)
+      }});
+      const txt = await r.text();
+      let data = {{}};
+      try {{ data = JSON.parse(txt); }} catch(e) {{}}
+      if(!r.ok) {{
+        errorBox.textContent = (data && data.detail) ? data.detail : (`HTTP ${{r.status}}`);
+        errorBox.style.display = "block";
+        return false;
+      }}
+      window.location.href = (data && data.redirect) ? data.redirect : payload.next;
+      return false;
+    }}
+  </script>
+</body>
+</html>
+"""
 
     @app.get("/ui/assets/videojet-logo.jpg", include_in_schema=False)
     def ui_logo_asset():
@@ -1245,21 +1413,23 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     # =========================
     @app.get("/api/motors/overview")
     def api_motors_overview(
+        request: Request,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         return get_motor_overview_payload()
 
     @app.get("/api/motors/{motor_id}")
     def api_motor_status(
+        request: Request,
         motor_id: int,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         if not motor_live_allowed(motor_id, cfg2):
             merged = get_motor_overview_payload()
             for motor in merged.get("motors") or []:
@@ -1280,13 +1450,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     @app.post("/api/motors/{motor_id}/move")
     def api_motor_move(
+        request: Request,
         motor_id: int,
         body: MotorMoveReq,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         mode = (body.mode or "").strip().lower()
@@ -1300,13 +1471,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     @app.post("/api/motors/{motor_id}/config")
     def api_motor_config(
+        request: Request,
         motor_id: int,
         body: MotorConfigReq,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         payload = body.model_dump(exclude_none=True)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
@@ -1314,68 +1486,74 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     @app.post("/api/motors/{motor_id}/save")
     def api_motor_save(
+        request: Request,
         motor_id: int,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         return EspMotorClient(cfg2).save(motor_id)
 
     @app.post("/api/motors/{motor_id}/zero")
     def api_motor_zero(
+        request: Request,
         motor_id: int,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         return EspMotorClient(cfg2).zero(motor_id)
 
     @app.post("/api/motors/{motor_id}/min")
     def api_motor_min(
+        request: Request,
         motor_id: int,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         return EspMotorClient(cfg2).set_min(motor_id)
 
     @app.post("/api/motors/{motor_id}/max")
     def api_motor_max(
+        request: Request,
         motor_id: int,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         return EspMotorClient(cfg2).set_max(motor_id)
 
     @app.post("/api/motors/{motor_id}/reset-alarm")
     def api_motor_reset_alarm(
+        request: Request,
         motor_id: int,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         return EspMotorClient(cfg2).reset_alarm(motor_id)
 
     @app.post("/api/motors/{motor_id}/simulation")
     def api_motor_simulation(
+        request: Request,
         motor_id: int,
         body: MotorSimulationReq,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         store = get_motor_state_store()
         ids = sorted(store.set_simulation(motor_id, bool(body.enabled)))
         merged = get_motor_overview_payload()
@@ -1384,12 +1562,13 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     @app.get("/api/winders/{role}/state")
     def api_winder_state(
+        request: Request,
         role: str,
         x_token: Optional[str] = Header(default=None),
         x_shared_secret: Optional[str] = Header(default=None),
     ):
         cfg2 = Settings.load(cfg_path)
-        require_token_or_shared_secret(x_token, x_shared_secret, cfg2)
+        require_machine_setup_session(request, cfg2)
         try:
             return get_winder_state(role)
         except ValueError as exc:
@@ -1398,13 +1577,60 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     # =========================
     # ===== SIMPLE UI =========
     # =========================
-    @app.get("/ui/winders/{role}", response_class=HTMLResponse)
-    def ui_winder(role: str):
+    @app.get("/ui/machine-setup", include_in_schema=False)
+    def ui_machine_setup(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        target = "/ui/machine-setup/motors"
+        if has_machine_setup_session(request, cfg2):
+            return RedirectResponse(url=target, status_code=303)
+        return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+
+    @app.get("/ui/machine-setup/login", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_setup_login(request: Request, next: str = Query(default="/ui/machine-setup/motors")):
+        cfg2 = Settings.load(cfg_path)
+        target = sanitize_machine_setup_target(next)
+        if has_machine_setup_session(request, cfg2):
+            return RedirectResponse(url=target, status_code=303)
+        return HTMLResponse(machine_setup_login_html(target))
+
+    @app.post("/ui/machine-setup/login", include_in_schema=False)
+    def ui_machine_setup_login_submit(
+        request: Request,
+        response: Response,
+        body: MachineSetupLoginReq,
+    ):
+        cfg2 = Settings.load(cfg_path)
+        target = sanitize_machine_setup_target(body.next)
+        if body.username != MACHINE_SETUP_USER or body.password != MACHINE_SETUP_PASSWORD:
+            raise HTTPException(status_code=401, detail="Ungueltiger Benutzer oder Passwort.")
+        response.set_cookie(MACHINE_SETUP_COOKIE, build_machine_setup_cookie(cfg2), **machine_setup_cookie_kwargs(request, cfg2))
+        return {"ok": True, "redirect": target}
+
+    @app.get("/ui/machine-setup/logout", include_in_schema=False)
+    def ui_machine_setup_logout():
+        response = RedirectResponse(url="/ui/machine-setup/login", status_code=303)
+        response.delete_cookie(MACHINE_SETUP_COOKIE, path="/")
+        return response
+
+    @app.get("/ui/winders/{role}", include_in_schema=False)
+    def ui_winder_redirect(role: str):
         try:
             normalized = normalize_winder_role(role)
         except ValueError:
             raise HTTPException(status_code=404, detail="Unknown winder role")
-        nav = nav_html("motors")
+        return RedirectResponse(url=f"/ui/machine-setup/winders/{normalized}", status_code=303)
+
+    @app.get("/ui/machine-setup/winders/{role}", response_class=HTMLResponse, include_in_schema=False)
+    def ui_winder(request: Request, role: str):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = sanitize_machine_setup_target(f"/ui/machine-setup/winders/{role}")
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        try:
+            normalized = normalize_winder_role(role)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Unknown winder role")
+        nav = nav_html("machine_setup") + machine_setup_nav_html("unwinder" if normalized == "unwinder" else "rewinder")
         label = "Abwickler" if normalized == "unwinder" else "Aufwickler"
         return build_winder_ui_html(normalized, label, nav)
 
@@ -1646,9 +1872,17 @@ load();
 </html>
         """.replace("__NAV__", nav)
 
-    @app.get("/ui/motors", response_class=HTMLResponse)
-    def ui_motors():
-        nav = nav_html("motors")
+    @app.get("/ui/motors", include_in_schema=False)
+    def ui_motors_redirect():
+        return RedirectResponse(url="/ui/machine-setup/motors", status_code=303)
+
+    @app.get("/ui/machine-setup/motors", response_class=HTMLResponse, include_in_schema=False)
+    def ui_motors(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/motors"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("motors")
         return """
 <!doctype html>
 <html>
@@ -1697,8 +1931,6 @@ load();
     __NAV__
     <div class="toolbar">
       <button class="btn" onclick="reloadAll()">Reload</button>
-      <button class="btn" onclick="openWinder('unwinder')">Abwickler</button>
-      <button class="btn" onclick="openWinder('rewinder')">Aufwickler</button>
       <span id="status" class="muted">loading...</span>
     </div>
     <div class="cards" id="cards"></div>
@@ -1865,11 +2097,6 @@ function updateCard(motor){
   const simEl = document.getElementById(`m-${motor.id}-simulation`);
   if(simEl){ simEl.checked = sim; }
   setMotorSimulationUi(motor.id, sim);
-}
-
-function openWinder(role){
-  const target = role === "rewinder" ? "/ui/winders/rewinder" : "/ui/winders/unwinder";
-  window.open(target, "_blank", "noopener");
 }
 
 async function toggleSimulation(id, enabled){

@@ -23,8 +23,16 @@
 - The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-17:
   - new row `MAP0065`
   - `MAP0056..MAP0064` now carry Microtom `R/W = R` while keeping `ESP32 R/W = W`
-- New motor operator surface:
-  - `/ui/motors` on the Raspi web UI
+- New protected Machine-Setup surface:
+  - `/ui/machine-setup`
+  - `/ui/machine-setup/motors`
+  - `/ui/machine-setup/winders/unwinder`
+  - `/ui/machine-setup/winders/rewinder`
+  - login credentials for this protected area:
+    - user: `Admin`
+    - password: `VideojetMAS004!`
+  - legacy `/ui/motors` and `/ui/winders/*` routes remain as compatibility redirects into the new protected section
+- New motor operator surface inside Machine-Setup:
   - live status/config view for all 9 Oriental drives behind the ESP32-PLC
   - calibration/runtime parameter editing over the dedicated ESP `MOTOR ...` command channel
   - dirty-field protection so UI refreshes do not overwrite operator input while typing
@@ -32,9 +40,9 @@
   - each motor now also has its own local simulation toggle on the Raspi UI; simulated motors are excluded from live polling and instead use last known cached values or the fixed catalog defaults
   - if all visible motors are simulated, the page pauses its background refresh loop to avoid `loading...` flicker and unnecessary overview calls
 - New Smart Wickler proxy surface on the Raspi web UI:
-  - `/ui/winders/unwinder`
-  - `/ui/winders/rewinder`
-  - opened from `/ui/motors` via dedicated `Abwickler` / `Aufwickler` buttons
+  - `/ui/machine-setup/winders/unwinder`
+  - `/ui/machine-setup/winders/rewinder`
+  - reached inside the shared Machine-Setup shell instead of opening separate browser windows
   - each page reads the configured Smart Wickler endpoint `/api/state` when live is enabled, otherwise it shows a stable local simulation/offline view
 - New Smart Wickler endpoint settings in the Databridge config:
   - `smart_unwinder_host`, `smart_unwinder_port`, `smart_unwinder_simulation`

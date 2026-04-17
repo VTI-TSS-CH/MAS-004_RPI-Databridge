@@ -1,5 +1,19 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-17 (Machine-Setup Protected Menu)
+- Reworked the top navigation so `Motors` now lives under a dedicated `Machine-Setup` menu entry.
+- Added a dedicated Machine-Setup login flow with cookie-backed session protection for:
+  - `/ui/machine-setup/motors`
+  - `/ui/machine-setup/winders/unwinder`
+  - `/ui/machine-setup/winders/rewinder`
+  - `/api/motors/*`
+  - `/api/winders/*`
+- Fixed credentials for this protected section are now documented in the local support docs:
+  - user `Admin`
+  - password `VideojetMAS004!`
+- Legacy `/ui/motors` and `/ui/winders/*` endpoints now redirect into the protected Machine-Setup area for compatibility.
+- Smart Wickler navigation no longer opens a separate browser window; `Abwickler` and `Aufwickler` stay inside the main Raspi UI shell.
+
 ## 2026-04-17 (Master Workbook Reimport Sync)
 - Refreshed the repository copy `master_data/Parameterliste SAR41-MAS-004.xlsx` from the current external master workbook.
 - Workbook delta in this sync:
@@ -29,7 +43,7 @@
 - Added new Raspi UI proxy pages:
   - `/ui/winders/unwinder`
   - `/ui/winders/rewinder`
-  - the `Motors` page now opens these in a new window via the `Abwickler` / `Aufwickler` buttons
+  - this original standalone navigation was later superseded by the protected `Machine-Setup` shell
 - The Raspi Wickler pages read `/api/state` from the configured Smart Wickler endpoint when live is enabled and fall back to a stable local simulation/offline visualization otherwise.
 - Restored robust Videojet logo delivery:
   - `videojet-logo.jpg` is now included as package data for installed Raspi builds

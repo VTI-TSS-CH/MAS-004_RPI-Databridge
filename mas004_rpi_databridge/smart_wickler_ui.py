@@ -46,10 +46,10 @@ def build_winder_ui_html(role: str, label: str, nav_html: str) -> str:
   </style>
 </head>
 <body>
-  <div class="wrap">
-    {nav_html}
-    <div class="toolbar" style="margin-bottom:12px">
-      <a class="btn" href="/ui/motors">Zurueck zu Motors</a>
+    <div class="wrap">
+      {nav_html}
+      <div class="toolbar" style="margin-bottom:12px">
+      <a class="btn" href="/ui/machine-setup/motors">Motors</a>
       <button class="btn primary" onclick="openDeviceUi()">Geraete-UI oeffnen</button>
       <span id="headline" class="muted">lade {label}...</span>
     </div>
