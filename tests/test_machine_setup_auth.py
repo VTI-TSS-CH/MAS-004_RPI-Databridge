@@ -42,9 +42,17 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(303, page.status_code)
         self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/motors", page.headers.get("location"))
 
+        io_page = client.get("/ui/machine-setup/io", follow_redirects=False)
+        self.assertEqual(303, io_page.status_code)
+        self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/io", io_page.headers.get("location"))
+
         api = client.get("/api/motors/overview")
         self.assertEqual(401, api.status_code)
         self.assertEqual("Machine-Setup login required", api.json()["detail"])
+
+        io_api = client.get("/api/io/overview")
+        self.assertEqual(401, io_api.status_code)
+        self.assertEqual("Machine-Setup login required", io_api.json()["detail"])
 
     def test_machine_setup_login_unlocks_ui_and_api(self):
         client = self.build_client()
@@ -67,11 +75,20 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertIn(">Motors<", page.text)
         self.assertNotIn('window.open(target, "_blank"', page.text)
 
+        io_page = client.get("/ui/machine-setup/io")
+        self.assertEqual(200, io_page.status_code)
+        self.assertIn("Hardware I/O", io_page.text)
+        self.assertIn(">I/O<", io_page.text)
+
         api = client.get("/api/motors/overview")
         self.assertEqual(200, api.status_code)
         payload = api.json()
         self.assertIn("motors", payload)
         self.assertEqual(9, len(payload["motors"]))
+
+        io_api = client.get("/api/io/overview")
+        self.assertEqual(200, io_api.status_code)
+        self.assertIn("points", io_api.json())
 
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)

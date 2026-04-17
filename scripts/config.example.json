@@ -1,13 +1,14 @@
 {
   "db_path": "/var/lib/mas004_rpi_databridge/databridge.db",
   "master_params_xlsx_path": "/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx",
+  "master_ios_xlsx_path": "/var/lib/mas004_rpi_databridge/master/SAR41-MAS-004_SPS_I-Os.xlsx",
   "webui_host": "0.0.0.0",
   "webui_port": 8080,
 
-  "eth0_ip": "192.168.1.100",
+  "eth0_ip": "192.168.210.20",
   "eth0_subnet": "24",
-  "eth0_gateway": "192.168.1.1",
-  "eth0_dns": "10.28.193.4 10.27.30.201",
+  "eth0_gateway": "192.168.210.1",
+  "eth0_dns": "192.168.210.1",
 
   "eth1_ip": "192.168.2.100",
   "eth1_subnet": "24",
@@ -16,9 +17,9 @@
 
   "eth0_source_ip": "",
 
-  "peer_base_url": "http://192.168.1.64:9090",
+  "peer_base_url": "http://192.168.210.10:81",
   "peer_base_url_secondary": "",
-  "peer_watchdog_host": "192.168.1.64",
+  "peer_watchdog_host": "192.168.210.10",
   "peer_health_path": "/health",
   "ntp_server": "",
   "ntp_sync_interval_min": 60,
@@ -36,27 +37,38 @@
   "ui_token": "SET_ME",
   "shared_secret": "SET_ME_OR_EMPTY",
 
-  "esp_host": "192.168.2.10",
+  "raspi_plc_model": "RPIPLC_21",
+  "raspi_io_simulation": true,
+  "raspi_io_poll_interval_s": 1.0,
+
+  "esp_host": "192.168.2.101",
   "esp_port": 3010,
-  "esp_watchdog_host": "192.168.2.10",
-  "esp_forward_ports": "",
+  "esp_watchdog_host": "192.168.2.101",
+  "esp_io_poll_interval_s": 1.0,
   "esp_simulation": true,
 
-  "vj3350_host": "192.168.2.20",
+  "moxa1_host": "192.168.2.102",
+  "moxa1_port": 502,
+  "moxa1_simulation": true,
+  "moxa2_host": "192.168.2.103",
+  "moxa2_port": 502,
+  "moxa2_simulation": true,
+  "moxa_poll_interval_s": 1.0,
+
+  "vj3350_host": "192.168.210.21",
   "vj3350_port": 20000,
-  "vj3350_forward_ports": "",
   "vj3350_simulation": true,
 
-  "vj6530_host": "192.168.2.103",
+  "vj6530_host": "192.168.210.22",
   "vj6530_port": 3002,
-  "vj6530_forward_ports": "",
-  "vj6530_simulation": false,
+  "vj6530_simulation": true,
   "vj6530_poll_interval_s": 15.0,
   "vj6530_async_enabled": true,
-  "smart_unwinder_host": "192.168.2.104",
+
+  "smart_unwinder_host": "192.168.210.23",
   "smart_unwinder_port": 3011,
   "smart_unwinder_simulation": true,
-  "smart_rewinder_host": "192.168.2.105",
+  "smart_rewinder_host": "192.168.210.24",
   "smart_rewinder_port": 3012,
   "smart_rewinder_simulation": true,
 

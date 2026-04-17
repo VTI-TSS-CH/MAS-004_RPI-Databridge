@@ -26,6 +26,8 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_ip_info
 from mas004_rpi_databridge.esp_motors import EspMotorClient
+from mas004_rpi_databridge.io_master import IoStore
+from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
@@ -39,7 +41,9 @@ from mas004_rpi_databridge.timeutil import format_local_timestamp, local_from_ti
 ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
 REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "Parameterliste SAR41-MAS-004.xlsx")
+REPO_MASTER_IOS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "SAR41-MAS-004_SPS_I-Os.xlsx")
 FALLBACK_VIDEOJET_LOGO_PATH = os.path.join("/opt", "MAS-004_RPI-Databridge", "mas004_rpi_databridge", "assets", "videojet-logo.jpg")
+FALLBACK_REPO_MASTER_IOS_XLSX = os.path.join("/opt", "MAS-004_RPI-Databridge", "master_data", "SAR41-MAS-004_SPS_I-Os.xlsx")
 MACHINE_SETUP_USER = "Admin"
 MACHINE_SETUP_PASSWORD = "VideojetMAS004!"
 MACHINE_SETUP_COOKIE = "mas004_machine_setup"
@@ -48,6 +52,13 @@ MACHINE_SETUP_SESSION_MAX_AGE_S = 12 * 60 * 60
 
 def resolve_videojet_logo_path() -> Optional[str]:
     for candidate in (VIDEOJET_LOGO_PATH, FALLBACK_VIDEOJET_LOGO_PATH):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def resolve_repo_master_ios_xlsx() -> Optional[str]:
+    for candidate in (REPO_MASTER_IOS_XLSX, FALLBACK_REPO_MASTER_IOS_XLSX):
         if candidate and os.path.exists(candidate):
             return candidate
     return None
@@ -218,17 +229,25 @@ class ConfigUpdate(BaseModel):
     esp_port: Optional[int] = None
     esp_simulation: Optional[bool] = None
     esp_watchdog_host: Optional[str] = None
+    esp_io_poll_interval_s: Optional[float] = None
+    raspi_plc_model: Optional[str] = None
+    raspi_io_simulation: Optional[bool] = None
+    raspi_io_poll_interval_s: Optional[float] = None
+    moxa1_host: Optional[str] = None
+    moxa1_port: Optional[int] = None
+    moxa1_simulation: Optional[bool] = None
+    moxa2_host: Optional[str] = None
+    moxa2_port: Optional[int] = None
+    moxa2_simulation: Optional[bool] = None
+    moxa_poll_interval_s: Optional[float] = None
     vj3350_host: Optional[str] = None
     vj3350_port: Optional[int] = None
     vj3350_simulation: Optional[bool] = None
-    vj3350_forward_ports: Optional[str] = None
     vj6530_host: Optional[str] = None
     vj6530_port: Optional[int] = None
     vj6530_simulation: Optional[bool] = None
-    vj6530_forward_ports: Optional[str] = None
     vj6530_poll_interval_s: Optional[float] = None
     vj6530_async_enabled: Optional[bool] = None
-    esp_forward_ports: Optional[str] = None
     smart_unwinder_host: Optional[str] = None
     smart_unwinder_port: Optional[int] = None
     smart_unwinder_simulation: Optional[bool] = None
@@ -301,6 +320,10 @@ class MotorSimulationReq(BaseModel):
     enabled: bool
 
 
+class IoWriteReq(BaseModel):
+    value: int
+
+
 class MachineSetupLoginReq(BaseModel):
     username: str
     password: str
@@ -315,11 +338,18 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     outbox = Outbox(db)
     inbox = Inbox(db)
     params = ParamStore(db)
+    io_store = IoStore(db)
     logs = LogStore(db)
     production_logs = ProductionLogManager(db, cfg=cfg, outbox=outbox)
     if not os.path.exists(cfg.master_params_xlsx_path) and os.path.exists(REPO_MASTER_PARAMS_XLSX):
         os.makedirs(os.path.dirname(cfg.master_params_xlsx_path), exist_ok=True)
         shutil.copyfile(REPO_MASTER_PARAMS_XLSX, cfg.master_params_xlsx_path)
+    repo_master_ios_xlsx = resolve_repo_master_ios_xlsx()
+    if not os.path.exists(cfg.master_ios_xlsx_path) and repo_master_ios_xlsx:
+        os.makedirs(os.path.dirname(cfg.master_ios_xlsx_path), exist_ok=True)
+        shutil.copyfile(repo_master_ios_xlsx, cfg.master_ios_xlsx_path)
+    if io_store.count_points() == 0 and os.path.exists(cfg.master_ios_xlsx_path):
+        io_store.import_xlsx(cfg.master_ios_xlsx_path)
     test_sources = {"raspi", "esp-plc", "vj3350", "vj6530"}
     default_ptype_hint = {"raspi": "", "esp-plc": "MAS", "vj3350": "LSE", "vj6530": "TTE"}
     catalog_ids = [int(item["id"]) for item in motor_catalog()]
@@ -529,6 +559,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     def machine_setup_nav_html(active: str) -> str:
         items = [
+            ("io", "/ui/machine-setup/io", "I/O"),
             ("motors", "/ui/machine-setup/motors", "Motors"),
             ("unwinder", "/ui/machine-setup/winders/unwinder", "Abwickler"),
             ("rewinder", "/ui/machine-setup/winders/rewinder", "Aufwickler"),
@@ -800,6 +831,36 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "mtime_iso": local_from_timestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
         }
 
+    def get_io_workbook_info() -> dict[str, Any]:
+        cfg2 = Settings.load(cfg_path)
+        path = cfg2.master_ios_xlsx_path
+        exists = os.path.exists(path)
+        stat = os.stat(path) if exists else None
+        return {
+            "path": path,
+            "exists": exists,
+            "size_bytes": int(stat.st_size) if stat else 0,
+            "mtime_iso": local_from_timestamp(stat.st_mtime).isoformat(timespec="seconds") if stat else None,
+            "meta": io_store.master_info(),
+        }
+
+    def get_io_snapshot() -> dict[str, Any]:
+        cfg2 = Settings.load(cfg_path)
+        runtime = IoRuntime(cfg2, io_store)
+        payload = runtime.refresh()
+        device_status = {item["device_code"]: item for item in (payload.get("devices") or [])}
+        catalog = io_store.list_devices()
+        for item in catalog:
+            status = device_status.get(item["device_code"], {})
+            item["host"] = status.get("host", "")
+            item["port"] = status.get("port", 0)
+            item["simulation"] = bool(status.get("simulation", False))
+            item["reachable"] = bool(status.get("reachable", False))
+            item["error"] = status.get("error", "")
+        payload["device_catalog"] = catalog
+        payload["master_workbook"] = get_io_workbook_info()
+        return payload
+
     @app.get("/ui", response_class=HTMLResponse)
     def ui():
         return home()
@@ -837,24 +898,39 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "sync_interval_min": getattr(cfg2, "ntp_sync_interval_min", 60),
             },
             "devices": {
+                "raspi_io": {
+                    "model": getattr(cfg2, "raspi_plc_model", "RPIPLC_21"),
+                    "simulation": bool(getattr(cfg2, "raspi_io_simulation", True)),
+                    "poll_interval_s": float(getattr(cfg2, "raspi_io_poll_interval_s", 1.0) or 1.0),
+                },
                 "esp": {
                     "host": cfg2.esp_host,
                     "port": cfg2.esp_port,
                     "simulation": cfg2.esp_simulation,
                     "watchdog_host": cfg2.esp_watchdog_host,
-                    "forward_ports": getattr(cfg2, "esp_forward_ports", ""),
+                    "poll_interval_s": float(getattr(cfg2, "esp_io_poll_interval_s", 1.0) or 1.0),
+                },
+                "moxa1": {
+                    "host": getattr(cfg2, "moxa1_host", ""),
+                    "port": int(getattr(cfg2, "moxa1_port", 0) or 0),
+                    "simulation": bool(getattr(cfg2, "moxa1_simulation", True)),
+                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
+                },
+                "moxa2": {
+                    "host": getattr(cfg2, "moxa2_host", ""),
+                    "port": int(getattr(cfg2, "moxa2_port", 0) or 0),
+                    "simulation": bool(getattr(cfg2, "moxa2_simulation", True)),
+                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
                 },
                 "vj3350": {
                     "host": cfg2.vj3350_host,
                     "port": cfg2.vj3350_port,
                     "simulation": cfg2.vj3350_simulation,
-                    "forward_ports": getattr(cfg2, "vj3350_forward_ports", ""),
                 },
                 "vj6530": {
                     "host": cfg2.vj6530_host,
                     "port": cfg2.vj6530_port,
                     "simulation": cfg2.vj6530_simulation,
-                    "forward_ports": getattr(cfg2, "vj6530_forward_ports", ""),
                     "poll_interval_s": getattr(cfg2, "vj6530_poll_interval_s", 15.0),
                     "async_enabled": bool(getattr(cfg2, "vj6530_async_enabled", True)),
                 },
@@ -918,15 +994,22 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except Exception:
             cfg2.vj6530_poll_interval_s = 15.0
         cfg2.vj6530_poll_interval_s = max(0.5, min(300.0, cfg2.vj6530_poll_interval_s))
-
-        for k in ("esp_forward_ports", "vj3350_forward_ports", "vj6530_forward_ports"):
-            v = getattr(cfg2, k, "")
-            if v is None:
-                setattr(cfg2, k, "")
-            elif isinstance(v, str):
-                setattr(cfg2, k, v.strip())
-            else:
-                setattr(cfg2, k, str(v).strip())
+        try:
+            cfg2.esp_io_poll_interval_s = float(getattr(cfg2, "esp_io_poll_interval_s", 1.0) or 1.0)
+        except Exception:
+            cfg2.esp_io_poll_interval_s = 1.0
+        cfg2.esp_io_poll_interval_s = max(0.2, min(60.0, cfg2.esp_io_poll_interval_s))
+        try:
+            cfg2.raspi_io_poll_interval_s = float(getattr(cfg2, "raspi_io_poll_interval_s", 1.0) or 1.0)
+        except Exception:
+            cfg2.raspi_io_poll_interval_s = 1.0
+        cfg2.raspi_io_poll_interval_s = max(0.2, min(60.0, cfg2.raspi_io_poll_interval_s))
+        try:
+            cfg2.moxa_poll_interval_s = float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0)
+        except Exception:
+            cfg2.moxa_poll_interval_s = 1.0
+        cfg2.moxa_poll_interval_s = max(0.2, min(60.0, cfg2.moxa_poll_interval_s))
+        cfg2.raspi_plc_model = str(getattr(cfg2, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21").strip() or "RPIPLC_21"
 
         cfg2.save(cfg_path)
         # Restart service to apply
@@ -1262,6 +1345,89 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    # =========================
+    # ===== IO API ============
+    # =========================
+    @app.post("/api/io/import")
+    async def io_import(
+        request: Request,
+        file: UploadFile = File(...),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+
+        suffix = os.path.splitext(file.filename or "")[1].lower()
+        if suffix not in (".xlsx",):
+            raise HTTPException(status_code=400, detail="Bitte eine .xlsx Datei hochladen")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp_path = tmp.name
+            content = await file.read()
+            tmp.write(content)
+
+        try:
+            res = io_store.import_xlsx(tmp_path)
+            if res.get("ok"):
+                master_path = cfg2.master_ios_xlsx_path
+                os.makedirs(os.path.dirname(master_path), exist_ok=True)
+                shutil.copyfile(tmp_path, master_path)
+                res["master_workbook"] = get_io_workbook_info()
+            return res
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    @app.get("/api/io/master/info")
+    def io_master_info(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return {"ok": True, "master_workbook": get_io_workbook_info()}
+
+    @app.get("/api/io/master/download")
+    def io_master_download(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        info = get_io_workbook_info()
+        if not info["exists"]:
+            raise HTTPException(status_code=404, detail="IO workbook not stored on Raspi")
+        filename = os.path.basename(info["path"])
+        return FileResponse(
+            info["path"],
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=filename,
+        )
+
+    @app.get("/api/io/overview")
+    def io_overview(
+        request: Request,
+        device: Optional[str] = Query(default=None),
+        include_reserved: bool = Query(default=True),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        payload = get_io_snapshot()
+        if device:
+            payload["points"] = [
+                item
+                for item in (payload.get("points") or [])
+                if str(item.get("device_code") or "").strip().lower() == str(device).strip().lower()
+            ]
+        if not include_reserved:
+            payload["points"] = [item for item in (payload.get("points") or []) if not bool(item.get("is_reserved"))]
+        return payload
+
+    @app.post("/api/io/{io_key}/write")
+    def io_write(request: Request, io_key: str, req: IoWriteReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        runtime = IoRuntime(cfg2, io_store)
+        result = runtime.write_output(io_key, bool(int(req.value)))
+        payload = get_io_snapshot()
+        payload["write_result"] = result
+        return payload
 
     @app.get("/api/params/list")
     def params_list(
@@ -1633,6 +1799,213 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         nav = nav_html("machine_setup") + machine_setup_nav_html("unwinder" if normalized == "unwinder" else "rewinder")
         label = "Abwickler" if normalized == "unwinder" else "Aufwickler"
         return build_winder_ui_html(normalized, label, nav)
+
+    @app.get("/ui/io", include_in_schema=False)
+    def ui_io_redirect():
+        return RedirectResponse(url="/ui/machine-setup/io", status_code=303)
+
+    @app.get("/ui/machine-setup/io", response_class=HTMLResponse, include_in_schema=False)
+    def ui_io(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/io"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("io")
+        return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Hardware I/O</title>
+  <style>
+    :root{
+      --bg:#f4f6f9; --card:#fff; --text:#1f2933; --muted:#5f6b7a; --border:#d6dde7; --blue:#005eb8;
+      --good:#2e7d32; --warn:#ed6c02; --bad:#c62828;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font-family:Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text)}
+    .wrap{max-width:1700px; margin:0 auto; padding:16px}
+    .toolbar,.row,.actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .toolbar{margin-bottom:12px}
+    .btn{min-height:38px; padding:8px 12px; border:1px solid #aec4db; border-radius:10px; background:#e8f0f8; color:#17324b; font-weight:600; cursor:pointer}
+    .btn.small{min-height:30px; padding:4px 8px; font-size:12px}
+    .grid{display:grid; gap:12px}
+    .device-grid{grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); margin-bottom:12px}
+    .card{background:#fff; border:1px solid var(--border); border-radius:12px; padding:14px}
+    .muted{color:var(--muted)}
+    .pill{display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid var(--border); background:#eef3f8; font-size:12px}
+    .ok{color:var(--good)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+    table{width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--border); border-radius:12px; overflow:hidden}
+    th,td{padding:8px 10px; border-top:1px solid #e7edf6; text-align:left; vertical-align:top}
+    th{background:#f7fafc; color:#425466; font-size:12px; text-transform:uppercase; letter-spacing:.04em}
+    tr:first-child td{border-top:none}
+    .state-1{color:var(--good); font-weight:700}
+    .state-0{color:#6b7280}
+    .quality-live{color:var(--good); font-weight:700}
+    .quality-simulation{color:var(--warn); font-weight:700}
+    .quality-offline{color:var(--bad); font-weight:700}
+    .quality-default{color:#6b7280}
+    .checkline{display:inline-flex; gap:8px; align-items:center}
+    @media(max-width:900px){ .hide-mobile{display:none} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    __NAV__
+    <div class="toolbar">
+      <button class="btn" onclick="reloadAll()">Reload</button>
+      <button class="btn" onclick="downloadWorkbook()">IO Workbook herunterladen</button>
+      <label class="btn" for="io_file">IO Workbook importieren</label>
+      <input id="io_file" type="file" accept=".xlsx" style="display:none" onchange="uploadWorkbook(this.files[0])"/>
+      <label class="checkline"><input type="checkbox" id="show_reserved" checked onchange="renderRows(window.__io || null)"/>Reserven anzeigen</label>
+      <span id="status" class="muted"></span>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="row">
+        <span class="pill">Masterdatei</span>
+        <span id="wb_path" class="muted">-</span>
+        <span id="wb_meta" class="muted">-</span>
+      </div>
+    </div>
+    <div id="devices" class="grid device-grid"></div>
+    <div class="card" style="padding:0; overflow:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Device</th>
+            <th>Pin</th>
+            <th>Richtung</th>
+            <th>Funktion</th>
+            <th>Wert</th>
+            <th>Qualitaet</th>
+            <th class="hide-mobile">Zone</th>
+            <th>Aktion</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+<script>
+let refreshHandle = null;
+window.__io = null;
+
+async function api(path, opt={}){
+  const r = await fetch(path, opt);
+  const txt = await r.text();
+  let j = null; try{ j = JSON.parse(txt); }catch(e){}
+  if(!r.ok){ throw new Error((j && j.detail) ? j.detail : (`HTTP ${r.status} ${txt}`)); }
+  return j;
+}
+
+function esc(v){ return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+function qualityClass(v){ return `quality-${String(v || "default").toLowerCase()}`; }
+function valueClass(v){ return Number(v || 0) ? "state-1" : "state-0"; }
+
+function renderDevices(data){
+  const root = document.getElementById("devices");
+  const cards = (data.device_catalog || []).map(device => {
+    const mode = device.simulation ? "Simulation" : (device.reachable ? "Live" : "Offline");
+    const modeCls = device.simulation ? "warn" : (device.reachable ? "ok" : "bad");
+    const endpoint = device.port ? `${device.host}:${device.port}` : (device.host || "-");
+    return `<div class="card">
+      <div class="row" style="justify-content:space-between">
+        <strong>${esc(device.device_label)}</strong>
+        <span class="pill ${modeCls}">${esc(mode)}</span>
+      </div>
+      <div class="muted" style="margin-top:6px">${esc(device.device_code)}</div>
+      <div class="muted" style="margin-top:6px">Endpoint: ${esc(endpoint)}</div>
+      <div class="muted" style="margin-top:6px">Punkte: ${esc(device.total_points)} | Inputs: ${esc(device.inputs)} | Outputs: ${esc(device.outputs)} | GPIO: ${esc(device.gpio_points)}</div>
+      <div class="muted" style="margin-top:6px">${esc(device.error || "")}</div>
+    </div>`;
+  });
+  root.innerHTML = cards.join("");
+}
+
+function renderRows(data){
+  if(!data){ return; }
+  const showReserved = document.getElementById("show_reserved").checked;
+  const rows = (data.points || []).filter(item => showReserved || !item.is_reserved).map(item => {
+    const writable = (item.io_dir === "output" || item.io_dir === "gpio") ? 1 : 0;
+    const actions = writable
+      ? `<button class="btn small" onclick="setIo('${item.io_key}',1)">Set 1</button> <button class="btn small" onclick="setIo('${item.io_key}',0)">Set 0</button>`
+      : `<span class="muted">read-only</span>`;
+    return `<tr>
+      <td>${esc(item.device_label)}</td>
+      <td><strong>${esc(item.pin_label)}</strong></td>
+      <td>${esc(item.io_dir)}</td>
+      <td>${esc(item.function_text || (item.is_reserved ? "Reserve" : ""))}</td>
+      <td class="${valueClass(item.value)}">${esc(item.value)}</td>
+      <td class="${qualityClass(item.quality)}">${esc(item.quality)}</td>
+      <td class="hide-mobile">${esc(item.zone_label || "-")}</td>
+      <td>${actions}</td>
+    </tr>`;
+  });
+  document.getElementById("rows").innerHTML = rows.join("") || '<tr><td colspan="8" class="muted">Keine IO-Punkte geladen</td></tr>';
+}
+
+function renderWorkbook(data){
+  const wb = (data.master_workbook || {});
+  const meta = wb.meta || {};
+  document.getElementById("wb_path").textContent = wb.path || "-";
+  document.getElementById("wb_meta").textContent = `exists=${wb.exists ? "yes" : "no"} | size=${wb.size_bytes || 0} B | channels=${meta.channel_count || 0}`;
+}
+
+function scheduleRefresh(data){
+  const anyLive = (data.device_catalog || []).some(item => !item.simulation);
+  const desiredMs = anyLive ? 2000 : 5000;
+  if(refreshHandle){ clearInterval(refreshHandle); refreshHandle = null; }
+  refreshHandle = setInterval(() => {
+    if(document.hidden) return;
+    reloadAll(true).catch(err => { document.getElementById("status").textContent = err.message; });
+  }, desiredMs);
+}
+
+async function reloadAll(silent=false){
+  if(!silent){ document.getElementById("status").textContent = "loading..."; }
+  const data = await api("/api/io/overview");
+  window.__io = data;
+  renderWorkbook(data);
+  renderDevices(data);
+  renderRows(data);
+  document.getElementById("status").textContent = `${(data.points || []).length} IO-Punkte geladen`;
+  scheduleRefresh(data);
+}
+
+async function setIo(ioKey, value){
+  document.getElementById("status").textContent = `schreibe ${ioKey}=${value}...`;
+  await api(`/api/io/${encodeURIComponent(ioKey)}/write`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({value})
+  });
+  await reloadAll(true);
+}
+
+async function uploadWorkbook(file){
+  if(!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  document.getElementById("status").textContent = "importiere IO Workbook...";
+  await api("/api/io/import", {method:"POST", body: fd});
+  document.getElementById("io_file").value = "";
+  await reloadAll(true);
+}
+
+function downloadWorkbook(){
+  window.location.href = "/api/io/master/download";
+}
+
+reloadAll().catch(err => { document.getElementById("status").textContent = err.message; });
+document.addEventListener("visibilitychange", () => {
+  if(!document.hidden){
+    reloadAll(true).catch(err => { document.getElementById("status").textContent = err.message; });
+  }
+});
+</script>
+</body>
+</html>
+        """.replace("__NAV__", nav)
 
     @app.get("/ui/params", response_class=HTMLResponse)
     def ui_params():
@@ -2433,27 +2806,48 @@ reloadAll().catch(err => { setStatus(err.message); });
   </fieldset>
 
   <fieldset>
-    <legend>Device Endpoints (ESP / VJ3350 / VJ6530 / Wickler)</legend>
-    <div class="muted">TCP Forwarding: Die hier eingestellten Geraeteports werden fuer ESP/VJ3350/VJ6530 auf die jeweilige eth1 Ziel-IP 1:1 weitergeleitet. Die beiden Smart-Wickler werden direkt per HTTP-State-Endpunkt angesprochen und benoetigen kein Port-Routing.</div>
+    <legend>Device Endpoints (ETH0 / ETH1)</legend>
+    <div class="muted">ETH0 ist das Hauptnetz fuer Microtom, Laser, TTO und die beiden Wickler. ETH1 ist das Maschinen-LAN fuer ESP32-PLC58 und die beiden Moxa ioLogik E1211. Das alte Port-Forwarding wurde entfernt; alle Geraete werden direkt ueber ihre Ziel-IP angesprochen.</div>
+    <div class="grid cols-device">
+      <div class="field"><label>Raspi PLC model</label><input id="raspi_plc_model" placeholder="RPIPLC_21"/></div>
+      <div class="field"><label>Raspi IO poll interval (s)</label><input id="raspi_io_poll_interval_s" type="number" min="0.2" max="60" step="0.1"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="lokale PLC21 I/Os"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled/></div>
+      <label class="checkline"><input type="checkbox" id="raspi_io_simulation"/>Raspi IO Simulation</label>
+    </div>
     <div class="grid cols-device">
       <div class="field"><label>ESP host</label><input id="esp_host"/></div>
       <div class="field"><label>ESP port</label><input id="esp_port"/></div>
-      <div class="field"><label>ESP extra routed ports</label><input id="esp_forward_ports" placeholder="z.B. 3011, 3012"/></div>
       <div class="field"><label>ESP watchdog host</label><input id="esp_watchdog_host" placeholder="leer = esp_host"/></div>
+      <div class="field"><label>ESP IO poll interval (s)</label><input id="esp_io_poll_interval_s" type="number" min="0.2" max="60" step="0.1"/></div>
       <label class="checkline"><input type="checkbox" id="esp_simulation"/>Simulation</label>
+    </div>
+    <div class="grid cols-device">
+      <div class="field"><label>Moxa #1 host</label><input id="moxa1_host"/></div>
+      <div class="field"><label>Moxa #1 port</label><input id="moxa1_port"/></div>
+      <div class="field"><label>Moxa poll interval (s)</label><input id="moxa_poll_interval_s" type="number" min="0.2" max="60" step="0.1"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="Modbus/TCP direkt, default 502"/></div>
+      <label class="checkline"><input type="checkbox" id="moxa1_simulation"/>Simulation</label>
+    </div>
+    <div class="grid cols-device">
+      <div class="field"><label>Moxa #2 host</label><input id="moxa2_host"/></div>
+      <div class="field"><label>Moxa #2 port</label><input id="moxa2_port"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="Modbus/TCP direkt, default 502"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled/></div>
+      <label class="checkline"><input type="checkbox" id="moxa2_simulation"/>Simulation</label>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>VJ3350 host</label><input id="vj3350_host"/></div>
       <div class="field"><label>VJ3350 port</label><input id="vj3350_port"/></div>
-      <div class="field"><label>VJ3350 extra routed ports</label><input id="vj3350_forward_ports" placeholder="z.B. 3020, 3021"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="direkt auf ETH0"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled/></div>
       <label class="checkline"><input type="checkbox" id="vj3350_simulation"/>Simulation</label>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>VJ6530 host</label><input id="vj6530_host"/></div>
       <div class="field"><label>VJ6530 port</label><input id="vj6530_port"/></div>
-      <div class="field"><label>VJ6530 extra routed ports</label><input id="vj6530_forward_ports" placeholder="z.B. 3030, 3031"/></div>
       <div class="field"><label>VJ6530 poll interval (s)</label><input id="vj6530_poll_interval_s" type="number" min="0.5" max="300" step="0.5"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="direkt auf ETH0"/></div>
       <label class="checkline"><input type="checkbox" id="vj6530_simulation"/>Simulation</label>
     </div>
     <div class="actions">
@@ -2463,14 +2857,14 @@ reloadAll().catch(err => { setStatus(err.message); });
     <div class="grid cols-device">
       <div class="field"><label>Abwickler host</label><input id="smart_unwinder_host"/></div>
       <div class="field"><label>Abwickler port</label><input id="smart_unwinder_port"/></div>
-      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="kein Routing erforderlich"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="direkt auf ETH0"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled placeholder="oeffnet /api/state bzw. /"/></div>
       <label class="checkline"><input type="checkbox" id="smart_unwinder_simulation"/>Simulation</label>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>Aufwickler host</label><input id="smart_rewinder_host"/></div>
       <div class="field"><label>Aufwickler port</label><input id="smart_rewinder_port"/></div>
-      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="kein Routing erforderlich"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="direkt auf ETH0"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled placeholder="oeffnet /api/state bzw. /"/></div>
       <label class="checkline"><input type="checkbox" id="smart_rewinder_simulation"/>Simulation</label>
     </div>
@@ -2691,18 +3085,26 @@ async function reloadAll(){
   }
   document.getElementById("clear_shared_secret").checked = false;
 
+  document.getElementById("raspi_plc_model").value = c.raspi_plc_model || "RPIPLC_21";
+  document.getElementById("raspi_io_poll_interval_s").value = c.raspi_io_poll_interval_s ?? 1.0;
+  document.getElementById("raspi_io_simulation").checked = !!(c.raspi_io_simulation ?? true);
   document.getElementById("esp_host").value = c.esp_host || "";
   document.getElementById("esp_port").value = c.esp_port ?? "";
   document.getElementById("esp_watchdog_host").value = c.esp_watchdog_host || "";
-  document.getElementById("esp_forward_ports").value = c.esp_forward_ports || "";
+  document.getElementById("esp_io_poll_interval_s").value = c.esp_io_poll_interval_s ?? 1.0;
   document.getElementById("esp_simulation").checked = !!c.esp_simulation;
+  document.getElementById("moxa1_host").value = c.moxa1_host || "";
+  document.getElementById("moxa1_port").value = c.moxa1_port ?? 502;
+  document.getElementById("moxa1_simulation").checked = !!(c.moxa1_simulation ?? true);
+  document.getElementById("moxa2_host").value = c.moxa2_host || "";
+  document.getElementById("moxa2_port").value = c.moxa2_port ?? 502;
+  document.getElementById("moxa2_simulation").checked = !!(c.moxa2_simulation ?? true);
+  document.getElementById("moxa_poll_interval_s").value = c.moxa_poll_interval_s ?? 1.0;
   document.getElementById("vj3350_host").value = c.vj3350_host || "";
   document.getElementById("vj3350_port").value = c.vj3350_port ?? "";
-  document.getElementById("vj3350_forward_ports").value = c.vj3350_forward_ports || "";
   document.getElementById("vj3350_simulation").checked = !!c.vj3350_simulation;
   document.getElementById("vj6530_host").value = c.vj6530_host || "";
   document.getElementById("vj6530_port").value = c.vj6530_port ?? "";
-  document.getElementById("vj6530_forward_ports").value = c.vj6530_forward_ports || "";
   document.getElementById("vj6530_poll_interval_s").value = c.vj6530_poll_interval_s ?? 15.0;
   document.getElementById("vj6530_simulation").checked = !!c.vj6530_simulation;
   document.getElementById("vj6530_async_enabled").checked = !!(c.vj6530_async_enabled ?? true);
@@ -2837,18 +3239,26 @@ async function saveBridge(){
 async function saveDevices(){
   document.getElementById("dev_status").textContent = "saving...";
   const payload = {
+    raspi_plc_model: document.getElementById("raspi_plc_model").value.trim(),
+    raspi_io_poll_interval_s: Number(document.getElementById("raspi_io_poll_interval_s").value.trim()),
+    raspi_io_simulation: document.getElementById("raspi_io_simulation").checked,
     esp_host: document.getElementById("esp_host").value.trim(),
     esp_port: Number(document.getElementById("esp_port").value.trim()),
     esp_watchdog_host: document.getElementById("esp_watchdog_host").value.trim(),
-    esp_forward_ports: document.getElementById("esp_forward_ports").value.trim(),
+    esp_io_poll_interval_s: Number(document.getElementById("esp_io_poll_interval_s").value.trim()),
     esp_simulation: document.getElementById("esp_simulation").checked,
+    moxa1_host: document.getElementById("moxa1_host").value.trim(),
+    moxa1_port: Number(document.getElementById("moxa1_port").value.trim()),
+    moxa1_simulation: document.getElementById("moxa1_simulation").checked,
+    moxa2_host: document.getElementById("moxa2_host").value.trim(),
+    moxa2_port: Number(document.getElementById("moxa2_port").value.trim()),
+    moxa2_simulation: document.getElementById("moxa2_simulation").checked,
+    moxa_poll_interval_s: Number(document.getElementById("moxa_poll_interval_s").value.trim()),
     vj3350_host: document.getElementById("vj3350_host").value.trim(),
     vj3350_port: Number(document.getElementById("vj3350_port").value.trim()),
-    vj3350_forward_ports: document.getElementById("vj3350_forward_ports").value.trim(),
     vj3350_simulation: document.getElementById("vj3350_simulation").checked,
     vj6530_host: document.getElementById("vj6530_host").value.trim(),
     vj6530_port: Number(document.getElementById("vj6530_port").value.trim()),
-    vj6530_forward_ports: document.getElementById("vj6530_forward_ports").value.trim(),
     vj6530_poll_interval_s: Number(document.getElementById("vj6530_poll_interval_s").value.trim()),
     vj6530_simulation: document.getElementById("vj6530_simulation").checked,
     vj6530_async_enabled: document.getElementById("vj6530_async_enabled").checked,

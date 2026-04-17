@@ -2,6 +2,7 @@ import time
 import threading
 import json
 import os
+import shutil
 import uvicorn
 
 from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
@@ -12,6 +13,8 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.http_client import HttpClient
+from mas004_rpi_databridge.io_master import IoStore
+from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.peers import (
     SenderLane,
     primary_peer_base_url,
@@ -23,7 +26,6 @@ from mas004_rpi_databridge.watchdog import Watchdog
 from mas004_rpi_databridge.webui import build_app
 from mas004_rpi_databridge.ntp_sync import ntp_loop
 from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
-from mas004_rpi_databridge.tcp_forwarder import TcpForwarderManager
 from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
 from mas004_rpi_databridge.vj6530_async_policy import (
     VJ6530_ASYNC_RECONNECT_MIN_S,
@@ -33,6 +35,26 @@ from mas004_rpi_databridge.vj6530_async_policy import (
 from mas004_rpi_databridge.vj6530_async_listener import Vj6530AsyncListener
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
+
+REPO_MASTER_IOS_XLSX = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "master_data",
+    "SAR41-MAS-004_SPS_I-Os.xlsx",
+)
+FALLBACK_REPO_MASTER_IOS_XLSX = os.path.join(
+    "/opt",
+    "MAS-004_RPI-Databridge",
+    "master_data",
+    "SAR41-MAS-004_SPS_I-Os.xlsx",
+)
+
+
+def resolve_repo_master_ios_xlsx() -> str:
+    for candidate in (REPO_MASTER_IOS_XLSX, FALLBACK_REPO_MASTER_IOS_XLSX):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return ""
+
 
 def backoff_s(retry_count: int, base: float, cap: float) -> float:
     n = min(retry_count, 10)
@@ -139,16 +161,6 @@ def router_loop(cfg_path: str):
             time.sleep(1.0)
 
 
-def forwarder_loop(cfg_path: str, fwd_mgr: TcpForwarderManager):
-    while True:
-        try:
-            cfg = Settings.load(cfg_path)
-            fwd_mgr.reconcile(cfg)
-        except Exception as e:
-            print(f"[FWD] reconcile error: {repr(e)}", flush=True)
-        time.sleep(5.0)
-
-
 def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
     while True:
         try:
@@ -157,6 +169,42 @@ def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
         except Exception as e:
             print(f"[ESP-PUSH] reconcile error: {repr(e)}", flush=True)
         time.sleep(5.0)
+
+
+def io_runtime_loop(cfg_path: str):
+    last_import_sig = None
+    while True:
+        cfg = Settings.load(cfg_path)
+        try:
+            db = DB(cfg.db_path)
+            io_store = IoStore(db)
+            repo_master_ios_xlsx = resolve_repo_master_ios_xlsx()
+            if not os.path.exists(cfg.master_ios_xlsx_path) and repo_master_ios_xlsx:
+                os.makedirs(os.path.dirname(cfg.master_ios_xlsx_path), exist_ok=True)
+                shutil.copyfile(repo_master_ios_xlsx, cfg.master_ios_xlsx_path)
+
+            workbook_sig = (
+                cfg.master_ios_xlsx_path,
+                os.path.getmtime(cfg.master_ios_xlsx_path) if os.path.exists(cfg.master_ios_xlsx_path) else 0.0,
+            )
+            if io_store.count_points() == 0 or workbook_sig != last_import_sig:
+                if os.path.exists(cfg.master_ios_xlsx_path):
+                    io_store.import_xlsx(cfg.master_ios_xlsx_path)
+                    last_import_sig = workbook_sig
+
+            IoRuntime(cfg, io_store).refresh()
+        except Exception as e:
+            print(f"[IO] loop error: {repr(e)}", flush=True)
+
+        poll_s = max(
+            0.5,
+            min(
+                float(getattr(cfg, "raspi_io_poll_interval_s", 1.0) or 1.0),
+                float(getattr(cfg, "esp_io_poll_interval_s", 1.0) or 1.0),
+                float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0),
+            ),
+        )
+        time.sleep(poll_s)
 
 
 def vj6530_poll_loop(cfg_path: str):
@@ -242,6 +290,16 @@ def vj6530_async_loop(cfg_path: str):
 def main():
     cfg_path = DEFAULT_CFG_PATH
     cfg = Settings.load(cfg_path)
+    repo_master_ios_xlsx = resolve_repo_master_ios_xlsx()
+    if not os.path.exists(cfg.master_ios_xlsx_path) and repo_master_ios_xlsx:
+        os.makedirs(os.path.dirname(cfg.master_ios_xlsx_path), exist_ok=True)
+        shutil.copyfile(repo_master_ios_xlsx, cfg.master_ios_xlsx_path)
+    try:
+        io_store = IoStore(DB(cfg.db_path))
+        if io_store.count_points() == 0 and os.path.exists(cfg.master_ios_xlsx_path):
+            io_store.import_xlsx(cfg.master_ios_xlsx_path)
+    except Exception as e:
+        print(f"[IO] startup import skipped: {repr(e)}", flush=True)
 
     ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True)
     ntp_t.start()
@@ -251,14 +309,6 @@ def main():
         sender_t.start()
     router_t = threading.Thread(target=router_loop, args=(cfg_path,), daemon=True)
     router_t.start()
-
-    fwd_mgr = TcpForwarderManager(cfg)
-    try:
-        fwd_mgr.start()
-    except Exception as e:
-        print(f"[FWD] manager error: {repr(e)}", flush=True)
-    fwd_t = threading.Thread(target=forwarder_loop, args=(cfg_path, fwd_mgr), daemon=True)
-    fwd_t.start()
 
     push_mgr = EspPushListenerManager(cfg)
     try:
@@ -281,9 +331,10 @@ def main():
         time.sleep(1.0)
     vj6530_poll_t = threading.Thread(target=vj6530_poll_loop, args=(cfg_path,), daemon=True)
     vj6530_poll_t.start()
+    io_t = threading.Thread(target=io_runtime_loop, args=(cfg_path,), daemon=True)
+    io_t.start()
 
     app = build_app(cfg_path)
-    app.state.tcp_forwarder_manager = fwd_mgr
     app.state.esp_push_listener_manager = push_mgr
 
     ssl_kwargs = {}

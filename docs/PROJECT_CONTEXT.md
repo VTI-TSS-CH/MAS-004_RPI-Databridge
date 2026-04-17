@@ -10,7 +10,7 @@
 - Core app package: `mas004_rpi_databridge/`
 - Web/API: `mas004_rpi_databridge/webui.py`
 - Message reliability: `inbox.py`, `outbox.py`, `router.py`, `service.py`, `http_client.py`, `watchdog.py`
-- Background ops: `ntp_sync.py` (periodic time sync), `tcp_forwarder.py` (eth0->eth1 TCP relay)
+- Background ops: `ntp_sync.py` (periodic time sync), `service.py` background loops for sender lanes, ESP push, VJ6530 async sync and IO runtime refresh
 - Device-state sync:
   - `vj6530_async_listener.py` (primary async status/error ingestion from the 6530)
   - `vj6530_poller.py` (slow fallback sync when the async channel is not healthy)
@@ -20,6 +20,16 @@
   - `logstore.py` mirrors active communication into production-specific TXT logs (`Gesamtanlage`, `ESP`, `TTO`, `Laser`)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - The Databridge now persists the workbook column `KI-Anweisungen:` as `ai_instructions` and derives Oriental motor bindings from it for the new setup UI.
+- Hardware IO integration now uses a second workbook import in `master_data/SAR41-MAS-004_SPS_I-Os.xlsx` and exposes the IO catalog through the protected Machine-Setup I/O page.
+- IO ownership and topology are split as follows:
+  - `Raspberry PLC21` is the central orchestrator for slow supervisory IO
+  - `ESP32-PLC58` stays on the realtime automation network and receives the IO snapshot/control traffic it actually needs
+  - `2x Moxa ioLogik E1211` are handled on the Raspi side as slow field IO nodes
+  - the IO workbook can be re-imported so the project mapping stays aligned with the sheet rather than being hardcoded in only one layer
+- New network split for the merged plant basis:
+  - `eth0 / 192.168.210.20`: Microtom, VJ6530, VJ3350, Abwickler, Aufwickler
+  - `eth1 / 192.168.2.100`: ESP32-PLC58 and the two Moxa E1211 modules
+- The Raspi hardware IO layer remains simulation-first by default until a released Industrial Shields library installation is available on the Raspberry runtime.
 - The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-17:
   - new row `MAP0065`
   - `MAP0056..MAP0064` now carry Microtom `R/W = R` while keeping `ESP32 R/W = W`
@@ -47,9 +57,9 @@
 - New Smart Wickler endpoint settings in the Databridge config:
   - `smart_unwinder_host`, `smart_unwinder_port`, `smart_unwinder_simulation`
   - `smart_rewinder_host`, `smart_rewinder_port`, `smart_rewinder_simulation`
-  - recommended sequential defaults on the eth1 device network:
-    - `Abwickler`: `192.168.2.104:3011`
-    - `Aufwickler`: `192.168.2.105:3012`
+  - recommended sequential defaults on the eth0 machine network:
+    - `Abwickler`: `192.168.210.23:3011`
+    - `Aufwickler`: `192.168.210.24:3012`
 - The Videojet logo is now packaged with the installed Raspi build and has a repo-path fallback so `/ui/assets/videojet-logo.jpg` survives a normal service reinstall.
 - Routing detail for `MA*` parameters:
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
@@ -101,10 +111,14 @@
   - `GET /api/production/logfiles/list`
   - `GET /api/production/logfiles/download`
   - `POST /api/production/logfiles/ack`
-- TCP relay endpoints on Raspi eth0:
-  - main relay ports follow the configured device ports: `vj6530_port`, `vj3350_port`, `esp_port`
-  - optional extra per-device ports from Settings UI (`*_forward_ports`)
-  - current TEST setup uses `esp_port = 3010`
+- Direct device endpoints:
+  - `ESP32-PLC58`: `192.168.2.101:3010`
+  - `Moxa #1`: `192.168.2.102:502`
+  - `Moxa #2`: `192.168.2.103:502`
+  - `VJ3350`: `192.168.210.21:20000`
+  - `VJ6530`: `192.168.210.22:3002`
+  - `Abwickler`: `192.168.210.23:3011`
+  - `Aufwickler`: `192.168.210.24:3012`
 
 ## Deployment Topology
 - TEST Raspberry:
@@ -129,9 +143,13 @@
   - `peer_base_url = http://192.168.210.10:81`
   - `peer_base_url_secondary = https://192.168.5.2:9090`
   - `peer_watchdog_host = 192.168.210.10`
-  - `esp_host = 192.168.2.101`, `esp_port = 3007`, `esp_simulation = true`
-  - `vj3350_host = 192.168.2.102`, `vj3350_port = 3008`, `vj3350_simulation = true`
-  - `vj6530_host = 192.168.2.103`, `vj6530_port = 3009`, `vj6530_simulation = true`
+  - `esp_host = 192.168.2.101`, `esp_port = 3010`, `esp_simulation = true`
+  - `vj3350_host = 192.168.210.21`, `vj3350_port = 20000`, `vj3350_simulation = true`
+  - `vj6530_host = 192.168.210.22`, `vj6530_port = 3002`, `vj6530_simulation = true`
+  - `smart_unwinder_host = 192.168.210.23`, `smart_unwinder_port = 3011`, `smart_unwinder_simulation = true`
+  - `smart_rewinder_host = 192.168.210.24`, `smart_rewinder_port = 3012`, `smart_rewinder_simulation = true`
+  - `moxa1_host = 192.168.2.102`, `moxa1_port = 502`, `moxa1_simulation = true`
+  - `moxa2_host = 192.168.2.103`, `moxa2_port = 502`, `moxa2_simulation = true`
 - Current SSH access notes for LIVE:
   - fallback password: `raspberry`
   - preferred private key on this laptop: `C:/Users/Egli_Erwin/.ssh/mas004_rpi210_ed25519`
@@ -154,6 +172,7 @@
 - Config: `/etc/mas004_rpi_databridge/config.json`
 - DB: `/var/lib/mas004_rpi_databridge/databridge.db`
 - Persisted master workbook on Raspi: `/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx`
+- Persisted IO workbook on Raspi: `/var/lib/mas004_rpi_databridge/master/SAR41-MAS-004_SPS_I-Os.xlsx`
 
 ## Systemd Service
 - `mas004-rpi-databridge.service`

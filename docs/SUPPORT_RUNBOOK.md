@@ -27,6 +27,10 @@
 - Refresh runtime parameters from a new workbook:
   - upload through `/api/params/import` with the current master `.xlsx`
   - expected side effect: SQLite metadata and `master_params_xlsx_path` are updated from the same workbook payload
+- Refresh hardware IO mappings from the IO workbook:
+  - import through the protected Machine-Setup I/O page or the IO import endpoint
+  - source workbook: `master_data/SAR41-MAS-004_SPS_I-Os.xlsx`
+  - expected side effect: the IO catalog, point states and workbook-backed labels are updated from the same payload
 
 ## 3. Pi Commands
 - TEST update:
@@ -55,9 +59,11 @@
   - password: `VideojetMAS004!`
 - Scope:
   - `/ui/machine-setup/motors`
+  - `/ui/machine-setup/io`
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
   - `/api/motors/*`
+  - `/api/io/*`
   - `/api/winders/*`
 - Legacy `/ui/motors` and `/ui/winders/*` URLs are only compatibility redirects into the protected section.
 
@@ -87,6 +93,7 @@
 
 ## 5. Verification Checklist
 - UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/machine-setup`, `/ui/settings`
+- UI reachable for hardware IO operations: `/ui/machine-setup/io`
 - Smart Wickler proxy UIs reachable when needed:
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
@@ -121,10 +128,17 @@
   - if all 9 motors are currently simulated, the page should settle on a stable loaded status and pause background refresh instead of alternating with `loading...`
   - while typing into `/ui/machine-setup/motors`, periodic refresh must not overwrite focused or dirty inputs
   - `MOTOR <id> SET ...` / `SAVE` / `MOVE_REL_*` must echo through the ESP endpoint before any TEST deployment is claimed successful
+- For hardware IO / Moxa integration:
+  - `/ui/machine-setup/io` must show the imported IO workbook catalog even if the field hardware is offline
+  - `ESP32-PLC58` stays on the realtime side and should only receive the IO snapshot/control traffic it actually needs
+  - the two `Moxa ioLogik E1211` modules are handled as slow field IO on the Raspi side
+  - Moxa simulation should stay enabled by default on live/test until the networked hardware is intentionally validated
+  - Raspberry hardware IO remains simulation-first until an approved Industrial Shields runtime library installation is available
+  - if the IO workbook changes, re-import it so the page and the backend stay aligned with the sheet
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
-  - expected defaults are `192.168.2.104:3011` and `192.168.2.105:3012`
-  - no TCP forwarding is expected for these two devices
+  - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`
+  - direct eth0 reachability is expected; no TCP forwarding is used anymore
   - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open inside the main Machine-Setup shell and show a stable simulation/offline state instead of failing hard
 - If the Videojet logo disappears from the Raspi UI again, check `/ui/assets/videojet-logo.jpg` first:
   - the asset should now come either from the installed package data or from the repo fallback path on the Raspberry
@@ -144,8 +158,7 @@
 - After a successful 6530 write, verify that related status rows (`TTP00073`, `TTP00076`, `TTS0001`, relevant `TTE*` / `TTW*`) follow immediately without waiting for the next periodic poll cycle.
 - Queue semantics are lossless for non-consecutive state flips; if the printer goes `ONLINE -> OFFLINE -> ONLINE`, all three state changes must appear in order at the peer.
 - NTP configured values visible in `/ui/settings` and service logs contain `[NTP]` entries
-- TCP relay listeners started as configured (service logs contain `[FWD] listen ...` for required ports)
-- After reboot, verify that `[FWD]` listeners appear even if `eth0` carrier comes up late and that `[NTP]` retries continue until sync succeeds
+- After reboot, verify that `[NTP]` retries continue until sync succeeds and that no obsolete `[FWD]` relay logs are emitted anymore
 - Do not expect arbitrary printer-side `TTP` edits from the CLARiTY UI to arrive via async push; ZBC still requires polling/readback for generic `CURRENT_PARAMETERS` deltas
 - If live 6530 status delivery looks lossy, first confirm that `mas004-vj6530-zbc-bridge.service` is not running in parallel on the same Raspberry. The Databridge owns the live `3002` session path; the standalone bridge daemon is for diagnostics and should stay disabled unless deliberately needed.
 - For exclusive printer diagnostics, stop `mas004-rpi-databridge.service` first; the TEST 6530 timed out second parallel control sessions while the live async owner session was already active.

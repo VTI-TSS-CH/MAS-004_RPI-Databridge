@@ -87,6 +87,45 @@ CREATE TABLE IF NOT EXISTS param_device_map (
   FOREIGN KEY(pkey) REFERENCES params(pkey) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_param_device_map_zbc ON param_device_map(zbc_message_id, zbc_command_id);
+
+CREATE TABLE IF NOT EXISTS io_master_meta (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  source_path TEXT NOT NULL,
+  source_filename TEXT NOT NULL,
+  source_sha256 TEXT NOT NULL,
+  imported_ts REAL NOT NULL,
+  file_mtime_ts REAL NOT NULL DEFAULT 0,
+  channel_count INTEGER NOT NULL DEFAULT 0,
+  notes_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS io_points (
+  io_key TEXT PRIMARY KEY,
+  device_code TEXT NOT NULL,
+  device_label TEXT NOT NULL,
+  sheet_name TEXT NOT NULL,
+  zone_label TEXT,
+  pin_label TEXT NOT NULL,
+  io_dir TEXT NOT NULL,
+  channel_no INTEGER,
+  function_text TEXT,
+  is_reserved INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  source_row INTEGER NOT NULL,
+  updated_ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_io_points_device ON io_points(device_code, pin_label);
+CREATE INDEX IF NOT EXISTS idx_io_points_sheet ON io_points(sheet_name, source_row);
+
+CREATE TABLE IF NOT EXISTS io_values (
+  io_key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  quality TEXT NOT NULL DEFAULT 'unknown',
+  source TEXT NOT NULL DEFAULT '',
+  updated_ts REAL NOT NULL,
+  FOREIGN KEY(io_key) REFERENCES io_points(io_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_io_values_quality ON io_values(quality, updated_ts);
 """
 
 _init_lock = threading.Lock()
@@ -155,3 +194,17 @@ def _apply_migrations(conn: sqlite3.Connection):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(param_device_map)").fetchall()}
     if "zbc_mapping" not in cols:
         conn.execute("ALTER TABLE param_device_map ADD COLUMN zbc_mapping TEXT")
+    io_point_cols = {row[1] for row in conn.execute("PRAGMA table_info(io_points)").fetchall()}
+    if io_point_cols and "device_label" not in io_point_cols:
+        conn.execute("ALTER TABLE io_points ADD COLUMN device_label TEXT NOT NULL DEFAULT ''")
+    if io_point_cols and "sheet_name" not in io_point_cols:
+        conn.execute("ALTER TABLE io_points ADD COLUMN sheet_name TEXT NOT NULL DEFAULT ''")
+    if io_point_cols and "zone_label" not in io_point_cols:
+        conn.execute("ALTER TABLE io_points ADD COLUMN zone_label TEXT")
+    if io_point_cols and "channel_no" not in io_point_cols:
+        conn.execute("ALTER TABLE io_points ADD COLUMN channel_no INTEGER")
+    if io_point_cols and "source_row" not in io_point_cols:
+        conn.execute("ALTER TABLE io_points ADD COLUMN source_row INTEGER NOT NULL DEFAULT 0")
+    io_value_cols = {row[1] for row in conn.execute("PRAGMA table_info(io_values)").fetchall()}
+    if io_value_cols and "source" not in io_value_cols:
+        conn.execute("ALTER TABLE io_values ADD COLUMN source TEXT NOT NULL DEFAULT ''")

@@ -9,6 +9,7 @@ class Settings:
     # Storage
     db_path: str = "/var/lib/mas004_rpi_databridge/databridge.db"
     master_params_xlsx_path: str = "/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx"
+    master_ios_xlsx_path: str = "/var/lib/mas004_rpi_databridge/master/SAR41-MAS-004_SPS_I-Os.xlsx"
 
     # Web UI
     webui_host: str = "0.0.0.0"
@@ -52,28 +53,38 @@ class Settings:
     retry_cap_s: float = 60.0
 
     # Device endpoints (optional; editable in UI)
-    # ESP-PLC (HTTP)
-    esp_host: str = ""
-    esp_port: int = 0
+    # ESP-PLC58 on ETH1
+    esp_host: str = "192.168.2.101"
+    esp_port: int = 3010
     esp_simulation: bool = True
     esp_watchdog_host: str = ""
+    esp_io_poll_interval_s: float = 1.0
+    raspi_plc_model: str = "RPIPLC_21"
+    raspi_io_simulation: bool = True
+    raspi_io_poll_interval_s: float = 1.0
 
-    # Printers
-    vj3350_host: str = ""
-    vj3350_port: int = 0
+    # Moxa ioLogik E1211 on ETH1 (Modbus/TCP direct, default port 502)
+    moxa1_host: str = "192.168.2.102"
+    moxa1_port: int = 502
+    moxa1_simulation: bool = True
+    moxa2_host: str = "192.168.2.103"
+    moxa2_port: int = 502
+    moxa2_simulation: bool = True
+    moxa_poll_interval_s: float = 1.0
+
+    # Printers / Wickler on ETH0
+    vj3350_host: str = "192.168.210.21"
+    vj3350_port: int = 20000
     vj3350_simulation: bool = True
-    vj3350_forward_ports: str = ""
-    vj6530_host: str = ""
-    vj6530_port: int = 0
+    vj6530_host: str = "192.168.210.22"
+    vj6530_port: int = 3002
     vj6530_simulation: bool = True
-    vj6530_forward_ports: str = ""
     vj6530_poll_interval_s: float = 15.0
     vj6530_async_enabled: bool = True
-    esp_forward_ports: str = ""
-    smart_unwinder_host: str = "192.168.2.104"
+    smart_unwinder_host: str = "192.168.210.23"
     smart_unwinder_port: int = 3011
     smart_unwinder_simulation: bool = True
-    smart_rewinder_host: str = "192.168.2.105"
+    smart_rewinder_host: str = "192.168.210.24"
     smart_rewinder_port: int = 3012
     smart_rewinder_simulation: bool = True
 

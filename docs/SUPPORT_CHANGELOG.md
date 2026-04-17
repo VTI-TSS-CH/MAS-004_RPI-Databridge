@@ -10,6 +10,20 @@
   - `Machine-Setup`
 - The protected `Machine-Setup` area and its login/session behavior stay unchanged; only the visible button order was adjusted.
 
+## 2026-04-17 (Hardware IO Integration + Network Split Documented)
+- Documented the new hardware IO basis for the merged plant topology:
+  - `ESP32-PLC58`
+  - `Raspberry PLC21`
+  - `2x Moxa ioLogik E1211`
+- Documented the current network split:
+  - `eth0 / 192.168.210.20` for Microtom, VJ6530, VJ3350, Abwickler and Aufwickler
+  - `eth1 / 192.168.2.100` for ESP32-PLC58 and the two Moxa modules
+- Added the dedicated IO workbook import path to the project context:
+  - `master_data/SAR41-MAS-004_SPS_I-Os.xlsx`
+- Recorded the new Machine-Setup I/O page and its workbook-driven IO overview/write access.
+- Recorded that the Raspi hardware IO layer stays simulation-first by default until an approved Industrial Shields library installation is available on the Raspberry runtime.
+- Recorded that the Moxa modules are handled as slow supervisory IO on the Raspi side so the ESP32 remains focused on realtime machine tasks.
+
 ## 2026-04-17 (Machine-Setup Protected Menu)
 - Reworked the top navigation so `Motors` now lives under a dedicated `Machine-Setup` menu entry.
 - Added a dedicated Machine-Setup login flow with cookie-backed session protection for:
