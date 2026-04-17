@@ -1,5 +1,15 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-17 (Top Navigation Order Adjusted)
+- Reordered the main top navigation buttons to:
+  - `Home`
+  - `Parameter`
+  - `Test UI`
+  - `API Docs`
+  - `Settings`
+  - `Machine-Setup`
+- The protected `Machine-Setup` area and its login/session behavior stay unchanged; only the visible button order was adjusted.
+
 ## 2026-04-17 (Machine-Setup Protected Menu)
 - Reworked the top navigation so `Motors` now lives under a dedicated `Machine-Setup` menu entry.
 - Added a dedicated Machine-Setup login flow with cookie-backed session protection for:

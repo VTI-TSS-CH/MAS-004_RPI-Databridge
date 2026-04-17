@@ -508,11 +508,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     def nav_html(active: str) -> str:
         items = [
             ("home", "/", "Home"),
-            ("docs", "/docs", "API Docs"),
             ("params", "/ui/params", "Parameter"),
-            ("machine_setup", "/ui/machine-setup", "Machine-Setup"),
             ("test", "/ui/test", "Test UI"),
+            ("docs", "/docs", "API Docs"),
             ("settings", "/ui/settings", "Settings"),
+            ("machine_setup", "/ui/machine-setup", "Machine-Setup"),
         ]
         links = []
         for key, href, label in items:
