@@ -18,6 +18,13 @@
 - Production batch logging:
   - `production_logs.py` manages start/stop state from `MAS0002`, batch label from `MAS0029` and ready flag `MAS0030`
   - `logstore.py` mirrors active communication into production-specific TXT logs (`Gesamtanlage`, `ESP`, `TTO`, `Laser`)
+- Machine/process runtime foundation:
+  - `machine_runtime.py` owns the Raspi-side machine-state projection, button handling, status-light behavior and label event persistence
+  - `machine_semantics.py` centralizes MAS001/MAS0002 semantics, button masks, lamp colors and `MAS0003` packing
+  - database additions: `machine_state`, `machine_events`, `label_register`, `label_events`
+  - protected process view: `/ui/machine-setup/process`
+  - protected overview API: `/api/machine/overview`
+  - reference doc: `docs/MACHINE_PROCESS_RUNTIME.md`
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - The Databridge now persists the workbook column `KI-Anweisungen:` as `ai_instructions` and derives Oriental motor bindings from it for the new setup UI.
 - Hardware IO integration now uses a second workbook import in `master_data/SAR41-MAS-004_SPS_I-Os.xlsx` and exposes the IO catalog through the protected Machine-Setup I/O page.
@@ -32,7 +39,10 @@
 - The Raspi hardware IO layer remains simulation-first by default until a released Industrial Shields library installation is available on the Raspberry runtime.
 - The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-17:
   - new row `MAP0065`
+  - new row `MAP0066`
   - `MAP0056..MAP0064` now carry Microtom `R/W = R` while keeping `ESP32 R/W = W`
+  - the `KI-Anweisungen:` column is now filled repo-wide with human-readable `KI:` descriptions
+  - reusable sync helper: `scripts/sync_master_workbooks.py`
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
   - `/ui/machine-setup/motors`
@@ -61,6 +71,7 @@
     - `Abwickler`: `192.168.210.23:3011`
     - `Aufwickler`: `192.168.210.24:3012`
 - The Videojet logo is now packaged with the installed Raspi build and has a repo-path fallback so `/ui/assets/videojet-logo.jpg` survives a normal service reinstall.
+- Workbook import routes now fail gracefully with `503` if `python-multipart` is missing, so the web app can still boot and serve the rest of the UI/API in a reduced environment.
 - Routing detail for `MA*` parameters:
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path

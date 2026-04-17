@@ -1,5 +1,30 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-17 (Machine Runtime Foundation + Workbook/KI Sync)
+- Added a first Raspi-side machine runtime foundation:
+  - new modules:
+    - `mas004_rpi_databridge/machine_runtime.py`
+    - `mas004_rpi_databridge/machine_semantics.py`
+  - new persisted runtime tables:
+    - `machine_state`
+    - `machine_events`
+    - `label_register`
+    - `label_events`
+  - new protected process/operator view:
+    - `/ui/machine-setup/process`
+    - `/api/machine/overview`
+- `MAS0002` is now treated as a Microtom command byte instead of being misread as a direct machine state:
+  - command values are translated into the correct target states and transition states on the Raspi side
+- Added `LabelProductionLog` as an extra production logfile stream for completed label results / `MAS0003`.
+- Added reusable workbook sync automation:
+  - `scripts/sync_master_workbooks.py`
+  - syncs the current external parameter workbook into the repo copy
+  - copies the current IO workbook into `master_data/`
+  - inserts `MAP0066`
+  - refreshes the full `KI-Anweisungen:` column with `KI:` texts
+- Hardened the web app for reduced Python environments:
+  - `/api/params/import` and `/api/io/import` now degrade to `503` instead of breaking app startup entirely when `python-multipart` is missing.
+
 ## 2026-04-17 (Top Navigation Order Adjusted)
 - Reordered the main top navigation buttons to:
   - `Home`

@@ -13,7 +13,7 @@ DEFAULT_LOG_DIR = "/var/lib/mas004_rpi_databridge/logs"
 
 # Channels that should ALWAYS exist in the UI dropdown, even if no logs exist yet.
 # "all" is a virtual channel (aggregates all channels).
-DEFAULT_LOG_CHANNELS = ["all", "raspi", "esp-plc", "moxa1", "moxa2", "raspi-io", "vj3350", "vj6530"]
+DEFAULT_LOG_CHANNELS = ["all", "raspi", "machine", "esp-plc", "moxa1", "moxa2", "raspi-io", "vj3350", "vj6530"]
 
 DAILY_GROUP_ALL = "all"
 DAILY_GROUP_ESP = "esp"

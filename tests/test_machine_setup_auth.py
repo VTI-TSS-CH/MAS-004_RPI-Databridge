@@ -80,6 +80,11 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertIn("Hardware I/O", io_page.text)
         self.assertIn(">I/O<", io_page.text)
 
+        process_page = client.get("/ui/machine-setup/process")
+        self.assertEqual(200, process_page.status_code)
+        self.assertIn("Machine Process", process_page.text)
+        self.assertIn(">Process<", process_page.text)
+
         api = client.get("/api/motors/overview")
         self.assertEqual(200, api.status_code)
         payload = api.json()
@@ -89,6 +94,10 @@ class MachineSetupAuthTests(unittest.TestCase):
         io_api = client.get("/api/io/overview")
         self.assertEqual(200, io_api.status_code)
         self.assertIn("points", io_api.json())
+
+        process_api = client.get("/api/machine/overview")
+        self.assertEqual(200, process_api.status_code)
+        self.assertIn("current_state", process_api.json())
 
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)

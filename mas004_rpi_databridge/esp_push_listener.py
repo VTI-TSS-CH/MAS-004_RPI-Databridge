@@ -7,7 +7,9 @@ from typing import Callable
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.device_bridge import DeviceBridge
+from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
+from mas004_rpi_databridge.machine_runtime import MachineRuntime, parse_machine_event_line
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -138,6 +140,14 @@ class EspPushListener:
 
         logs.log("esp-plc", "in", f"esp->raspi: {line}")
         logs.log("raspi", "in", f"esp-plc push: {line}")
+
+        machine_event = parse_machine_event_line(line)
+        if machine_event is not None:
+            runtime = MachineRuntime(self.cfg, db, params, IoStore(db), logs, outbox)
+            result = runtime.handle_event(machine_event)
+            resp = "ACK_EVT" if result.get("ok") else "NAK_EVT"
+            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            return resp
 
         parsed = parse_operation_line(line)
         if not parsed:

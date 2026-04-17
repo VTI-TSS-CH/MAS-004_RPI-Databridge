@@ -27,6 +27,13 @@
 - Refresh runtime parameters from a new workbook:
   - upload through `/api/params/import` with the current master `.xlsx`
   - expected side effect: SQLite metadata and `master_params_xlsx_path` are updated from the same workbook payload
+- Refresh the repository master workbook copies from the current external engineering files:
+  - `python scripts/sync_master_workbooks.py`
+  - expected side effects:
+    - repo copy `master_data/Parameterliste SAR41-MAS-004.xlsx` is refreshed
+    - repo copy `master_data/SAR41-MAS-004_SPS_I-Os.xlsx` is refreshed
+    - `MAP0066` exists
+    - the full `KI-Anweisungen:` column is rewritten with `KI:` texts
 - Refresh hardware IO mappings from the IO workbook:
   - import through the protected Machine-Setup I/O page or the IO import endpoint
   - source workbook: `master_data/SAR41-MAS-004_SPS_I-Os.xlsx`
@@ -59,10 +66,12 @@
   - password: `VideojetMAS004!`
 - Scope:
   - `/ui/machine-setup/motors`
+  - `/ui/machine-setup/process`
   - `/ui/machine-setup/io`
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
   - `/api/motors/*`
+  - `/api/machine/*`
   - `/api/io/*`
   - `/api/winders/*`
 - Legacy `/ui/motors` and `/ui/winders/*` URLs are only compatibility redirects into the protected section.
@@ -93,6 +102,7 @@
 
 ## 5. Verification Checklist
 - UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/machine-setup`, `/ui/settings`
+- Process UI reachable: `/ui/machine-setup/process`
 - UI reachable for hardware IO operations: `/ui/machine-setup/io`
 - Smart Wickler proxy UIs reachable when needed:
   - `/ui/machine-setup/winders/unwinder`
@@ -118,6 +128,11 @@
   - `CMD_START` -> `AIR` online in about `46 ms`
   - `CMD_STOP` -> `AIR` offline in about `6 ms`
   - `CMD_SHUTDOWN` / `CMD_STARTUP` have no dedicated async state tag on TEST, so `6 <-> 0` confirmation must come from fresh summary state
+- New ESP/Raspi machine-event contract for later realtime label logic:
+  - ESP may actively push condensed events as `EVT <json>` over the existing push socket
+  - currently supported Raspi event types:
+    - `machine_state`
+    - `label_complete`
 - Expect the async owner session to stay up via keepalive; if live 6530 writes suddenly hang or drift back to `NAK_DeviceComm`, verify the owner session did not die and that no second daemon/client has taken over `3002`.
 - If a live `TTS0001` write returns `NAK_DeviceComm`, verify whether the owner-session request really used the widened per-request response timeout; the listener itself still keeps a short unsolicited receive timeout for AIR handling.
 - For the new Oriental motor setup page:

@@ -15,6 +15,7 @@ from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.http_client import HttpClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
+from mas004_rpi_databridge.machine_runtime import MachineRuntime
 from mas004_rpi_databridge.peers import (
     SenderLane,
     primary_peer_base_url,
@@ -207,6 +208,22 @@ def io_runtime_loop(cfg_path: str):
         time.sleep(poll_s)
 
 
+def machine_runtime_loop(cfg_path: str):
+    while True:
+        cfg = Settings.load(cfg_path)
+        try:
+            db = DB(cfg.db_path)
+            params = ParamStore(db)
+            logs = LogStore(db)
+            outbox = Outbox(db)
+            io_store = IoStore(db)
+            runtime = MachineRuntime(cfg, db, params, io_store, logs, outbox)
+            runtime.refresh()
+        except Exception as e:
+            print(f"[MACHINE] loop error: {repr(e)}", flush=True)
+        time.sleep(0.5)
+
+
 def vj6530_poll_loop(cfg_path: str):
     cached_client = None
     cached_sig = None
@@ -333,6 +350,8 @@ def main():
     vj6530_poll_t.start()
     io_t = threading.Thread(target=io_runtime_loop, args=(cfg_path,), daemon=True)
     io_t.start()
+    machine_t = threading.Thread(target=machine_runtime_loop, args=(cfg_path,), daemon=True)
+    machine_t.start()
 
     app = build_app(cfg_path)
     app.state.esp_push_listener_manager = push_mgr

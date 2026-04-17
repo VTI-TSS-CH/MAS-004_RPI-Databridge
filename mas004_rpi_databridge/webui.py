@@ -18,6 +18,13 @@ import tempfile
 import time
 import uuid
 
+try:
+    import multipart  # type: ignore  # noqa: F401
+
+    MULTIPART_AVAILABLE = True
+except Exception:
+    MULTIPART_AVAILABLE = False
+
 from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
 from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.outbox import Outbox
@@ -28,6 +35,7 @@ from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
+from mas004_rpi_databridge.machine_runtime import MachineRuntime
 from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
@@ -559,6 +567,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     def machine_setup_nav_html(active: str) -> str:
         items = [
+            ("process", "/ui/machine-setup/process", "Process"),
             ("io", "/ui/machine-setup/io", "I/O"),
             ("motors", "/ui/machine-setup/motors", "Motors"),
             ("unwinder", "/ui/machine-setup/winders/unwinder", "Abwickler"),
@@ -860,6 +869,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         payload["device_catalog"] = catalog
         payload["master_workbook"] = get_io_workbook_info()
         return payload
+
+    def get_machine_overview() -> dict[str, Any]:
+        cfg2 = Settings.load(cfg_path)
+        runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
+        return runtime.snapshot()
 
     @app.get("/ui", response_class=HTMLResponse)
     def ui():
@@ -1281,33 +1295,43 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     # =========================
     # ===== PARAMS API ========
     # =========================
-    @app.post("/api/params/import")
-    async def params_import(file: UploadFile = File(...), x_token: Optional[str] = Header(default=None)):
-        cfg2 = Settings.load(cfg_path)
-        require_token(x_token, cfg2)
+    if MULTIPART_AVAILABLE:
 
-        suffix = os.path.splitext(file.filename or "")[1].lower()
-        if suffix not in (".xlsx",):
-            raise HTTPException(status_code=400, detail="Bitte eine .xlsx Datei hochladen")
+        @app.post("/api/params/import")
+        async def params_import(file: UploadFile = File(...), x_token: Optional[str] = Header(default=None)):
+            cfg2 = Settings.load(cfg_path)
+            require_token(x_token, cfg2)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp_path = tmp.name
-            content = await file.read()
-            tmp.write(content)
+            suffix = os.path.splitext(file.filename or "")[1].lower()
+            if suffix not in (".xlsx",):
+                raise HTTPException(status_code=400, detail="Bitte eine .xlsx Datei hochladen")
 
-        try:
-            res = params.import_xlsx(tmp_path)
-            if res.get("ok"):
-                master_path = cfg2.master_params_xlsx_path
-                os.makedirs(os.path.dirname(master_path), exist_ok=True)
-                shutil.copyfile(tmp_path, master_path)
-                res["master_workbook"] = get_master_workbook_info()
-            return res
-        finally:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                tmp_path = tmp.name
+                content = await file.read()
+                tmp.write(content)
+
             try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+                res = params.import_xlsx(tmp_path)
+                if res.get("ok"):
+                    master_path = cfg2.master_params_xlsx_path
+                    os.makedirs(os.path.dirname(master_path), exist_ok=True)
+                    shutil.copyfile(tmp_path, master_path)
+                    res["master_workbook"] = get_master_workbook_info()
+                return res
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    else:
+
+        @app.post("/api/params/import")
+        def params_import_unavailable(x_token: Optional[str] = Header(default=None)):
+            cfg2 = Settings.load(cfg_path)
+            require_token(x_token, cfg2)
+            raise HTTPException(status_code=503, detail="Workbook-Upload nicht verfuegbar (python-multipart fehlt)")
 
     @app.get("/api/params/master/info")
     def params_master_info(x_token: Optional[str] = Header(default=None)):
@@ -1349,36 +1373,46 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     # =========================
     # ===== IO API ============
     # =========================
-    @app.post("/api/io/import")
-    async def io_import(
-        request: Request,
-        file: UploadFile = File(...),
-    ):
-        cfg2 = Settings.load(cfg_path)
-        require_machine_setup_session(request, cfg2)
+    if MULTIPART_AVAILABLE:
 
-        suffix = os.path.splitext(file.filename or "")[1].lower()
-        if suffix not in (".xlsx",):
-            raise HTTPException(status_code=400, detail="Bitte eine .xlsx Datei hochladen")
+        @app.post("/api/io/import")
+        async def io_import(
+            request: Request,
+            file: UploadFile = File(...),
+        ):
+            cfg2 = Settings.load(cfg_path)
+            require_machine_setup_session(request, cfg2)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp_path = tmp.name
-            content = await file.read()
-            tmp.write(content)
+            suffix = os.path.splitext(file.filename or "")[1].lower()
+            if suffix not in (".xlsx",):
+                raise HTTPException(status_code=400, detail="Bitte eine .xlsx Datei hochladen")
 
-        try:
-            res = io_store.import_xlsx(tmp_path)
-            if res.get("ok"):
-                master_path = cfg2.master_ios_xlsx_path
-                os.makedirs(os.path.dirname(master_path), exist_ok=True)
-                shutil.copyfile(tmp_path, master_path)
-                res["master_workbook"] = get_io_workbook_info()
-            return res
-        finally:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                tmp_path = tmp.name
+                content = await file.read()
+                tmp.write(content)
+
             try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+                res = io_store.import_xlsx(tmp_path)
+                if res.get("ok"):
+                    master_path = cfg2.master_ios_xlsx_path
+                    os.makedirs(os.path.dirname(master_path), exist_ok=True)
+                    shutil.copyfile(tmp_path, master_path)
+                    res["master_workbook"] = get_io_workbook_info()
+                return res
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    else:
+
+        @app.post("/api/io/import")
+        def io_import_unavailable(request: Request):
+            cfg2 = Settings.load(cfg_path)
+            require_machine_setup_session(request, cfg2)
+            raise HTTPException(status_code=503, detail="Workbook-Upload nicht verfuegbar (python-multipart fehlt)")
 
     @app.get("/api/io/master/info")
     def io_master_info(request: Request):
@@ -1740,6 +1774,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    @app.get("/api/machine/overview")
+    def api_machine_overview(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_machine_overview()
+
     # =========================
     # ===== SIMPLE UI =========
     # =========================
@@ -1777,6 +1817,119 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         response = RedirectResponse(url="/ui/machine-setup/login", status_code=303)
         response.delete_cookie(MACHINE_SETUP_COOKIE, path="/")
         return response
+
+    @app.get("/ui/process", include_in_schema=False)
+    def ui_process_redirect():
+        return RedirectResponse(url="/ui/machine-setup/process", status_code=303)
+
+    @app.get("/ui/machine-setup/process", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_process(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/process"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("process")
+        return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Machine Process</title>
+  <style>
+    :root{--bg:#f4f6f9;--card:#fff;--text:#1f2933;--muted:#5f6b7a;--border:#d6dde7;--blue:#005eb8}
+    *{box-sizing:border-box} body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1500px;margin:0 auto;padding:16px}
+    .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+    .card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:14px}
+    .btn{min-height:38px;padding:8px 12px;border:1px solid #aec4db;border-radius:10px;background:#e8f0f8;color:#17324b;font-weight:600;cursor:pointer}
+    .muted{color:var(--muted)} .kv{display:grid;grid-template-columns:170px 1fr;gap:6px 10px}
+    .box{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid var(--border);background:#eef3f8;font-size:12px}
+    table{width:100%;border-collapse:collapse} th,td{padding:8px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;font-size:13px}
+    code{white-space:pre-wrap;word-break:break-word}
+  </style>
+</head>
+<body>
+<div class="wrap">
+__NAV__
+  <div class="toolbar">
+    <button class="btn" onclick="loadAll()">Reload</button>
+    <span id="status" class="muted">loading...</span>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>Maschinenzustand</h3><div class="kv" id="state_kv"></div></div>
+    <div class="card"><h3>Sicherheit / Bedienung</h3><div class="kv" id="flags_kv"></div></div>
+    <div class="card"><h3>Statusleuchte / Buttons</h3><div class="kv" id="io_kv"></div></div>
+  </div>
+  <div class="grid" style="margin-top:12px">
+    <div class="card">
+      <h3>Letzte Ereignisse</h3>
+      <table><thead><tr><th>Zeit</th><th>Typ</th><th>Meldung</th></tr></thead><tbody id="events"></tbody></table>
+    </div>
+    <div class="card">
+      <h3>Letzte Labels</h3>
+      <table><thead><tr><th>Label</th><th>Status</th><th>Payload</th></tr></thead><tbody id="labels"></tbody></table>
+    </div>
+  </div>
+</div>
+<script>
+const TOKEN_KEY="mas004_ui_token";
+function token(){ try{return localStorage.getItem(TOKEN_KEY)||"";}catch(e){return"";} }
+function esc(v){ return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
+async function api(path,opt={}){
+  opt.headers=opt.headers||{};
+  const t=token(); if(t) opt.headers["X-Token"]=t;
+  const r=await fetch(path,opt); const txt=await r.text();
+  let j=null; try{j=JSON.parse(txt);}catch(e){}
+  if(!r.ok){ throw new Error((j&&j.detail)?j.detail:(`HTTP ${r.status} ${txt}`)); }
+  return j;
+}
+function kv(rootId, pairs){
+  const root=document.getElementById(rootId);
+  root.innerHTML = pairs.map(([k,v])=>`<div class="muted">${esc(k)}</div><div>${v}</div>`).join("");
+}
+async function loadAll(){
+  document.getElementById("status").textContent="loading...";
+  try{
+    const j=await api("/api/machine/overview");
+    const info=j.info || {};
+    kv("state_kv", [
+      ["Current", `<span class="box">${esc(j.current_state)} - ${esc(j.current_state_label)}</span>`],
+      ["Requested", `<span class="box">${esc(j.requested_state)} - ${esc(j.requested_state_label)}</span>`],
+      ["Production label", esc(j.production_label || "-")],
+      ["Last label no", esc(j.last_label_no ?? "-")]
+    ]);
+    kv("flags_kv", [
+      ["Warning active", esc(!!j.warning_active)],
+      ["Purge active", esc(!!j.purge_active)],
+      ["Allowed actions", `<code>${esc(JSON.stringify(info.allowed_actions || {}, null, 2))}</code>`],
+      ["Button mask", `<code>${esc(JSON.stringify(info.button_mask || {}, null, 2))}</code>`],
+      ["Critical reasons", `<code>${esc(JSON.stringify(info.critical_reasons || [], null, 2))}</code>`]
+    ]);
+    kv("io_kv", [
+      ["Status lamp", `<code>${esc(JSON.stringify(info.status_lamp || {}, null, 2))}</code>`],
+      ["Button inputs", `<code>${esc(JSON.stringify(info.button_inputs || {}, null, 2))}</code>`],
+      ["Button LEDs", `<code>${esc(JSON.stringify(info.button_leds || {}, null, 2))}</code>`],
+      ["Warnings", `<code>${esc(JSON.stringify(info.warning_keys || [], null, 2))}</code>`],
+      ["Errors", `<code>${esc(JSON.stringify(info.error_keys || [], null, 2))}</code>`]
+    ]);
+    document.getElementById("events").innerHTML = (j.events || []).map(it =>
+      `<tr><td>${esc(new Date((it.ts||0)*1000).toLocaleString())}</td><td>${esc(it.event_type || "")}</td><td>${esc(it.message || "")}</td></tr>`
+    ).join("");
+    document.getElementById("labels").innerHTML = (j.labels || []).map(it =>
+      `<tr><td>${esc(it.label_no || "")}</td><td>${esc(`M=${it.material_ok?1:0} P=${it.print_ok?1:0} V=${it.verify_ok?1:0} R=${it.removed?1:0} OK=${it.production_ok?1:0}`)}</td><td><code>${esc(JSON.stringify(it.payload || {}, null, 2))}</code></td></tr>`
+    ).join("");
+    document.getElementById("status").textContent="ok";
+  }catch(err){
+    document.getElementById("status").textContent=err.message;
+  }
+}
+loadAll();
+setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
+</script>
+</body>
+</html>
+        """.replace("__NAV__", nav)
 
     @app.get("/ui/winders/{role}", include_in_schema=False)
     def ui_winder_redirect(role: str):

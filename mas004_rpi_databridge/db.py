@@ -126,6 +126,60 @@ CREATE TABLE IF NOT EXISTS io_values (
   FOREIGN KEY(io_key) REFERENCES io_points(io_key) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_io_values_quality ON io_values(quality, updated_ts);
+
+CREATE TABLE IF NOT EXISTS machine_state (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  current_state INTEGER NOT NULL DEFAULT 1,
+  requested_state INTEGER NOT NULL DEFAULT 1,
+  state_source TEXT NOT NULL DEFAULT 'runtime',
+  warning_active INTEGER NOT NULL DEFAULT 0,
+  purge_active INTEGER NOT NULL DEFAULT 0,
+  production_label TEXT NOT NULL DEFAULT '',
+  last_label_no INTEGER NOT NULL DEFAULT 0,
+  info_json TEXT NOT NULL DEFAULT '{}',
+  updated_ts REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS machine_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL NOT NULL,
+  event_type TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'info',
+  message TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_machine_events_ts ON machine_events(ts);
+CREATE INDEX IF NOT EXISTS idx_machine_events_type_ts ON machine_events(event_type, ts);
+
+CREATE TABLE IF NOT EXISTS label_register (
+  production_label TEXT NOT NULL,
+  label_no INTEGER NOT NULL,
+  created_ts REAL NOT NULL,
+  completed_ts REAL,
+  zero_mm REAL,
+  exit_mm REAL,
+  material_ok INTEGER NOT NULL DEFAULT 1,
+  print_ok INTEGER NOT NULL DEFAULT 1,
+  verify_ok INTEGER NOT NULL DEFAULT 1,
+  removed INTEGER NOT NULL DEFAULT 0,
+  production_ok INTEGER NOT NULL DEFAULT 1,
+  emitted_to_microtom INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (production_label, label_no)
+);
+CREATE INDEX IF NOT EXISTS idx_label_register_created ON label_register(created_ts);
+CREATE INDEX IF NOT EXISTS idx_label_register_emit ON label_register(emitted_to_microtom, completed_ts);
+
+CREATE TABLE IF NOT EXISTS label_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts REAL NOT NULL,
+  production_label TEXT NOT NULL DEFAULT '',
+  label_no INTEGER NOT NULL DEFAULT 0,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_label_events_ts ON label_events(ts);
+CREATE INDEX IF NOT EXISTS idx_label_events_label ON label_events(production_label, label_no, ts);
 """
 
 _init_lock = threading.Lock()
@@ -208,3 +262,8 @@ def _apply_migrations(conn: sqlite3.Connection):
     io_value_cols = {row[1] for row in conn.execute("PRAGMA table_info(io_values)").fetchall()}
     if io_value_cols and "source" not in io_value_cols:
         conn.execute("ALTER TABLE io_values ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+    machine_state_cols = {row[1] for row in conn.execute("PRAGMA table_info(machine_state)").fetchall()}
+    if machine_state_cols and "production_label" not in machine_state_cols:
+        conn.execute("ALTER TABLE machine_state ADD COLUMN production_label TEXT NOT NULL DEFAULT ''")
+    if machine_state_cols and "last_label_no" not in machine_state_cols:
+        conn.execute("ALTER TABLE machine_state ADD COLUMN last_label_no INTEGER NOT NULL DEFAULT 0")

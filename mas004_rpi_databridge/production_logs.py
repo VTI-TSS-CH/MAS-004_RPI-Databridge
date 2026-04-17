@@ -19,6 +19,7 @@ PRODUCTION_GROUP_LABELS = {
     "esp": "ESP32-PLC",
     "tto": "TTO 6530",
     "laser": "Laser 3350",
+    "labels": "LabelProductionLog",
 }
 
 PRODUCTION_GROUP_PREFIX = {
@@ -26,6 +27,7 @@ PRODUCTION_GROUP_PREFIX = {
     "esp": "esp32_plc",
     "tto": "tto_6530",
     "laser": "laser_3350",
+    "labels": "label_production",
 }
 
 
@@ -118,6 +120,19 @@ class ProductionLogManager:
 
     def path_for_group(self, group: str, label: str) -> str:
         return os.path.join(self.log_dir, production_file_name(group, label))
+
+    def append_line(self, group: str, label: str, line: str):
+        group_key = str(group or "").strip()
+        prod_label = str(label or "").strip()
+        if not group_key or not prod_label or group_key not in PRODUCTION_GROUP_LABELS:
+            return
+        os.makedirs(self.log_dir, exist_ok=True)
+        path = self.path_for_group(group_key, prod_label)
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(str(line))
+        except Exception:
+            pass
 
     def ready_manifest(self) -> Dict[str, Any]:
         state = self._read_state()
