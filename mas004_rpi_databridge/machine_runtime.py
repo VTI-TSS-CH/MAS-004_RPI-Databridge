@@ -523,7 +523,10 @@ class MachineRuntime:
                 point = self.io_store.get_point(f"{device_code}__{pin.replace('.', '_')}")
                 if not point:
                     continue
-                io_runtime.write_output(point["io_key"], bool(led_plan.get(pin, False)))
+                try:
+                    io_runtime.write_output(point["io_key"], bool(led_plan.get(pin, False)))
+                except RuntimeError as exc:
+                    self.logs.log("machine", "info", f"button-led write skipped for {point['io_key']}: {exc}")
 
     def _apply_status_lamp(self, state: int, *, warning_active: bool, ts: float):
         io_runtime = IoRuntime(self.cfg, self.io_store)
@@ -533,7 +536,10 @@ class MachineRuntime:
             point = self.io_store.get_point(f"{device_code}__{pin.replace('.', '_')}")
             if not point:
                 continue
-            io_runtime.write_output(point["io_key"], bool(enabled))
+            try:
+                io_runtime.write_output(point["io_key"], bool(enabled))
+            except RuntimeError as exc:
+                self.logs.log("machine", "info", f"status-lamp write skipped for {point['io_key']}: {exc}")
 
     def _current_production_label(self) -> str:
         active = self.production_logs.active_state()
