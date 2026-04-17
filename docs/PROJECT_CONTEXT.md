@@ -20,6 +20,9 @@
   - `logstore.py` mirrors active communication into production-specific TXT logs (`Gesamtanlage`, `ESP`, `TTO`, `Laser`)
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - The Databridge now persists the workbook column `KI-Anweisungen:` as `ai_instructions` and derives Oriental motor bindings from it for the new setup UI.
+- The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-17:
+  - new row `MAP0065`
+  - `MAP0056..MAP0064` now carry Microtom `R/W = R` while keeping `ESP32 R/W = W`
 - New motor operator surface:
   - `/ui/motors` on the Raspi web UI
   - live status/config view for all 9 Oriental drives behind the ESP32-PLC

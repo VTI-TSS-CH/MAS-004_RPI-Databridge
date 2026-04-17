@@ -24,6 +24,9 @@
   - `python -m pip install -e .`
 - Run app:
   - `mas004-databridge`
+- Refresh runtime parameters from a new workbook:
+  - upload through `/api/params/import` with the current master `.xlsx`
+  - expected side effect: SQLite metadata and `master_params_xlsx_path` are updated from the same workbook payload
 
 ## 3. Pi Commands
 - TEST update:

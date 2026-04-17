@@ -1,5 +1,13 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-17 (Master Workbook Reimport Sync)
+- Refreshed the repository copy `master_data/Parameterliste SAR41-MAS-004.xlsx` from the current external master workbook.
+- Workbook delta in this sync:
+  - added `MAP0065`
+  - updated Microtom `R/W:` for `MAP0056..MAP0064` from `W` to `R`
+  - corrected several `MAP0059..MAP0064` display names to use the `MAP` prefix consistently
+- LIVE workbook import path is now expected to refresh both the SQLite parameter metadata and `/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx` from the same uploaded workbook.
+
 ## 2026-04-16 (Per-Motor Simulation on Motors UI)
 - Added per-motor simulation toggles directly on `/ui/motors`.
 - Simulated motors are no longer queried through the ESP endpoint during the periodic UI refresh.
