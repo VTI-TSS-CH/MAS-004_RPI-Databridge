@@ -85,6 +85,15 @@
     - `Aufwickler`: `192.168.210.24:3012`
 - The Videojet logo is now packaged with the installed Raspi build and has a repo-path fallback so `/ui/assets/videojet-logo.jpg` survives a normal service reinstall.
 - Workbook import routes now fail gracefully with `503` if `python-multipart` is missing, so the web app can still boot and serve the rest of the UI/API in a reduced environment.
+- The commissioning assistant is now MAS-004-component-specific instead of using only coarse buckets:
+  - explicit primary/secondary peer checks
+  - explicit ESP realtime IO/process-image step
+  - explicit Moxa field-IO step
+  - dedicated printer handshake steps
+  - dedicated winder stop-IO step
+  - dedicated axis groups for X/Z, label drive, sensors, camera, guard and guides
+  - dedicated encoder/sensor/camera validation stages
+  - dedicated MAS001/MAS0002 state-flow and `MAS0030` logfile validation
 - Routing detail for `MA*` parameters:
   - if `esp_rw = N`, the Databridge treats the parameter as Raspi-local and does not forward Microtom writes to the ESP live path
   - if ESP access is configured (`R`, `W`, `R/W`), `MA*` traffic continues to use the ESP bridge path
@@ -185,6 +194,10 @@
     - `https://127.0.0.1:8080/health` returned `{"ok":true}`
     - `GET /ui/machine-setup/commissioning` redirected to `/ui/machine-setup/login?next=/ui/machine-setup/commissioning`
   - no LIVE website/runtime settings were changed during this rollout
+  - on the same date, the optional VPN secondary peer `https://192.168.5.2:9090` was restarted and re-verified from LIVE:
+    - `/health` reachable from LIVE
+    - `[OUTBOX:aux]` callbacks answered with HTTP 200 in the `37-66 ms` range
+    - the productive primary-peer `404` on `http://192.168.210.10:81/api/inbox` remained unchanged, proving that issue is not caused by the secondary peer being down
 - LIVE callback-delay diagnosis on 2026-04-16:
   - the live config still used `http_timeout_s = 10.0`
   - journal inspection showed repeated `ReadTimeout('timed out')` on `POST http://192.168.210.10:81/api/inbox`

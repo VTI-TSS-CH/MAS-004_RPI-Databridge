@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import socket
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -23,8 +26,29 @@ class CommissioningStepTemplate:
     href: str = ""
 
 
+def _step(
+    step_id: str,
+    section_id: str,
+    title: str,
+    description: str,
+    *,
+    kind: str = "manual",
+    check_key: str = "",
+    href: str = "",
+) -> CommissioningStepTemplate:
+    return CommissioningStepTemplate(
+        step_id=step_id,
+        section_id=section_id,
+        title=title,
+        description=description,
+        kind=kind,
+        check_key=check_key,
+        href=href,
+    )
+
+
 STEP_TEMPLATES: List[CommissioningStepTemplate] = [
-    CommissioningStepTemplate(
+    _step(
         "raspi_identity",
         "bootstrap",
         "Maschinenidentitaet",
@@ -32,7 +56,7 @@ STEP_TEMPLATES: List[CommissioningStepTemplate] = [
         kind="manual",
         href="/ui/machine-setup/backups",
     ),
-    CommissioningStepTemplate(
+    _step(
         "raspi_network",
         "bootstrap",
         "Netzwerkgrundlagen",
@@ -41,7 +65,7 @@ STEP_TEMPLATES: List[CommissioningStepTemplate] = [
         check_key="network",
         href="/ui/settings",
     ),
-    CommissioningStepTemplate(
+    _step(
         "raspi_runtime",
         "bootstrap",
         "Raspi Runtime / Service",
@@ -50,7 +74,7 @@ STEP_TEMPLATES: List[CommissioningStepTemplate] = [
         check_key="runtime",
         href="/ui/settings",
     ),
-    CommissioningStepTemplate(
+    _step(
         "workbooks_loaded",
         "bootstrap",
         "Masterdaten geladen",
@@ -59,94 +83,256 @@ STEP_TEMPLATES: List[CommissioningStepTemplate] = [
         check_key="workbooks",
         href="/ui/params",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "peer_primary_health",
+        "peers",
+        "Microtom Primary Peer",
+        "Health des primaeren Microtom-Peers pruefen. Das ist die produktive Callback-Richtung; /health muss erreichbar sein und der Peer muss spaeter /api/inbox sofort mit 2xx quittieren.",
+        kind="auto",
+        check_key="peer_primary",
+        href="/ui/settings",
+    ),
+    _step(
+        "peer_secondary_health",
+        "peers",
+        "Parallel/VPN Peer",
+        "Optionalen Secondary-Peer fuer Engineering/VPN pruefen. Wenn aktiviert, muss /health erreichbar sein; wenn nicht genutzt, darf er bewusst leer bleiben.",
+        kind="auto",
+        check_key="peer_secondary",
+        href="/ui/settings",
+    ),
+    _step(
         "esp_endpoint",
-        "devices",
+        "esp",
         "ESP32-PLC58",
         "Erreichbarkeit bzw. Simulationszustand des ESP32 pruefen.",
         kind="auto",
         check_key="esp",
         href="/ui/machine-setup/io",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "esp_io_image",
+        "esp",
+        "ESP Echtzeit-IO-Bild",
+        "Zeitkritische Maschinenlogik auf dem ESP pruefen: Transport-/Labelpfad, Interrupt-Eingaenge, Schieberegister, Trigger und Rueckmeldungen muessen dort sauber gespiegelt werden.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "moxa1_endpoint",
-        "devices",
+        "moxa",
         "Moxa Modul 1",
         "Direkte Modbus/TCP-Erreichbarkeit bzw. Simulationszustand des ersten Moxa pruefen.",
         kind="auto",
         check_key="moxa1",
         href="/ui/machine-setup/io",
     ),
-    CommissioningStepTemplate(
+    _step(
         "moxa2_endpoint",
-        "devices",
+        "moxa",
         "Moxa Modul 2",
         "Direkte Modbus/TCP-Erreichbarkeit bzw. Simulationszustand des zweiten Moxa pruefen.",
         kind="auto",
         check_key="moxa2",
         href="/ui/machine-setup/io",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "moxa_field_io",
+        "moxa",
+        "Moxa Feld-IOs",
+        "Langsame Feld-IOs der beiden E1211 pruefen: Statusleuchte, Teach-Signale, Motor-DOs und bekannte Maschinenhilfssignale muessen im IO-Bild korrekt erscheinen.",
+        kind="manual",
+        href="/ui/machine-setup/io",
+    ),
+    _step(
         "vj6530_endpoint",
-        "devices",
+        "printers",
         "TTO Videojet 6530",
         "Erreichbarkeit bzw. Simulationszustand des TTO pruefen.",
         kind="auto",
         check_key="vj6530",
         href="/ui/settings",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "tto_io_handshake",
+        "printers",
+        "TTO IO-Handshake",
+        "Q0.0 Drucktrigger, I0.0 Ready und I0.1 Im-Druck pruefen. Der Drucker muss im Setup definierbar bereit/nicht bereit melden und ein Trigger muss im Prozess sauber nachvollziehbar sein.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "vj3350_endpoint",
-        "devices",
+        "printers",
         "Laser Videojet 3350",
         "Erreichbarkeit bzw. Simulationszustand des Lasers pruefen.",
         kind="auto",
         check_key="vj3350",
         href="/ui/settings",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "laser_io_handshake",
+        "printers",
+        "Laser IO-Handshake",
+        "Laser-Trigger und Grundsignale pruefen: Q0.1, I0.2, I0.3 und Q0.3 muessen in der IO-Ansicht und im Prozessbild logisch zusammenpassen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "unwinder_endpoint",
-        "devices",
+        "winders",
         "Abwickler",
         "Smart-Wickler Abwickler pruefen oder bewusst simuliert belassen.",
         kind="auto",
         check_key="unwinder",
         href="/ui/machine-setup/winders/unwinder",
     ),
-    CommissioningStepTemplate(
+    _step(
         "rewinder_endpoint",
-        "devices",
+        "winders",
         "Aufwickler",
         "Smart-Wickler Aufwickler pruefen oder bewusst simuliert belassen.",
         kind="auto",
         check_key="rewinder",
         href="/ui/machine-setup/winders/rewinder",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "winders_stop_io",
+        "winders",
+        "Wickler Stop-IOs",
+        "Stop-IOs der Wickler pruefen: Q1.4 fuer den rechten/Abwickler und Q1.3 fuer den linken/Aufwickler muessen zeitnah den jeweiligen Smart-Wicklerpfad stoppen koennen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "motor_setup",
-        "motion",
+        "motors",
         "Motorparameter",
         "Oriental-Motoren pruefen, Kalibrierwerte uebernehmen und Soll-/Grenzwerte validieren.",
         kind="manual",
         href="/ui/machine-setup/motors",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "motor_axes_xz",
+        "motors",
+        "Motoren Tisch X/Z",
+        "ID1 und ID2 mit Schritt, Richtung, Nullpunkt, Grenzen und Positioniergenauigkeit pruefen. Die Einricht-/Service-Stellung des Tisches muss reproduzierbar angefahren werden.",
+        kind="manual",
+        href="/ui/machine-setup/motors",
+    ),
+    _step(
+        "motor_label_drive",
+        "motors",
+        "Motor Etikettenantrieb",
+        "ID3 als Geschwindigkeitsachse pruefen: Vor/Ruecklauf, Beschleunigung, Bremsung und Schritt/mm fuer den 100-mm-Transportroller muessen plausibel kalibriert sein.",
+        kind="manual",
+        href="/ui/machine-setup/motors",
+    ),
+    _step(
+        "motor_sensor_axes",
+        "motors",
+        "Motoren Sensorschlitten",
+        "ID6 und ID7 fuer Sensor Etikettenerfassung und Auswurfkontrolle auf 1/10 mm plausibel positionieren und die zugeordneten IOs gegenpruefen.",
+        kind="manual",
+        href="/ui/machine-setup/motors",
+    ),
+    _step(
+        "motor_camera_axis",
+        "motors",
+        "Motor Kamera TV1",
+        "ID5 fuer die Materialkontrollkamera auf Querposition, Richtung und IO-Zuordnung pruefen.",
+        kind="manual",
+        href="/ui/machine-setup/motors",
+    ),
+    _step(
+        "motor_laser_guard_axis",
+        "motors",
+        "Motor Laserschutzblech",
+        "ID4 auf Vor-/Rueckstellung, Endlagen und zugeordnete Schutzblech-IOs pruefen.",
+        kind="manual",
+        href="/ui/machine-setup/motors",
+    ),
+    _step(
+        "motor_guides",
+        "motors",
+        "Motoren Etikettenanschlaege",
+        "ID8 und ID9 fuer linken/rechten bzw. vorderen Anschlag auf gemeinsame Breitenverstellung, Richtung und 1/10-mm-Reproduzierbarkeit pruefen.",
+        kind="manual",
+        href="/ui/machine-setup/motors",
+    ),
+    _step(
         "io_test",
-        "motion",
+        "io",
         "IO-Test",
         "Digitale Ein-/Ausgaenge pruefen, inklusive Statuslampe, Taster und bekannte Moxa-Kanaele.",
         kind="manual",
         href="/ui/machine-setup/io",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "machine_buttons_and_lamps",
+        "io",
+        "Bedientaster / Tastenlampen",
+        "Raspi I0.7 bis I0.12 sowie Q0.0 bis Q0.7 pruefen. Freigabemasken, Dauerlicht und Blinklogik muessen zum jeweiligen Maschinenstatus passen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "encoder_test",
-        "motion",
+        "encoders",
         "Encoder-Test",
         "Encoderwege, Richtung und Aufloesung der Transport-/Wicklersensorik pruefen.",
         kind="manual",
         href="/ui/machine-setup/process",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "encoder_transport_infeed",
+        "encoders",
+        "Encoder Umlenkrolle rechts",
+        "I2.5/I2.6 als Interrupt-Encoder fuer den Materialeinlauf pruefen. Positive/negative Zaehlung, mm-Strecke und Geschwindigkeit muessen ohne Pulsverlust nachvollziehbar sein.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
+        "encoder_transport_drive",
+        "encoders",
+        "Encoder Etikettenantrieb",
+        "I1.5/I1.6 als Vergleichsencoder zum Etikettenantrieb pruefen. Der Schlupfvergleich zum Einlaufencoder muss fuer Produktions-/Rueckspulpfade konsistent sein.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
+        "sensor_label_detect",
+        "sensors",
+        "Sensor Etikettenerfassung",
+        "I0.5, I0.4 und Moxa2 DO7 pruefen: Label-Anfang/Ende, leichter Debounce, Teach-In und Bandriss-Erkennung muessen sauber funktionieren.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
+        "sensor_label_control",
+        "sensors",
+        "Sensor Etikettenkontrolle",
+        "I0.6, I0.11 und Q0.4 pruefen: Labelkontrolle am Auslauf, Entnahmeerkennung, Teach-In und Bandriss-Erkennung muessen zum Schieberegister passen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
+        "camera_material_tv1",
+        "cameras",
+        "Materialkamera SEA Vision TV1",
+        "Q2.6 Trigger sowie I2.7/I2.8 Rueckmeldungen pruefen. Die Materialkamera muss sich logisch in den Labelpfad und die Querpositionierachse einfuegen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
+        "camera_ocr",
+        "cameras",
+        "OCR Kamera SEA Vision",
+        "Q2.7 Trigger sowie I2.9/I2.10 Rueckmeldungen pruefen. Good-Read und Daten-bereit muessen fuer die Verifizierung je Label sauber erscheinen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "safety_circuit",
         "safety",
         "Sicherheitskreis",
@@ -154,7 +340,15 @@ STEP_TEMPLATES: List[CommissioningStepTemplate] = [
         kind="manual",
         href="/ui/machine-setup/process",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "ups_shutdown",
+        "safety",
+        "USV / Abschaltpfad",
+        "Raspi I0.6 fuer USV-OK pruefen. Stromausfall/Abschaltpfad muss Daten sichern, Maschinenstatus sauber ablegen und den Wiederanlauf nachvollziehbar machen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
         "label_process_test",
         "validation",
         "Produktionsprozess trocken testen",
@@ -162,7 +356,23 @@ STEP_TEMPLATES: List[CommissioningStepTemplate] = [
         kind="manual",
         href="/ui/machine-setup/process",
     ),
-    CommissioningStepTemplate(
+    _step(
+        "machine_state_flow",
+        "validation",
+        "MAS001/MAS0002 Statusfluss",
+        "Statuswechsel 1..21 fachlich pruefen: Einrichten, Produktion, Pause, Stop, Rueckspulen, Etikettenentnahme, Produktion abgeschlossen, Abschaltbetrieb und Not-Stop muessen logisch ineinandergreifen.",
+        kind="manual",
+        href="/ui/machine-setup/process",
+    ),
+    _step(
+        "production_logging_export",
+        "validation",
+        "Produktionslogs / MAS0030",
+        "Produktionslogfiles, LabelProductionLog, Ready-Flag MAS0030 und konsumierender Download muessen fuer eine Testproduktion stimmig sein.",
+        kind="manual",
+        href="/ui/settings",
+    ),
+    _step(
         "backup_baseline",
         "validation",
         "Backup-Basis erstellen",
@@ -368,6 +578,16 @@ class CommissioningStore:
             context["master_ios_xlsx_path"] = self.cfg.master_ios_xlsx_path
             context["io_points"] = self.io_store.count_points()
             return context
+        if template.check_key in {"peer_primary", "peer_secondary"}:
+            base_url = str(self.cfg.peer_base_url or "").strip()
+            optional = False
+            if template.check_key == "peer_secondary":
+                base_url = str(self.cfg.peer_base_url_secondary or "").strip()
+                optional = True
+            context["base_url"] = base_url
+            context["health_url"] = (base_url.rstrip("/") + str(self.cfg.peer_health_path or "/health")) if base_url else ""
+            context["optional"] = optional
+            return context
         endpoint_map = {
             "esp": ("esp_host", "esp_port", "esp_simulation"),
             "moxa1": ("moxa1_host", "moxa1_port", "moxa1_simulation"),
@@ -536,6 +756,31 @@ class CommissioningStore:
             }
             note = "Masterdateien vorhanden und IO-Katalog geladen" if ok else "Masterdatei oder IO-Import fehlt"
             return ("success" if ok else "failed", note, result)
+        if check_key in {"peer_primary", "peer_secondary"}:
+            base_url = str(self.cfg.peer_base_url or "").strip()
+            label = "Primary-Peer"
+            optional = False
+            if check_key == "peer_secondary":
+                base_url = str(self.cfg.peer_base_url_secondary or "").strip()
+                label = "Secondary-Peer"
+                optional = True
+            if not base_url:
+                note = f"{label} nicht konfiguriert"
+                return ("success" if optional else "failed", note, {"base_url": base_url, "optional": optional})
+            health_url = base_url.rstrip("/") + str(self.cfg.peer_health_path or "/health")
+            ok, status_code, error = self._probe_http_health(health_url)
+            note = f"{label} Health erreichbar" if ok else (error or f"{label} Health nicht erreichbar")
+            return (
+                "success" if ok else "failed",
+                note,
+                {
+                    "base_url": base_url,
+                    "health_url": health_url,
+                    "status_code": status_code,
+                    "optional": optional,
+                    "error": error,
+                },
+            )
         endpoint_map = {
             "esp": ("esp_host", "esp_port", "esp_simulation"),
             "moxa1": ("moxa1_host", "moxa1_port", "moxa1_simulation"),
@@ -569,6 +814,20 @@ class CommissioningStore:
                 return True, ""
         except Exception as exc:
             return False, str(exc)
+
+    def _probe_http_health(self, url: str, timeout_s: float = 2.0) -> tuple[bool, int, str]:
+        if not url:
+            return False, 0, "Health-URL fehlt"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            context = ssl._create_unverified_context() if url.lower().startswith("https://") else None
+            with urllib.request.urlopen(req, timeout=timeout_s, context=context) as resp:
+                status_code = int(getattr(resp, "status", 0) or 0)
+                return 200 <= status_code < 300, status_code, ""
+        except urllib.error.HTTPError as exc:
+            return False, int(exc.code or 0), str(exc)
+        except Exception as exc:
+            return False, 0, str(exc)
 
     def _systemctl_state(self, service_name: str) -> Dict[str, Any]:
         result = {"service": service_name, "active": "unknown", "enabled": "unknown"}

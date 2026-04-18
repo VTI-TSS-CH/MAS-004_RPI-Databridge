@@ -52,26 +52,68 @@
   - intended for repeated field commissioning after power/network/hardware interruptions
 
 ### Typical Step Set
-- The commissioning flow is structured around the current MAS-004 landscape, for example:
-  - Raspberry identity
-  - Raspberry network
-  - Raspberry runtime
-  - workbook import state
-  - ESP endpoint
-  - Moxa 1 endpoint
-  - Moxa 2 endpoint
-  - VJ6530 endpoint
-  - VJ3350 endpoint
-  - Abwickler endpoint
-  - Aufwickler endpoint
-  - motor setup
-  - IO test
-  - encoder test
-  - safety circuit
-  - label-process test
-  - backup baseline
+- The commissioning flow is now broken down much more concretely along the real MAS-004 machine structure:
+  - bootstrap:
+    - machine identity
+    - Raspi network
+    - Raspi runtime / service
+    - parameter + IO workbook state
+  - peer / host communication:
+    - Microtom primary peer health
+    - optional parallel / VPN peer health
+  - controller / field network:
+    - ESP32-PLC58 endpoint
+    - ESP realtime IO/process image
+    - Moxa 1 endpoint
+    - Moxa 2 endpoint
+    - Moxa field IO verification
+  - printers:
+    - VJ6530 endpoint
+    - TTO IO handshake
+    - VJ3350 endpoint
+    - Laser IO handshake
+  - winders:
+    - Abwickler endpoint
+    - Aufwickler endpoint
+    - Wickler stop IOs
+  - motion:
+    - global Oriental parameter baseline
+    - table X/Z axes
+    - label drive axis
+    - sensor-positioning axes
+    - camera positioning axis
+    - laser guard axis
+    - label guide axes
+  - sensor / encoder path:
+    - general encoder verification
+    - infeed transport encoder
+    - label-drive comparison encoder
+    - label detect sensor
+    - label control sensor
+  - cameras:
+    - material camera TV1
+    - OCR camera
+  - machine IO / safety:
+    - generic IO test
+    - operator buttons and lamp outputs
+    - safety circuit
+    - UPS / shutdown path
+  - process validation:
+    - dry-run label process
+    - MAS001 / MAS0002 state flow
+    - production logfile / MAS0030 handling
+    - backup baseline
 - Some steps can be auto-checked from the Raspi side.
 - Other steps are intentionally operator-confirmed because they depend on real motion, wiring, or observed machine behavior.
+
+### MAS-004 Component Intent
+- The assistant does not just ask for a generic "IO test" anymore.
+- It explicitly mirrors the machine-functional decomposition that matters during field commissioning:
+  - exact printers and their handshake signals
+  - exact transport encoders and label sensors
+  - exact motor groups by machine purpose
+  - exact safety and operator-interface responsibilities
+- This makes it easier to commission a second or third machine without mentally reconstructing the order from old notes.
 
 ### Recorded Step States
 - `pending`
@@ -214,6 +256,9 @@ python scripts/mas004_machine_bootstrap.py apply-full-backup `
 - LIVE runtime settings remain machine-local and must not be overwritten blindly by repo deployment.
 - Use restore/clone workflows deliberately and only when the target machine is clearly identified.
 - The protected backup flow is preferred over manual file copying because it keeps manifests and serial identity aligned.
+- Current observed LIVE peer situation:
+  - the optional VPN/secondary peer can be up or down without explaining a `404` from the productive Microtom primary peer
+  - a `404 "No active developers found to forward the request"` on `http://192.168.210.10:81/api/inbox` is a primary-peer behavior and is not caused by the secondary peer being offline
 
 ### TEST
 - TEST should be kept on the same merged project baseline as LIVE where possible.

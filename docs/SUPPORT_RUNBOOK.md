@@ -93,6 +93,42 @@
   - use `full run` for a new machine or after a major rebuild
   - use `incomplete-only` when an earlier commissioning attempt already proved some steps
   - do not mark hardware-dependent steps as successful without observing the real machine behavior
+- Current MAS-004-oriented commissioning order on the page:
+  - bootstrap:
+    - machine identity
+    - ETH0/ETH1 and Raspi runtime
+    - parameter + IO workbook availability
+  - peers:
+    - Microtom primary peer
+    - optional engineering/VPN secondary peer
+  - controller / field network:
+    - ESP endpoint
+    - ESP realtime IO/process image
+    - Moxa 1 / Moxa 2
+    - Moxa field IOs
+  - printers:
+    - VJ6530 endpoint + TTO handshake
+    - VJ3350 endpoint + Laser handshake
+  - winders:
+    - Abwickler
+    - Aufwickler
+    - winder stop IOs
+  - motion:
+    - global Oriental baseline
+    - table X/Z axes
+    - label drive
+    - sensor axes
+    - camera axis
+    - laser guard axis
+    - label guides
+  - validation:
+    - encoders
+    - label sensors
+    - cameras
+    - machine IO / safety / UPS
+    - MAS001/MAS0002 flow
+    - production logs / `MAS0030`
+    - final backup baseline
 - If the target Raspi is not yet reachable with the Databridge UI, use the bootstrap workflow first and then continue from the commissioning page.
 
 ## 3.5 Backups / Restore / Clone
@@ -130,6 +166,19 @@ python scripts/mas004_machine_bootstrap.py apply-full-backup --target pi@192.168
   - `ssh <pi> "curl -k -sS -D - -o /dev/null https://127.0.0.1:8080/ui/machine-setup/commissioning"`
 - If the service runs from the venv-installed package, update it after a repo patch before restarting:
   - `ssh <pi> "cd /opt/MAS-004_RPI-Databridge && ./.venv/bin/pip install --no-deps ."`
+- Secondary/VPN peer check helper:
+  - local Microtom simulator command on this engineering laptop:
+```powershell
+cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_CODE\SAR41-MAS-004_Roche_LSR_TTO\Raspberry-PLC\Microtom-Simulator"
+.\.venv\Scripts\python.exe .\microtom_sim.py --host 0.0.0.0 --port 9090 --raspi https://192.168.210.20:8080 --https --certfile .\microtom.crt --keyfile .\microtom.key
+```
+  - local health probe:
+    - `curl.exe -k https://127.0.0.1:9090/health`
+  - LIVE-side reachability probe:
+    - `ssh mas004-rpi-live "curl -k -sS https://192.168.5.2:9090/health"`
+  - important interpretation:
+    - if `[OUTBOX:primary]` still logs `HTTP 404: "No active developers found to forward the request"` for `http://192.168.210.10:81/api/inbox`, that remains a primary-peer/Microtom-side issue
+    - a missing or stopped secondary/VPN peer would only affect `[OUTBOX:aux]`, not the primary lane
 
 ## 3.2 Offline Mode
 - If TEST and LIVE are both unreachable, continue in local offline mode only.

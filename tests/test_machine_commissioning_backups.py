@@ -98,11 +98,14 @@ class MachineCommissioningBackupTests(unittest.TestCase):
         run = store.auto_check_step(run["run_id"], "raspi_network")
         run = store.auto_check_step(run["run_id"], "workbooks_loaded")
         run = store.auto_check_step(run["run_id"], "moxa1_endpoint")
+        run = store.auto_check_step(run["run_id"], "peer_secondary_health")
         step_map = {step["step_id"]: step for step in run["steps"]}
         self.assertEqual("success", step_map["raspi_network"]["status"])
         self.assertEqual("success", step_map["workbooks_loaded"]["status"])
         self.assertEqual("success", step_map["moxa1_endpoint"]["status"])
         self.assertTrue(step_map["moxa1_endpoint"]["result"]["simulation"])
+        self.assertEqual("success", step_map["peer_secondary_health"]["status"])
+        self.assertTrue(step_map["peer_secondary_health"]["result"]["optional"])
 
     def test_settings_backup_contains_runtime_payload(self):
         self.params_master.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +131,23 @@ class MachineCommissioningBackupTests(unittest.TestCase):
             self.assertIn("master/SAR41-MAS-004_SPS_I-Os.xlsx", names)
             self.assertIn("state/motor_ui_state.json", names)
             self.assertIn("state/production_state.json", names)
+
+    def test_commissioning_templates_cover_mas004_component_groups(self):
+        step_ids = {item.step_id for item in STEP_TEMPLATES}
+        for required in {
+            "peer_primary_health",
+            "esp_io_image",
+            "motor_axes_xz",
+            "motor_label_drive",
+            "encoder_transport_infeed",
+            "sensor_label_detect",
+            "camera_material_tv1",
+            "tto_io_handshake",
+            "winders_stop_io",
+            "machine_state_flow",
+            "production_logging_export",
+        }:
+            self.assertIn(required, step_ids)
 
 
 if __name__ == "__main__":

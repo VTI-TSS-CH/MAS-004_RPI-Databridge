@@ -1,5 +1,24 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-18 (Commissioning Assistant Refinement + LIVE Peer Clarification)
+- Refined the protected commissioning assistant so it follows the real MAS-004 hardware bring-up order instead of only broad buckets.
+- Added explicit MAS-004-focused commissioning steps for:
+  - Microtom primary and optional secondary/VPN peer health
+  - ESP realtime IO/process image
+  - Moxa field IO validation
+  - TTO and Laser IO handshake checks
+  - winder stop IO validation
+  - grouped axis commissioning for X/Z, label drive, sensor axes, camera axis, laser guard and label guides
+  - dedicated encoder, sensor, camera, machine-state and `MAS0030` logfile validation
+- Added Raspi-side HTTP health probing for the primary and optional secondary peer checks.
+- Reverified the LIVE secondary/VPN peer path after restarting the local Microtom simulator on `https://192.168.5.2:9090`:
+  - `/health` answered from LIVE
+  - `[OUTBOX:aux]` callbacks returned HTTP `200`
+  - observed callback times stayed in the low millisecond range (`37-66 ms`)
+- Clarified the current LIVE callback fault boundary:
+  - the journal entry `POST http://192.168.210.10:81/api/inbox -> HTTP 404: "No active developers found to forward the request"` is a primary-peer/Microtom-side behavior
+  - it is not caused by the optional secondary peer being down
+
 ## 2026-04-18 (LIVE Deploy: Commissioning / Backup Workflows)
 - Deployed the new protected commissioning/backup feature set to the Microtom LIVE Raspberry at `192.168.210.20`.
 - Applied the code via Git patch into `/opt/MAS-004_RPI-Databridge`.
