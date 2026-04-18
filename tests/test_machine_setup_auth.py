@@ -22,9 +22,17 @@ class MachineSetupAuthTests(unittest.TestCase):
                 {
                     "db_path": str(root / "databridge.db"),
                     "master_params_xlsx_path": str(root / "master" / "Parameterliste_master.xlsx"),
+                    "master_ios_xlsx_path": str(root / "master" / "SAR41-MAS-004_SPS_I-Os.xlsx"),
+                    "backup_root_path": str(root / "backups"),
                     "ui_token": "",
                     "shared_secret": "",
                     "esp_simulation": True,
+                    "moxa1_simulation": True,
+                    "moxa2_simulation": True,
+                    "vj6530_simulation": True,
+                    "vj3350_simulation": True,
+                    "smart_unwinder_simulation": True,
+                    "smart_rewinder_simulation": True,
                 }
             ),
             encoding="utf-8",
@@ -46,6 +54,14 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(303, io_page.status_code)
         self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/io", io_page.headers.get("location"))
 
+        commissioning_page = client.get("/ui/machine-setup/commissioning", follow_redirects=False)
+        self.assertEqual(303, commissioning_page.status_code)
+        self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/commissioning", commissioning_page.headers.get("location"))
+
+        backups_page = client.get("/ui/machine-setup/backups", follow_redirects=False)
+        self.assertEqual(303, backups_page.status_code)
+        self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/backups", backups_page.headers.get("location"))
+
         api = client.get("/api/motors/overview")
         self.assertEqual(401, api.status_code)
         self.assertEqual("Machine-Setup login required", api.json()["detail"])
@@ -53,6 +69,14 @@ class MachineSetupAuthTests(unittest.TestCase):
         io_api = client.get("/api/io/overview")
         self.assertEqual(401, io_api.status_code)
         self.assertEqual("Machine-Setup login required", io_api.json()["detail"])
+
+        commissioning_api = client.get("/api/commissioning/overview")
+        self.assertEqual(401, commissioning_api.status_code)
+        self.assertEqual("Machine-Setup login required", commissioning_api.json()["detail"])
+
+        backups_api = client.get("/api/backups/overview")
+        self.assertEqual(401, backups_api.status_code)
+        self.assertEqual("Machine-Setup login required", backups_api.json()["detail"])
 
     def test_machine_setup_login_unlocks_ui_and_api(self):
         client = self.build_client()
@@ -85,6 +109,16 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertIn("Machine Process", process_page.text)
         self.assertIn(">Process<", process_page.text)
 
+        commissioning_page = client.get("/ui/machine-setup/commissioning")
+        self.assertEqual(200, commissioning_page.status_code)
+        self.assertIn("Machine Commissioning", commissioning_page.text)
+        self.assertIn(">Commissioning<", commissioning_page.text)
+
+        backups_page = client.get("/ui/machine-setup/backups")
+        self.assertEqual(200, backups_page.status_code)
+        self.assertIn("Machine Backups", backups_page.text)
+        self.assertIn(">Backups<", backups_page.text)
+
         api = client.get("/api/motors/overview")
         self.assertEqual(200, api.status_code)
         payload = api.json()
@@ -98,6 +132,35 @@ class MachineSetupAuthTests(unittest.TestCase):
         process_api = client.get("/api/machine/overview")
         self.assertEqual(200, process_api.status_code)
         self.assertIn("current_state", process_api.json())
+
+        commissioning_api = client.get("/api/commissioning/overview")
+        self.assertEqual(200, commissioning_api.status_code)
+        self.assertIn("bootstrap_script", commissioning_api.json())
+
+        backups_api = client.get("/api/backups/overview")
+        self.assertEqual(200, backups_api.status_code)
+        self.assertIn("backups", backups_api.json())
+
+        identity_api = client.post(
+            "/api/backups/identity",
+            json={"machine_serial_number": "MAS004-LOGIN-TEST", "machine_name": "Auth Test Rig"},
+        )
+        self.assertEqual(200, identity_api.status_code)
+        self.assertEqual("MAS004-LOGIN-TEST", identity_api.json()["identity"]["machine_serial_number"])
+
+        create_backup = client.post(
+            "/api/backups/create",
+            json={"backup_type": "settings", "name": "auth-test-backup", "note": "created from auth test"},
+        )
+        self.assertEqual(200, create_backup.status_code)
+        backup_id = create_backup.json()["backup"]["backup_id"]
+
+        download = client.get(f"/api/backups/{backup_id}/download")
+        self.assertEqual(200, download.status_code)
+
+        import_route = client.post("/api/backups/import")
+        self.assertEqual(503, import_route.status_code)
+        self.assertEqual("Backup-Import nicht verfuegbar (python-multipart fehlt)", import_route.json()["detail"])
 
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)

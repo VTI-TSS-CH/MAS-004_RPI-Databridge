@@ -10,6 +10,9 @@ class Settings:
     db_path: str = "/var/lib/mas004_rpi_databridge/databridge.db"
     master_params_xlsx_path: str = "/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx"
     master_ios_xlsx_path: str = "/var/lib/mas004_rpi_databridge/master/SAR41-MAS-004_SPS_I-Os.xlsx"
+    backup_root_path: str = "/var/lib/mas004_rpi_databridge/backups"
+    machine_serial_number: str = ""
+    machine_name: str = ""
 
     # Web UI
     webui_host: str = "0.0.0.0"

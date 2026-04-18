@@ -36,6 +36,10 @@ from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.machine_runtime import MachineRuntime
+from mas004_rpi_databridge.commissioning import CommissioningStore
+from mas004_rpi_databridge.commissioning_ui import build_commissioning_ui_html
+from mas004_rpi_databridge.machine_backups import MachineBackupManager
+from mas004_rpi_databridge.backup_ui import build_backup_ui_html
 from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
@@ -231,6 +235,9 @@ class ConfigUpdate(BaseModel):
     webui_port: Optional[int] = None
     ui_token: Optional[str] = None
     shared_secret: Optional[str] = None
+    backup_root_path: Optional[str] = None
+    machine_serial_number: Optional[str] = None
+    machine_name: Optional[str] = None
 
     # device endpoints
     esp_host: Optional[str] = None
@@ -338,6 +345,26 @@ class MachineSetupLoginReq(BaseModel):
     next: Optional[str] = "/ui/machine-setup/motors"
 
 
+class CommissioningStartReq(BaseModel):
+    mode: str = "full"
+
+
+class CommissioningStepReq(BaseModel):
+    status: str
+    note: str = ""
+
+
+class BackupCreateReq(BaseModel):
+    backup_type: str
+    name: str
+    note: str = ""
+
+
+class BackupIdentityReq(BaseModel):
+    machine_serial_number: str
+    machine_name: str = ""
+
+
 def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     app = FastAPI(title="MAS-004_RPI-Databridge", version="0.3.0", docs_url=None)
     
@@ -369,6 +396,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     def get_motor_state_store() -> MotorStateStore:
         return motor_state_store
+
+    def get_commissioning_store(cfg2: Optional[Settings] = None) -> CommissioningStore:
+        return CommissioningStore(db, cfg2 or Settings.load(cfg_path), cfg_path)
+
+    def get_backup_manager(cfg2: Optional[Settings] = None) -> MachineBackupManager:
+        return MachineBackupManager(db, cfg2 or Settings.load(cfg_path), cfg_path)
 
     def get_motor_bindings() -> dict[int, dict[str, Any]]:
         now = time.monotonic()
@@ -567,6 +600,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 
     def machine_setup_nav_html(active: str) -> str:
         items = [
+            ("commissioning", "/ui/machine-setup/commissioning", "Commissioning"),
+            ("backups", "/ui/machine-setup/backups", "Backups"),
             ("process", "/ui/machine-setup/process", "Process"),
             ("io", "/ui/machine-setup/io", "I/O"),
             ("motors", "/ui/machine-setup/motors", "Motors"),
@@ -1780,6 +1815,138 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         return get_machine_overview()
 
+    @app.get("/api/commissioning/overview")
+    def api_commissioning_overview(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_commissioning_store(cfg2).overview()
+
+    @app.post("/api/commissioning/run/start")
+    def api_commissioning_start(request: Request, body: CommissioningStartReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_commissioning_store(cfg2).start_run(body.mode)
+
+    @app.get("/api/commissioning/run/{run_id}")
+    def api_commissioning_run(request: Request, run_id: int):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_commissioning_store(cfg2).get_run(run_id)
+
+    @app.post("/api/commissioning/run/{run_id}/step/{step_id}")
+    def api_commissioning_step_update(
+        request: Request,
+        run_id: int,
+        step_id: str,
+        body: CommissioningStepReq,
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return get_commissioning_store(cfg2).update_step(run_id, step_id, body.status, note=body.note)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/commissioning/run/{run_id}/step/{step_id}/check")
+    def api_commissioning_step_check(request: Request, run_id: int, step_id: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return get_commissioning_store(cfg2).auto_check_step(run_id, step_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/backups/overview")
+    def api_backups_overview(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_backup_manager(cfg2).overview()
+
+    @app.post("/api/backups/identity")
+    def api_backups_identity(request: Request, body: BackupIdentityReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        if not str(body.machine_serial_number or "").strip():
+            raise HTTPException(status_code=400, detail="machine_serial_number is required")
+        mgr = get_backup_manager(cfg2)
+        return {"ok": True, "identity": mgr.set_identity(body.machine_serial_number, body.machine_name)}
+
+    @app.post("/api/backups/create")
+    def api_backups_create(request: Request, body: BackupCreateReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        mgr = get_backup_manager(cfg2)
+        if not str(body.name or "").strip():
+            raise HTTPException(status_code=400, detail="Backup name is required")
+        backup_type = str(body.backup_type or "").strip().lower()
+        try:
+            if backup_type == "settings":
+                result = mgr.create_settings_backup(body.name, note=body.note)
+            elif backup_type == "full":
+                result = mgr.create_full_backup(body.name, note=body.note)
+            else:
+                raise RuntimeError("backup_type must be 'settings' or 'full'")
+            return {"ok": True, "backup": result}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    if MULTIPART_AVAILABLE:
+
+        @app.post("/api/backups/import")
+        async def api_backups_import(
+            request: Request,
+            file: UploadFile = File(...),
+        ):
+            cfg2 = Settings.load(cfg_path)
+            require_machine_setup_session(request, cfg2)
+            suffix = os.path.splitext(file.filename or "backup.zip")[1] or ".zip"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                content = await file.read()
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                backup = get_backup_manager(cfg2).import_backup(tmp_path, file.filename or "")
+                return {"ok": True, "backup": backup}
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    else:
+
+        @app.post("/api/backups/import")
+        def api_backups_import_unavailable(request: Request):
+            cfg2 = Settings.load(cfg_path)
+            require_machine_setup_session(request, cfg2)
+            raise HTTPException(status_code=503, detail="Backup-Import nicht verfuegbar (python-multipart fehlt)")
+
+    @app.get("/api/backups/{backup_id}/download")
+    def api_backups_download(request: Request, backup_id: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        backup = get_backup_manager(cfg2).get_backup(backup_id)
+        filename = os.path.basename(backup["file_path"])
+        return FileResponse(backup["file_path"], media_type="application/zip", filename=filename)
+
+    @app.post("/api/backups/{backup_id}/restore")
+    def api_backups_restore(request: Request, backup_id: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return get_backup_manager(cfg2).restore_backup(backup_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.delete("/api/backups/{backup_id}")
+    def api_backups_delete(request: Request, backup_id: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return get_backup_manager(cfg2).delete_backup(backup_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
     # =========================
     # ===== SIMPLE UI =========
     # =========================
@@ -1790,6 +1957,24 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         if has_machine_setup_session(request, cfg2):
             return RedirectResponse(url=target, status_code=303)
         return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+
+    @app.get("/ui/machine-setup/commissioning", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_commissioning(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/commissioning"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("commissioning")
+        return build_commissioning_ui_html(nav)
+
+    @app.get("/ui/machine-setup/backups", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_backups(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/backups"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("backups")
+        return build_backup_ui_html(nav)
 
     @app.get("/ui/machine-setup/login", response_class=HTMLResponse, include_in_schema=False)
     def ui_machine_setup_login(request: Request, next: str = Query(default="/ui/machine-setup/motors")):

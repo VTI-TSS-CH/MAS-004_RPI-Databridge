@@ -1,5 +1,26 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-18 (Commissioning Assistant + Machine Backup/Clone Documentation)
+- Documented the new protected `Machine-Setup` additions:
+  - `/ui/machine-setup/commissioning`
+  - `/ui/machine-setup/backups`
+- Documented the commissioning assistant concept:
+  - full run versus incomplete-only rerun
+  - recorded step states
+  - guided bring-up across Raspi, endpoints, IO, motor and safety validation
+- Documented machine identity handling:
+  - `machine_serial_number`
+  - `machine_name`
+  - `backup_root_path`
+- Documented the backup strategy:
+  - settings backup for machine-local runtime state
+  - full backup for clone/disaster-recovery baselines with repo snapshots
+  - import/export/restore expectations
+- Documented the intended scripted recovery path:
+  - `scripts/mas004_machine_bootstrap.py`
+  - `scripts/mas004_restore_backup.py`
+- Added explicit LIVE/TEST/offline-mode notes so deployment, restore and commissioning remain traceable even while only one Raspberry or no target is reachable.
+
 ## 2026-04-17 (Machine Runtime Foundation + Workbook/KI Sync)
 - Added a first Raspi-side machine runtime foundation:
   - new modules:

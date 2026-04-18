@@ -45,6 +45,8 @@
   - reusable sync helper: `scripts/sync_master_workbooks.py`
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
+  - `/ui/machine-setup/commissioning`
+  - `/ui/machine-setup/backups`
   - `/ui/machine-setup/motors`
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
@@ -52,6 +54,17 @@
     - user: `Admin`
     - password: `VideojetMAS004!`
   - legacy `/ui/motors` and `/ui/winders/*` routes remain as compatibility redirects into the new protected section
+- New commissioning / recovery foundation inside Machine-Setup:
+  - `Commissioning` page records guided bring-up runs, per-step outcomes and reruns for incomplete machine setup work
+  - `Backups` page manages machine identity, settings backups, full backups and restore/import flows
+  - commissioning and backup data are tied to machine identity fields:
+    - `machine_serial_number`
+    - `machine_name`
+    - `backup_root_path`
+  - intended helper scripts:
+    - `scripts/mas004_machine_bootstrap.py` for fresh-target discovery/bootstrap from the engineering laptop
+    - `scripts/mas004_restore_backup.py` for scripted restore of backup bundles
+  - reference doc: `docs/MACHINE_COMMISSIONING_BACKUP.md`
 - New motor operator surface inside Machine-Setup:
   - live status/config view for all 9 Oriental drives behind the ESP32-PLC
   - calibration/runtime parameter editing over the dedicated ESP `MOTOR ...` command channel
@@ -184,6 +197,7 @@
 - DB: `/var/lib/mas004_rpi_databridge/databridge.db`
 - Persisted master workbook on Raspi: `/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx`
 - Persisted IO workbook on Raspi: `/var/lib/mas004_rpi_databridge/master/SAR41-MAS-004_SPS_I-Os.xlsx`
+- Backup root on Raspi: `/var/lib/mas004_rpi_databridge/backups`
 
 ## Systemd Service
 - `mas004-rpi-databridge.service`
@@ -210,6 +224,7 @@
   - local repos and their Git state are the authoritative working baseline
   - no TEST/LIVE runtime setting changes may be assumed or applied
   - TEST/LIVE sync must be reported as pending until reachability is restored
+  - commissioning/restore actions stay documented but deferred until the target machine is reachable again
 - Current local repo snapshot:
   - `MAS-004_RPI-Databridge`: HEAD `3bcaaf0`, local support docs modified
   - `MAS-004_ESP32-PLC-Bridge`: HEAD `fa1c9d3`, working tree clean

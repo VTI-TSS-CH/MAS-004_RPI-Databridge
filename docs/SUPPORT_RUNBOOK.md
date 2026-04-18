@@ -65,16 +65,64 @@
   - user: `Admin`
   - password: `VideojetMAS004!`
 - Scope:
+  - `/ui/machine-setup/commissioning`
+  - `/ui/machine-setup/backups`
   - `/ui/machine-setup/motors`
   - `/ui/machine-setup/process`
   - `/ui/machine-setup/io`
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
+  - `/api/commissioning/*`
+  - `/api/backups/*`
   - `/api/motors/*`
   - `/api/machine/*`
   - `/api/io/*`
   - `/api/winders/*`
 - Legacy `/ui/motors` and `/ui/winders/*` URLs are only compatibility redirects into the protected section.
+
+## 3.4 Commissioning Assistant
+- Main protected page: `/ui/machine-setup/commissioning`
+- Use this page for:
+  - first hardware/software bring-up of a machine
+  - repeated commissioning after unfinished work
+  - recording which steps were successful, failed, skipped or reused
+- Supported operator modes:
+  - full run
+  - incomplete-only rerun
+- Commissioning notes:
+  - use `full run` for a new machine or after a major rebuild
+  - use `incomplete-only` when an earlier commissioning attempt already proved some steps
+  - do not mark hardware-dependent steps as successful without observing the real machine behavior
+- If the target Raspi is not yet reachable with the Databridge UI, use the bootstrap workflow first and then continue from the commissioning page.
+
+## 3.5 Backups / Restore / Clone
+- Main protected page: `/ui/machine-setup/backups`
+- Manage these machine-local metadata fields there:
+  - `machine_serial_number`
+  - `machine_name`
+  - `backup_root_path`
+- Backup types:
+  - settings backup
+  - full backup
+- Backup policy:
+  - use settings backup before risky parameter/workbook/runtime changes
+  - use full backup before clone preparation, major milestones or software/hardware handover
+  - exported bundles should be archived outside the Raspi as well
+- Restore policy:
+  - verify machine identity before restoring
+  - expect a service restart after restore
+  - after restore, validate `/health`, `/ui/settings`, `/ui/machine-setup`, workbook presence and required protected pages
+- Command-line helpers:
+  - restore helper:
+```powershell
+python scripts/mas004_restore_backup.py --bundle .\exports\<bundle>.zip --apply-repos
+```
+  - bootstrap helper for a fresh target:
+```powershell
+python scripts/mas004_machine_bootstrap.py discover --subnet 192.168.210.0/24
+python scripts/mas004_machine_bootstrap.py apply-full-backup --target pi@192.168.210.20 --bundle .\exports\<bundle>.zip --apply-repos
+```
+- The bootstrap path is the preferred future workflow for bringing a fresh Raspberry onto the known MAS-004 baseline before continuing in the web UI.
 
 ## 3.2 Offline Mode
 - If TEST and LIVE are both unreachable, continue in local offline mode only.
@@ -89,6 +137,7 @@
 - Do not claim TEST/LIVE synchronization while reachability is missing.
 - Do not infer or overwrite runtime settings from stale exports while offline.
 - `mas004_release_ops` owns the deferred TEST/LIVE sync backlog until connectivity returns.
+- Commissioning and restore actions may be prepared locally while offline, but they stay pending until the respective target machine is reachable again.
 
 ## 4. Safety Rules
 - Do not run `git reset --hard` or `git checkout --` on Pi repos.
@@ -102,6 +151,8 @@
 
 ## 5. Verification Checklist
 - UI reachable: `/`, `/ui/test`, `/ui/params`, `/ui/machine-setup`, `/ui/settings`
+- Protected commissioning UI reachable: `/ui/machine-setup/commissioning`
+- Protected backups UI reachable: `/ui/machine-setup/backups`
 - Process UI reachable: `/ui/machine-setup/process`
 - UI reachable for hardware IO operations: `/ui/machine-setup/io`
 - Smart Wickler proxy UIs reachable when needed:
@@ -155,6 +206,11 @@
   - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`
   - direct eth0 reachability is expected; no TCP forwarding is used anymore
   - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open inside the main Machine-Setup shell and show a stable simulation/offline state instead of failing hard
+- For commissioning/backup handling:
+  - protected `Machine-Setup` login must be required before commissioning or backup APIs are usable
+  - machine serial number and machine name should be set before creating qualification-relevant backup bundles
+  - after a restore, verify whether the service restart happened cleanly and whether the expected workbook/runtime payload is present again
+  - in offline mode, exported bundles and commissioning notes may be prepared locally, but no TEST/LIVE completion should be claimed before the real target has been revalidated
 - If the Videojet logo disappears from the Raspi UI again, check `/ui/assets/videojet-logo.jpg` first:
   - the asset should now come either from the installed package data or from the repo fallback path on the Raspberry
 - If `TTS0001=3` ever returns `ACK_TTS0001=0`, treat that as a regression: the ACK must follow the async-observed settled workbook state, not a stale synchronous verify snapshot.

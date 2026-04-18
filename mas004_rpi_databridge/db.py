@@ -180,6 +180,52 @@ CREATE TABLE IF NOT EXISTS label_events (
 );
 CREATE INDEX IF NOT EXISTS idx_label_events_ts ON label_events(ts);
 CREATE INDEX IF NOT EXISTS idx_label_events_label ON label_events(production_label, label_no, ts);
+
+CREATE TABLE IF NOT EXISTS machine_commissioning_runs (
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_ts REAL NOT NULL,
+  updated_ts REAL NOT NULL,
+  completed_ts REAL,
+  mode TEXT NOT NULL DEFAULT 'full',
+  status TEXT NOT NULL DEFAULT 'active',
+  machine_serial TEXT NOT NULL DEFAULT '',
+  machine_name TEXT NOT NULL DEFAULT '',
+  started_from_run_id INTEGER,
+  summary_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_machine_commissioning_runs_created ON machine_commissioning_runs(created_ts DESC);
+
+CREATE TABLE IF NOT EXISTS machine_commissioning_steps (
+  run_id INTEGER NOT NULL,
+  step_id TEXT NOT NULL,
+  sort_order INTEGER NOT NULL,
+  section_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  note TEXT NOT NULL DEFAULT '',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  context_json TEXT NOT NULL DEFAULT '{}',
+  updated_ts REAL NOT NULL,
+  PRIMARY KEY (run_id, step_id),
+  FOREIGN KEY(run_id) REFERENCES machine_commissioning_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_machine_commissioning_steps_run_sort ON machine_commissioning_steps(run_id, sort_order, step_id);
+
+CREATE TABLE IF NOT EXISTS machine_backups (
+  backup_id TEXT PRIMARY KEY,
+  backup_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'local',
+  note TEXT NOT NULL DEFAULT '',
+  machine_serial TEXT NOT NULL DEFAULT '',
+  machine_name TEXT NOT NULL DEFAULT '',
+  created_ts REAL NOT NULL,
+  file_path TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  sha256 TEXT NOT NULL DEFAULT '',
+  manifest_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_machine_backups_type_created ON machine_backups(backup_type, created_ts DESC);
 """
 
 _init_lock = threading.Lock()
