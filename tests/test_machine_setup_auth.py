@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 sys.modules.setdefault("ping3", types.SimpleNamespace(ping=lambda *args, **kwargs: 1.0))
 
-from mas004_rpi_databridge.webui import build_app
+from mas004_rpi_databridge.webui import MULTIPART_AVAILABLE, build_app
 
 
 class MachineSetupAuthTests(unittest.TestCase):
@@ -159,8 +159,11 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(200, download.status_code)
 
         import_route = client.post("/api/backups/import")
-        self.assertEqual(503, import_route.status_code)
-        self.assertEqual("Backup-Import nicht verfuegbar (python-multipart fehlt)", import_route.json()["detail"])
+        if MULTIPART_AVAILABLE:
+            self.assertEqual(422, import_route.status_code)
+        else:
+            self.assertEqual(503, import_route.status_code)
+            self.assertEqual("Backup-Import nicht verfuegbar (python-multipart fehlt)", import_route.json()["detail"])
 
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)
