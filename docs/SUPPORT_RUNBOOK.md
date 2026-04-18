@@ -123,6 +123,13 @@ python scripts/mas004_machine_bootstrap.py discover --subnet 192.168.210.0/24
 python scripts/mas004_machine_bootstrap.py apply-full-backup --target pi@192.168.210.20 --bundle .\exports\<bundle>.zip --apply-repos
 ```
 - The bootstrap path is the preferred future workflow for bringing a fresh Raspberry onto the known MAS-004 baseline before continuing in the web UI.
+- Commissioning/backup deploy verification on a reachable Raspberry:
+  - `ssh <pi> "systemctl is-active mas004-rpi-databridge.service"`
+  - `ssh <pi> "cd /opt/MAS-004_RPI-Databridge && ./.venv/bin/python -m unittest tests.test_machine_setup_auth tests.test_machine_commissioning_backups"`
+  - `ssh <pi> "curl -k https://127.0.0.1:8080/health"`
+  - `ssh <pi> "curl -k -sS -D - -o /dev/null https://127.0.0.1:8080/ui/machine-setup/commissioning"`
+- If the service runs from the venv-installed package, update it after a repo patch before restarting:
+  - `ssh <pi> "cd /opt/MAS-004_RPI-Databridge && ./.venv/bin/pip install --no-deps ."`
 
 ## 3.2 Offline Mode
 - If TEST and LIVE are both unreachable, continue in local offline mode only.

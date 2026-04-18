@@ -178,6 +178,13 @@
   - fallback password: `raspberry`
   - preferred private key on this laptop: `C:/Users/Egli_Erwin/.ssh/mas004_rpi210_ed25519`
   - configured aliases on this laptop: `mas004-rpi`, `mas004-rpi-live`
+- 2026-04-18 commissioning/backup deployment on LIVE:
+  - protected `Machine-Setup` pages `Commissioning` and `Backups` were deployed to the Microtom LIVE Raspberry
+  - the package inside `/opt/MAS-004_RPI-Databridge/.venv` was rebuilt from the updated repo and the Databridge service was restarted
+  - smoke checks after restart:
+    - `https://127.0.0.1:8080/health` returned `{"ok":true}`
+    - `GET /ui/machine-setup/commissioning` redirected to `/ui/machine-setup/login?next=/ui/machine-setup/commissioning`
+  - no LIVE website/runtime settings were changed during this rollout
 - LIVE callback-delay diagnosis on 2026-04-16:
   - the live config still used `http_timeout_s = 10.0`
   - journal inspection showed repeated `ReadTimeout('timed out')` on `POST http://192.168.210.10:81/api/inbox`

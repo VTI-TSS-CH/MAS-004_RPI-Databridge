@@ -1,5 +1,17 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-18 (LIVE Deploy: Commissioning / Backup Workflows)
+- Deployed the new protected commissioning/backup feature set to the Microtom LIVE Raspberry at `192.168.210.20`.
+- Applied the code via Git patch into `/opt/MAS-004_RPI-Databridge`.
+- Rebuilt the installed package inside `/opt/MAS-004_RPI-Databridge/.venv` with:
+  - `./.venv/bin/pip install --no-deps .`
+- Restarted `mas004-rpi-databridge.service`.
+- LIVE post-deploy verification:
+  - service returned to `active`
+  - `https://127.0.0.1:8080/health` answered with `{"ok":true}`
+  - `/ui/machine-setup/commissioning` redirected to the protected login as expected
+- The deployment intentionally did not alter the persisted LIVE website/runtime settings.
+
 ## 2026-04-18 (Commissioning Assistant + Machine Backup/Clone Documentation)
 - Documented the new protected `Machine-Setup` additions:
   - `/ui/machine-setup/commissioning`
