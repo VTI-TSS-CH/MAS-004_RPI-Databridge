@@ -13,8 +13,44 @@
    - `powershell -ExecutionPolicy Bypass -File scripts/mas004_multirepo_sync.ps1 -Target live -AllowLive -RestartServices`
 7. Verify runtime on Pi:
    - `ssh pi@10.27.67.68 "systemctl status mas004-rpi-databridge.service --no-pager"` (TEST)
+   - `ssh pi@10.141.94.213 "systemctl status mas004-rpi-databridge.service --no-pager"` (production after cutover)
    - `ssh pi@192.168.210.20 "systemctl status mas004-rpi-databridge.service --no-pager"` (LIVE)
    - `curl -k https://<raspi-ip>:8080/health`
+
+## 1.1 Production IBN 10.141.94.x
+- This section prepares the former TEST machine as the next production/commissioning stand.
+- Current/bootstrap Raspi address before network cutover:
+  - SSH: `pi@10.27.67.68`
+  - UI/API: `https://10.27.67.68:8080`
+- Final production addresses:
+  - Raspi: `10.141.94.213/24`, gateway `10.141.94.1`
+  - Laptop / Microtom testtool: `10.141.94.212`
+  - TTO VJ6530: `10.141.94.214:3002`
+  - Laser VJ3350: `10.141.94.215:20000`
+  - Abwickler: `10.141.94.216:3011`
+  - Aufwickler: `10.141.94.217:3012`
+  - ESP and Moxa on `eth1` stay unchanged: `192.168.2.101:3010`, `192.168.2.102:502`, `192.168.2.103:502`
+- Prepared files:
+  - `scripts/production_topology_10_141_94.json`
+  - `scripts/production_commissioning_config_patch_10_141_94.json`
+  - `scripts/mas004_production_ibn.ps1`
+- Dry plan:
+  - `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase Plan`
+- Local precheck:
+  - `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase Precheck`
+- Tomorrow's guided execution order:
+  - connect laptop to the current Raspi network and verify `ssh pi@10.27.67.68`
+  - deploy Raspi code: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployRaspiBootstrap -Execute`
+  - stage the production Databridge config: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase ApplyRaspiRuntimeConfig -Execute`
+  - switch the OS network: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase ApplyRaspiNetwork -Execute`
+  - change the laptop NIC to `10.141.94.212/24`, gateway `10.141.94.1`
+  - verify the new path: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase StatusAfterCutover -Execute`
+  - deploy the ESP via USB on the Raspi: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployEspFromRaspi -Execute`
+  - deploy Abwickler and Aufwickler one after another via USB on the laptop: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployWicklerUsb`
+- Important cutover note:
+  - `ApplyRaspiNetwork` intentionally changes the OS network and can drop the current SSH session.
+  - Do not run it until the laptop can be moved to `10.141.94.212/24`.
+  - The commissioning config uses `peer_base_url = https://10.141.94.212:9090` while the laptop Microtom simulator/testtool is the active peer; replace this with the final Microtom endpoint before handover if Microtom uses another host.
 
 ## 2. Local Commands
 - Install env:
@@ -47,6 +83,8 @@
 ## 3. Pi Commands
 - TEST update:
   - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
+- Production update after cutover:
+  - `powershell -ExecutionPolicy Bypass -File scripts/mas004_multirepo_sync.ps1 -Target production -RestartServices`
 - LIVE update (only if explicitly approved):
   - `ssh pi@192.168.210.20 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
   - preferred alias on this laptop: `ssh mas004-rpi-live "cd /opt/MAS-004_RPI-Databridge && git status -sb"`

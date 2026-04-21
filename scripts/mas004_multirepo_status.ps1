@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("test", "live")]
+    [ValidateSet("test", "production", "live")]
     [string]$Target = "test",
     [string]$SshHost = "",
     [switch]$AsJson

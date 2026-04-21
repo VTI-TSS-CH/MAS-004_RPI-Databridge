@@ -1,5 +1,29 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-21 (Production Stand 10.141.94.x Offline Preparation)
+- Prepared the former TEST Raspberry as the next production/commissioning stand without contacting the target.
+- Added a `production` target profile for the post-cutover Raspi address `pi@10.141.94.213`; the existing `test` target remains the bootstrap path `pi@10.27.67.68`.
+- Added machine-readable production topology and commissioning config patch files:
+  - `scripts/production_topology_10_141_94.json`
+  - `scripts/production_commissioning_config_patch_10_141_94.json`
+- Added guided IBN helper `scripts/mas004_production_ibn.ps1` with phases for:
+  - local precheck
+  - Raspi deploy while still on `10.27.67.68`
+  - Databridge runtime config staging
+  - explicit OS network cutover to `10.141.94.213/24`
+  - post-cutover status check
+  - ESP flash via Raspi USB alias
+  - Smart Wickler USB flash guidance
+- Production eth0 target addresses are now documented as:
+  - Laptop/Microtom testtool `10.141.94.212`
+  - Raspi `10.141.94.213`
+  - TTO `10.141.94.214`
+  - Laser `10.141.94.215`
+  - Abwickler `10.141.94.216`
+  - Aufwickler `10.141.94.217`
+- ETH1 remains unchanged with ESP `192.168.2.101` and Moxa `192.168.2.102/103`.
+- LIVE and the production Raspi were not contacted; this is an offline preparation for tomorrow's IBN.
+
 ## 2026-04-21 (Master Parameter Workbook Refresh Offline)
 - Refreshed the external master workbook and repo copy from:
   - `..\Parameterliste SAR41-MAS-004.xlsx`

@@ -37,6 +37,19 @@
 - New network split for the merged plant basis:
   - `eth0 / 192.168.210.20`: Microtom, VJ6530, VJ3350, Abwickler, Aufwickler
   - `eth1 / 192.168.2.100`: ESP32-PLC58 and the two Moxa E1211 modules
+- The former local TEST machine is now prepared as the next production/commissioning stand:
+  - bootstrap/current Raspi access before cutover: `pi@10.27.67.68`, UI/API `https://10.27.67.68:8080`
+  - final `eth0`: Raspi `10.141.94.213/24`, gateway `10.141.94.1`
+  - engineering laptop / Microtom testtool: `10.141.94.212`
+  - TTO VJ6530: `10.141.94.214:3002`
+  - Laser VJ3350: `10.141.94.215:20000`
+  - Abwickler: `10.141.94.216:3011`
+  - Aufwickler: `10.141.94.217:3012`
+  - final `eth1` remains unchanged: Raspi `192.168.2.100/24`, ESP `192.168.2.101:3010`, Moxa `192.168.2.102:502` and `192.168.2.103:502`
+  - commissioning profile files:
+    - `scripts/production_topology_10_141_94.json`
+    - `scripts/production_commissioning_config_patch_10_141_94.json`
+    - guided runbook script `scripts/mas004_production_ibn.ps1`
 - The Raspi hardware IO layer remains simulation-first by default until a released Industrial Shields library installation is available on the Raspberry runtime.
 - The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-21:
   - no new or removed parameter IDs in this sync
@@ -154,23 +167,33 @@
   - `ESP32-PLC58`: `192.168.2.101:3010`
   - `Moxa #1`: `192.168.2.102:502`
   - `Moxa #2`: `192.168.2.103:502`
-  - `VJ3350`: `192.168.210.21:20000`
-  - `VJ6530`: `192.168.210.22:3002`
-  - `Abwickler`: `192.168.210.23:3011`
-  - `Aufwickler`: `192.168.210.24:3012`
+  - `VJ3350`: LIVE/old basis `192.168.210.21:20000`, production commissioning basis `10.141.94.215:20000`
+  - `VJ6530`: LIVE/old basis `192.168.210.22:3002`, production commissioning basis `10.141.94.214:3002`
+  - `Abwickler`: LIVE/old basis `192.168.210.23:3011`, production commissioning basis `10.141.94.216:3011`
+  - `Aufwickler`: LIVE/old basis `192.168.210.24:3012`, production commissioning basis `10.141.94.217:3012`
 
 ## Deployment Topology
-- TEST Raspberry:
+- TEST/bootstrap Raspberry (former TEST, next production before IP cutover):
   - SSH: `pi@10.27.67.68`
   - UI/API: `https://10.27.67.68:8080`
-  - Policy: default sync target (always keep aligned with local + git)
+- Production Raspberry after IP cutover:
+  - SSH: `pi@10.141.94.213`
+  - UI/API: `https://10.141.94.213:8080`
+  - Policy: use after the OS network cutover has completed
 - LIVE Raspberry:
   - SSH: `pi@192.168.210.20`
   - Preferred SSH alias: `mas004-rpi-live`
   - UI/API: `https://192.168.210.20:8080`
 - Policy: update only on explicit release command
 - Script target metadata can be overridden via environment variables:
-  - `MAS004_TEST_SSH`, `MAS004_LIVE_SSH`, `MAS004_TEST_WEB`, `MAS004_LIVE_WEB`
+  - `MAS004_TEST_SSH`, `MAS004_PRODUCTION_SSH`, `MAS004_LIVE_SSH`
+  - `MAS004_TEST_WEB`, `MAS004_PRODUCTION_WEB`, `MAS004_LIVE_WEB`
+- Production commissioning helper phases:
+  - `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase Plan`
+  - `... -Phase DeployRaspiBootstrap -Execute` while reachable at `10.27.67.68`
+  - `... -Phase ApplyRaspiRuntimeConfig -Execute` to stage `10.141.94.x` endpoints in Databridge config
+  - `... -Phase ApplyRaspiNetwork -Execute` to switch the OS network to `10.141.94.213/24`
+  - after laptop NIC change to `10.141.94.212/24`: `... -Phase StatusAfterCutover -Execute`
 
 ## Current LIVE Runtime Snapshot (2026-03-25)
 - Captured from `/etc/mas004_rpi_databridge/config.json` on the Microtom LIVE Raspberry.
