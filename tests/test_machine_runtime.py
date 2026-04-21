@@ -116,7 +116,19 @@ class MachineRuntimeTests(unittest.TestCase):
         )
 
         for pkey, ptype, pid, default_v, rw, esp_rw, dtype in (
+            ("MAP0001", "MAP", "0001", "500", "W", "R", "uint16"),
+            ("MAP0002", "MAP", "0002", "1000", "W", "R", "uint16"),
+            ("MAP0003", "MAP", "0003", "20", "W", "R", "uint16"),
+            ("MAP0004", "MAP", "0004", "100", "W", "R", "uint16"),
+            ("MAP0005", "MAP", "0005", "0", "W", "W", "int8"),
+            ("MAP0006", "MAP", "0006", "0", "W", "W", "int8"),
+            ("MAP0016", "MAP", "0016", "0", "W", "R", "bool"),
+            ("MAP0019", "MAP", "0019", "11000", "W", "R", "uint16"),
+            ("MAP0040", "MAP", "0040", "5", "W", "R", "uint8"),
             ("MAP0065", "MAP", "0065", "1111111", "W", "R", "uint8"),
+            ("MAP0066", "MAP", "0066", "8000", "W", "R", "uint16"),
+            ("MAE0025", "MAE", "0025", "0", "R", "W", "bool"),
+            ("MAE0026", "MAE", "0026", "0", "R", "W", "bool"),
             ("MAS0001", "MAS", "0001", "1", "R", "W", "uint8"),
             ("MAS0002", "MAS", "0002", "0", "W", "W", "uint8"),
             ("MAS0003", "MAS", "0003", "0", "R", "W", "uint32"),
@@ -162,6 +174,7 @@ class MachineRuntimeTests(unittest.TestCase):
         second = runtime.refresh()
         self.assertEqual(3, second["current_state"])
         self.assertEqual(3, second["requested_state"])
+        self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
 
     def test_label_complete_event_updates_register_and_mas0003(self):
         runtime = self.build_runtime()
@@ -195,6 +208,29 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(12, snapshot["last_label_no"])
         self.assertEqual(1, len(snapshot["labels"]))
         self.assertEqual(12, snapshot["labels"][0]["label_no"])
+
+    def test_label_length_error_pauses_production_without_purge(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        self.params.apply_device_value("MAE0025", "1", promote_default=True)
+
+        first = runtime.refresh()
+        snapshot = runtime.refresh()
+
+        self.assertEqual(6, first["current_state"])
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual(["MAE0025"], snapshot["info"]["pause_reasons"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
 
 
 if __name__ == "__main__":

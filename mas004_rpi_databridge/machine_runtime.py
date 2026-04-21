@@ -5,6 +5,7 @@ import re
 from typing import Any, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.logstore import LogStore
@@ -45,6 +46,9 @@ def _safe_int(raw: Any, default: int = 0) -> int:
         return int(default)
 
 
+PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026"}
+
+
 class MachineRuntime:
     def __init__(
         self,
@@ -72,7 +76,9 @@ class MachineRuntime:
 
         button_mask = parse_button_mask(param_map.get("MAP0065", "1111111"))
         warning_active = self._warning_active(param_map)
+        pause_active, pause_reasons = self._pause_state(param_map)
         critical_active, critical_reasons = self._critical_state(io_map, param_map)
+        format_plan = build_format_plan(param_map)
 
         requested_command = _safe_int(param_map.get("MAS0002", info.get("requested_command", 0)), info.get("requested_command", 0))
         button_request = self._button_requested_command(
@@ -87,6 +93,8 @@ class MachineRuntime:
             self.logs.log("machine", "info", f"button requested command -> {requested_command}")
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])
+        if pause_active and int(snapshot["current_state"] or 0) in (4, 5, 6):
+            requested_state = 7
 
         purge_active = critical_active or _truthy(param_map.get("MAS0028", "0"))
         if purge_active != _truthy(param_map.get("MAS0028", "0")):
@@ -129,10 +137,12 @@ class MachineRuntime:
                 "allowed_actions": actions,
                 "button_inputs": self._button_inputs(io_map),
                 "critical_reasons": critical_reasons,
+                "pause_reasons": pause_reasons,
                 "warning_keys": self._active_param_keys("MAW"),
                 "error_keys": self._active_param_keys("MAE"),
                 "status_lamp": lamp_outputs_for_state(new_state, warning_active=warning_active, ts=ts),
                 "button_leds": button_led_plan(new_state, button_mask, ts=ts),
+                "format_plan": format_plan,
             }
         )
         self._write_state(
@@ -452,6 +462,10 @@ class MachineRuntime:
                 return True
         return False
 
+    def _pause_state(self, param_map: dict[str, str]) -> tuple[bool, list[str]]:
+        reasons = [pkey for pkey in sorted(PAUSE_ERROR_KEYS) if _truthy(param_map.get(pkey))]
+        return bool(reasons), reasons
+
     def _critical_state(self, io_map: dict[tuple[str, str], str], param_map: dict[str, str]) -> tuple[bool, list[str]]:
         reasons: list[str] = []
         if not self._bool_io(io_map, "esp32_plc58", "I0.7", default=True):
@@ -463,6 +477,8 @@ class MachineRuntime:
         if self._bool_io(io_map, "esp32_plc58", "I0.11", default=False):
             reasons.append("bahnriss_auswurf")
         for pkey, value in param_map.items():
+            if pkey in PAUSE_ERROR_KEYS:
+                continue
             if pkey.startswith("MAE") and _truthy(value):
                 reasons.append(pkey)
         return bool(reasons), reasons

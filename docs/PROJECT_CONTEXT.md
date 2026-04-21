@@ -21,6 +21,7 @@
 - Machine/process runtime foundation:
   - `machine_runtime.py` owns the Raspi-side machine-state projection, button handling, status-light behavior and label event persistence
   - `machine_semantics.py` centralizes MAS001/MAS0002 semantics, button masks, lamp colors and `MAS0003` packing
+  - `format_semantics.py` derives the current MAP format/process plan from the master workbook defaults and runtime values
   - database additions: `machine_state`, `machine_events`, `label_register`, `label_events`
   - protected process view: `/ui/machine-setup/process`
   - protected overview API: `/api/machine/overview`
@@ -37,12 +38,17 @@
   - `eth0 / 192.168.210.20`: Microtom, VJ6530, VJ3350, Abwickler, Aufwickler
   - `eth1 / 192.168.2.100`: ESP32-PLC58 and the two Moxa E1211 modules
 - The Raspi hardware IO layer remains simulation-first by default until a released Industrial Shields library installation is available on the Raspberry runtime.
-- The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-17:
-  - new row `MAP0065`
-  - new row `MAP0066`
-  - `MAP0056..MAP0064` now carry Microtom `R/W = R` while keeping `ESP32 R/W = W`
-  - the `KI-Anweisungen:` column is now filled repo-wide with human-readable `KI:` descriptions
+- The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-21:
+  - no new or removed parameter IDs in this sync
+  - 56 existing MAP rows changed, mostly `ESP32 R/W` and `KI-Anweisungen:`
+  - `MAP0001..MAP0012`, `MAP0014..MAP0024`, `MAP0026..MAP0046`, `MAP0048..MAP0055` and `MAP0066` now reflect ESP read/mirror semantics where applicable
+  - `MAP0066` default is now `8000` (800.0 mm to first LED)
+  - operator notes that were written before `KI:` in the workbook were evaluated and folded into new `KI:` texts
   - reusable sync helper: `scripts/sync_master_workbooks.py`
+- Raspi/ESP parameter sync contract after the 2026-04-21 workbook refresh:
+  - `ESP32 R/W = R` means the ESP receives the value for use/readback but must not be the leading writer
+  - Microtom writes to such `MA*` values are stored locally on the Raspi and then mirrored to the ESP via the firmware `SYNC <key>=<value>` command
+  - `ESP32 R/W = W` remains the path for ESP-leading values such as motor setpoints/status mirrors
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
   - `/ui/machine-setup/commissioning`

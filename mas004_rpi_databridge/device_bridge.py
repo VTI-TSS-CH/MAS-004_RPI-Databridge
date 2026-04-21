@@ -369,7 +369,8 @@ class DeviceBridge:
             return False, "esp-no-access"
         mapping = self.params.get_device_map(pkey)
         esp_key = (mapping.get("esp_key") or pkey).strip()
-        line = f"{esp_key}={value}"
+        esp_access = self.params.actor_access(pkey, actor="esp32")
+        line = f"SYNC {esp_key}={value}" if esp_access == "R" else f"{esp_key}={value}"
         try:
             response = self._esp.exchange_line(line, read_timeout_s=self.cfg.http_timeout_s)
         except Exception as exc:

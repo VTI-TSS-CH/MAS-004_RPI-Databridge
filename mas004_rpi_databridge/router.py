@@ -14,7 +14,7 @@ from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 
-def _channel_for_operation(params: ParamStore, ptype: str, pid: str) -> str:
+def _channel_for_operation(params: ParamStore, ptype: str, pid: str, op: str = "") -> str:
     ptype = (ptype or "").upper()
     if ptype.startswith("TT"):  # TTP/TTE/TTW
         return "vj6530"
@@ -23,7 +23,8 @@ def _channel_for_operation(params: ParamStore, ptype: str, pid: str) -> str:
     if ptype.startswith("MA"):  # MAP/MAS/MAE/MAW
         pkey = f"{ptype}{pid}"
         meta = params.get_meta(pkey)
-        if meta and params.actor_access(pkey, actor="esp32") == "N":
+        esp_access = params.actor_access(pkey, actor="esp32") if meta else "N"
+        if meta and esp_access in {"N", "R"}:
             return "raspi"
         return "esp-plc"
     return "raspi"
@@ -85,7 +86,7 @@ class Router:
 
         ptype, pid, op, value = parsed
         pkey = f"{ptype}{pid}"
-        dev = _channel_for_operation(self.params, ptype, pid)
+        dev = _channel_for_operation(self.params, ptype, pid, op=op)
 
         self.logs.log("raspi", "in", f"microtom: {line}")
         self.logs.log(dev, "in", f"raspi-> {dev}: {line}")

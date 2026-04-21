@@ -109,6 +109,25 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertEqual("ACK_MAS0026=21", resp)
             self.assertEqual([("MAS0026", "write", "21", "microtom")], calls)
 
+    def test_ma_param_with_esp_read_access_is_stored_locally_and_mirrored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAP0001", "MAP", "0001", "500", "W", "R", "uint16")
+
+            def _unexpected_live(*_args, **_kwargs):
+                raise AssertionError("esp live write path must not be used for esp_rw=R")
+
+            mirrored = []
+            router.device_bridge._esp_live = _unexpected_live
+            router.device_bridge.mirror_to_esp = lambda pkey, value: mirrored.append((pkey, value)) or (True, "ACK_MAP0001=550")
+
+            resp = router.handle_microtom_line("MAP0001=550", correlation="corr-4")
+
+            self.assertEqual("ACK_MAP0001=550", resp)
+            self.assertEqual("550", router.params.get_effective_value("MAP0001"))
+            self.assertEqual([("MAP0001", "550")], mirrored)
+
     def test_vj6530_write_triggers_forced_follow_up_sync(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -158,6 +177,24 @@ class RouterEspAccessTests(unittest.TestCase):
 
             self.assertEqual("ACK_TTS0001=3", resp)
             self.assertIn(("poll_once", True), calls)
+
+    def test_mirror_to_esp_uses_sync_for_esp_read_only_values(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAP0001", "MAP", "0001", "500", "W", "R", "uint16")
+            lines = []
+
+            def _fake_exchange(line, read_timeout_s=0):
+                lines.append((line, read_timeout_s))
+                return "ACK_MAP0001=550"
+
+            router.device_bridge._esp.exchange_line = _fake_exchange
+
+            ok, detail = router.device_bridge.mirror_to_esp("MAP0001", "550")
+
+            self.assertTrue(ok, detail)
+            self.assertEqual([("SYNC MAP0001=550", router.cfg.http_timeout_s)], lines)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,15 @@
     - button LED behavior
     - status lamp color/blink behavior
     - `MAS0003` bit packing
+- `format_semantics.py`
+  - derives the currently active format/process plan from `MAP` values:
+    - `MAP0001` -> both label guide target positions
+    - `MAP0002` + `MAP0040` -> expected label length window
+    - `MAP0003` + `MAP0005` -> inverted table X correction
+    - `MAP0004` + `MAP0006` + `MAP0018/0019` -> print stop distance
+    - `MAP0007` + `MAP0028` -> table Z production target
+    - `MAP0008/0009` + `MAP0029/0030` -> sensor axis targets
+    - `MAP0066` -> LED stripe first-LED offset
 - `webui.py`
   - protected Machine-Setup process page:
     - `/ui/machine-setup/process`
@@ -49,15 +58,22 @@
   - packs the value into `MAS0003`
   - pushes `MAS0003` to Microtom
   - appends the event to `label_production_<job>.txt`
+- Label length deviations:
+  - ESP sets `MAE0025` when the label is too short
+  - ESP sets `MAE0026` when the label is too long
+  - Raspi treats those two errors as production-pause reasons, not as Purge/Not-Stop reasons
 
 ## Master Workbook Alignment
 - The repo now contains a reusable sync step:
   - `scripts/sync_master_workbooks.py`
 - Current workbook-side machine additions:
+  - the 2026-04-21 workbook sync refreshed 56 MAP rows
   - `MAP0066`
     - distance from label-detection zero point to the first LED of the 1 m label-status stripe
+    - default is now `8000` = `800.0 mm`
   - KI column refresh
-    - the `KI-Anweisungen:` column is now filled for the full workbook with human-readable `KI:` texts
+    - user-written notes before `KI:` are treated as input guidance
+    - the final cell text is regenerated as one human-readable `KI:` interpretation
 
 ## Current Limitation / Honest Status
 - This is intentionally a Raspi-side orchestration foundation, not the final hard realtime machine implementation.

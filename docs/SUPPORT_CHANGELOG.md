@@ -1,5 +1,21 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-21 (Master Parameter Workbook Refresh Offline)
+- Refreshed the external master workbook and repo copy from:
+  - `..\Parameterliste SAR41-MAS-004.xlsx`
+  - `master_data/Parameterliste SAR41-MAS-004.xlsx`
+- No parameter IDs were added or removed in this sync.
+- Applied 56 MAP-row changes, mostly around `ESP32 R/W` and `KI-Anweisungen:`.
+- Evaluated the operator notes that were written before `KI:` in the workbook and regenerated 62 KI cells as clean `KI:` interpretations.
+- Updated `MAP0066` to default `8000` and `ESP32 R/W = R`.
+- Added `format_semantics.py` to derive a deterministic Raspi-side format/process plan from the current MAP values.
+- Updated the `MA*` routing rule for `ESP32 R/W = R`:
+  - Microtom writes are accepted and stored on the Raspi
+  - the value is mirrored to ESP with the new firmware-side `SYNC <key>=<value>` command
+  - normal ESP write routing remains reserved for `ESP32 R/W = W` / `R/W`
+- Label length deviations `MAE0025` and `MAE0026` now pause production on the Raspi instead of being classified as Purge/Not-Stop reasons.
+- LIVE and TEST were not contacted; this is an offline local/Git preparation.
+
 ## 2026-04-18 (Commissioning Assistant Refinement + LIVE Peer Clarification)
 - Refined the protected commissioning assistant so it follows the real MAS-004 hardware bring-up order instead of only broad buckets.
 - Added explicit MAS-004-focused commissioning steps for:

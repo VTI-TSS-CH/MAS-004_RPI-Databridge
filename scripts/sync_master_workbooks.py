@@ -22,7 +22,20 @@ DEFAULT_IO_REPO_COPY = RPI_REPO / "master_data" / "SAR41-MAS-004_SPS_I-Os.xlsx"
 
 
 SPECIAL_AI: dict[str, str] = {
-    "MAP0014": "KI: Ich verstehe diesen Parameter als Soll-Vorzugsgeschwindigkeit des Etikettenbandes im normalen Prozessbetrieb. Der ESP muss diesen Wert fuer die Taktbewegungen und fuer die dynamische Nachregelung des Etikettenantriebs verwenden; auf dem Raspi ist er vor allem fuer Transparenz, Logging und Bedienung relevant.",
+    "MAP0001": "KI: Ich verstehe diesen Parameter als Etiketten- bzw. Traegerbandbreite in 1/10 mm. Der Wert definiert zugleich die Sollposition der beiden Etikettenanschlaege: der rechte Nullpunkt liegt von oben gesehen an der rechten Bandkante, daher entspricht 20.0 mm dem Sollwert 200 und 55.0 mm dem Sollwert 550 fuer Einlauf- und Auslaufanschlag.",
+    "MAP0002": "KI: Ich verstehe diesen Parameter als Soll-Etikettenlaenge ohne Gap in 1/10 mm. Der ESP muss die real gemessene Etikettenlaenge mit MAP0040 vergleichen; bei zu kurzer Laenge wird MAE0025 gesetzt, bei zu langer Laenge MAE0026. Der Raspi behandelt diese beiden Fehler als Produktionspause statt als Purge/Not-Stop.",
+    "MAP0003": "KI: Ich verstehe diesen Parameter als Druckposition in X-/Querrichtung auf dem Etikett. Fuer die Portalachse X gilt eine Umkehrlogik: ein positiver Druckpositionswert verschiebt den Tisch in negative X-Richtung, ein negativer Wert in positive X-Richtung. Die zusaetzliche Korrektur MAP0005 wird vorher auf den Druckpositionswert addiert.",
+    "MAP0004": "KI: Ich verstehe diesen Parameter als Druckposition in Y-/Laufrichtung auf dem Etikett. Der konkrete Stopppunkt ergibt sich aus MAP0018 fuer Laser oder MAP0019 fuer TTO plus MAP0004 und plus Korrektur MAP0006.",
+    "MAP0005": "KI: Ich verstehe diesen Parameter als zusaetzliche Korrektur auf die X-Druckposition. Er wird auf MAP0003 addiert, bevor daraus die invertierte X-Achskorrektur fuer den Tisch gebildet wird.",
+    "MAP0006": "KI: Ich verstehe diesen Parameter als zusaetzliche Korrektur auf die Y-Druckposition. Er wird auf MAP0004 addiert und beeinflusst damit den exakten Druck-Stoppweg in Laufrichtung.",
+    "MAP0007": "KI: Ich verstehe diesen Parameter als Materialdicke bzw. Produktions-Z-Position des Tisches in 1/10 mm. Zusammen mit der Nullpunktkorrektur MAP0028 ergibt er den Z-Sollwert fuer den Produktionsbetrieb.",
+    "MAP0008": "KI: Ich verstehe diesen Parameter als Querposition des Etikettenerfassungs-Sensors im Produktionsbetrieb in mm. Fuer die Motor-/Achslogik wird er in 1/10 mm umgerechnet und mit der Nullpunktkorrektur MAP0029 kombiniert.",
+    "MAP0009": "KI: Ich verstehe diesen Parameter als Querposition des Entnahme-/Kontrollsensors im Produktionsbetrieb in mm. Fuer die Motor-/Achslogik wird er in 1/10 mm umgerechnet und mit der Nullpunktkorrektur MAP0030 kombiniert.",
+    "MAP0010": "KI: Ich verstehe diesen Parameter als X-/Quer-Leseposition der Material-Kontrollkamera. Er beschreibt die formatabhaengige Kameraposition; die mechanische Achskorrektur fuer diese Kamera wird separat ueber MAP0033 bzw. die Motor-Sollposition MAP0060 beruecksichtigt.",
+    "MAP0011": "KI: Ich verstehe diesen Parameter als Y-/Laengs-Leseposition der Material-Kontrollkamera. Der Wert ist ein Prozessbezug fuer Trigger-/Auswertefenster und nicht die Motor-ID-5-Querachse selbst.",
+    "MAP0012": "KI: Ich verstehe diesen Parameter als Y-/Laengs-Leseposition der OCR-/Verifizierungs-Kamera. Die Kamera ist aktuell nicht als eigene Verstellachse modelliert; der Wert bleibt aber fuer Prozessfenster und spaetere Verifikation relevant.",
+    "MAP0013": "KI: Ich verstehe diesen Parameter als Rollenkern-Typ fuer Auf- und Abwicklung (0=76 mm, 1=100 mm). Die vorhandene Hardware kann den Kern nicht sicher direkt erkennen; eine Plausibilisierung ueber Wicklerbewegung und Rollenfuellstand ist theoretisch denkbar, aber noch nicht freigegeben. Deshalb wird der Wert vorerst nur als lesbarer Format-/Materialhinweis an den ESP gespiegelt und nicht aktiv fuer Regelentscheidungen verwendet.",
+    "MAP0014": "KI: Ich verstehe diesen Parameter als Soll-Transportgeschwindigkeit des Etikettenbands. Im kontinuierlichen Lasermodus ist er die Druck-/Bandgeschwindigkeit; in allen getakteten Modi ist er die Vorzugsgeschwindigkeit zwischen den Druckpositionen. Der ESP nutzt ihn fuer Taktbewegungen und dynamische Nachregelung, der Raspi fuer Transparenz, Logging und Bedienung.",
     "MAP0015": "KI: Ich verstehe diesen Parameter als Rueckspulgeschwindigkeit fuer den Rueckspulbetrieb und fuer Ruecksetzbewegungen nach Fehlern bzw. Entnahmekontrolle. Dieser Wert ist prozesskritisch fuer den ESP, weil die Rueckspulung damit weich und reproduzierbar laufen soll.",
     "MAP0016": "KI: Ich verstehe diesen Parameter als Auswahl zwischen TTO und Laser. Es darf immer nur eines der beiden Drucksysteme fuehrend aktiv sein; davon haengen Triggerweg, Bypasslogik und die nachfolgenden Bewertungsbits im Label-Schieberegister ab.",
     "MAP0017": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zur Material-Kontrollkamera. Diese Distanz ist ein fester Wegbezug im Label-Schieberegister, damit die Kamera fuer jedes bereits eingelesene Label an der richtigen Stelle getriggert wird.",
@@ -31,13 +44,22 @@ SPECIAL_AI: dict[str, str] = {
     "MAP0020": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zur OCR-/Verifizierungs-Kamera. Dieser Wegwert wird im Label-Schieberegister fuer den spaeteren OCR-Trigger und die Rueckmeldung von Verifizierung OK gebraucht.",
     "MAP0021": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zum Kontrollsensor am Tischende. Dort wird geprueft, ob ein gutes Label vorhanden bleiben durfte bzw. ein schlechtes Label entnommen wurde.",
     "MAP0022": "KI: Ich verstehe diesen Parameter als Rueckspuldistanz, wenn ein Label am Kontrollsensor haette entnommen sein muessen, aber noch erkannt wurde. Der ESP muss dann das Band kontrolliert zuruecksetzen, ohne bereits bearbeitete Labels im Schieberegister fachlich noch einmal neu zu behandeln.",
-    "MAP0023": "KI: Ich verstehe diesen Parameter als Vorwarnschwelle fuer den Abwickler in Prozent. Wenn MAS008 unter diesen Wert faellt, soll daraus die passende Warnung fuer Materialende entstehen.",
-    "MAP0024": "KI: Ich verstehe diesen Parameter als Vorwarnschwelle fuer den Aufwickler in Prozent. Wenn MAS009 unter diesen Wert faellt, soll daraus die passende Warnung fuer Materialende bzw. Rollenfuellstand entstehen.",
+    "MAP0023": "KI: Ich verstehe diesen Parameter als Vorwarnschwelle fuer den Abwickler in Prozent. Wenn MAS0008 unter diesen Wert faellt, soll daraus die passende Warnung fuer Materialende entstehen. Der ESP liest diesen Wert fuer die Wickler-/Prozesslogik, Microtom liest ihn als eingestellte Schwelle.",
+    "MAP0024": "KI: Ich verstehe diesen Parameter als Vorwarnschwelle fuer den Aufwickler in Prozent. Wenn MAS0009 unter diesen Wert faellt, soll daraus die passende Warnung fuer Materialende bzw. Rollenfuellstand entstehen. Der ESP liest diesen Wert fuer die Wickler-/Prozesslogik, Microtom liest ihn als eingestellte Schwelle.",
     "MAP0025": "KI: Ich verstehe diesen Parameter als harte Produktions-Pausenschwelle fuer den Abwickler. Wird der verbleibende Fuellstand unterschritten, muss die Anlage in den Pausenzustand wechseln, damit kein unkontrollierter Produktionsabbruch entsteht.",
     "MAP0035": "KI: Ich verstehe diesen Parameter als Bypass fuer das aktive Drucksystem. Wenn er gesetzt ist, darf das jeweilige Drucksystem den Prozess nicht blockieren; die Druckbewertung im Labelregister muss dann fachlich als gebypasst behandelt werden.",
     "MAP0036": "KI: Ich verstehe diesen Parameter als Bypass der Material-Kontrollkamera. Wenn der Bypass aktiv ist, darf fehlendes Kamerafeedback nicht zu einem schlechten Material-OK-Bit fuehren.",
     "MAP0037": "KI: Ich verstehe diesen Parameter als Bypass der Verifizierungs-/OCR-Kamera. Wenn der Bypass aktiv ist, darf fehlendes OCR-Feedback das Label nicht als schlecht markieren.",
     "MAP0038": "KI: Ich verstehe diesen Parameter als Bypass fuer den Etiketten-Kontrollsensor am Auslauf. Wenn der Bypass aktiv ist, darf die Anlage fehlende Entnahmekontrolle nicht als Produktionsfehler werten.",
+    "MAP0027": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Portalachse X. Die programmierte Motor-Nullposition bleibt die Grundstellung; dieser Wert verschiebt den fachlichen Nullpunkt fuer alle X-bezogenen Berechnungen.",
+    "MAP0028": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Portalachse Z. Die programmierte Motor-Nullposition bleibt die Grundstellung; dieser Wert verschiebt den fachlichen Nullpunkt fuer alle Z-bezogenen Berechnungen.",
+    "MAP0029": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Querachse fuer den Etikettenerfassungs-Sensor. Alle Sensorpositionen fuer diese Achse werden relativ zu diesem korrigierten Nullpunkt betrachtet.",
+    "MAP0030": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Querachse fuer den Entnahme-/Kontrollsensor. Alle Sensorpositionen fuer diese Achse werden relativ zu diesem korrigierten Nullpunkt betrachtet.",
+    "MAP0031": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur des Etikettenanschlags am Einlauf. Die aus MAP0001 abgeleitete Bandbreitenposition wird um diese Korrektur verschoben.",
+    "MAP0032": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur des Etikettenanschlags am Auslauf. Die aus MAP0001 abgeleitete Bandbreitenposition wird um diese Korrektur verschoben.",
+    "MAP0033": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Material-Kontrollkamera-Querachse. Die formatabhaengige Kameraposition wird relativ zu diesem korrigierten Nullpunkt betrachtet.",
+    "MAP0034": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur des Laser-Schutzblechs. Die Schutzblechachse bleibt parametrierbar, auch wenn der Laserprozess spaeter finalisiert wird.",
+    "MAP0039": "KI: Ich verstehe diesen Parameter als Freigabe fuer automatische Rueckspulung nach Produktionsstop. Wenn der Wert 1 ist, wird nach Produktionsstop und Rueckspul-Taster bis zum Ursprungspunkt zurueckgespult und erst danach die Produktion abgeschlossen; bei 0 gilt die Produktion ohne Rueckspulung als abgeschlossen.",
     "MAP0047": "KI: Ich verstehe diesen Parameter als Vorgabe, ob innen- oder aussengewickeltes Material verarbeitet wird. Daraus ergeben sich die Drehrichtungen fuer Auf- und Abwickler; der ESP soll diesen Wert lesen und fuer die Wicklerlogik umsetzen.",
     "MAP0056": "KI: Ich verstehe diesen Parameter als Sollposition der Portalachse X fuer Format bzw. Maschinenbewegung. Die eigentliche Anfahrt und Rueckmeldung erfolgt ueber den Oriental-Antrieb mit Motor-ID 1.",
     "MAP0057": "KI: Ich verstehe diesen Parameter als Sollposition der Portalachse Z fuer Format bzw. Maschinenbewegung. Die eigentliche Anfahrt und Rueckmeldung erfolgt ueber den Oriental-Antrieb mit Motor-ID 2.",
@@ -49,7 +71,7 @@ SPECIAL_AI: dict[str, str] = {
     "MAP0063": "KI: Ich verstehe diesen Parameter als Sollposition des linken bzw. Auslauf-Etikettenanschlags ueber Motor-ID 8. Dieser Wert folgt normalerweise der eingestellten Materialbreite.",
     "MAP0064": "KI: Ich verstehe diesen Parameter als Sollposition des rechten bzw. Einlauf-Etikettenanschlags ueber Motor-ID 9. Dieser Wert folgt normalerweise der eingestellten Materialbreite und sollte konsistent zu MAP0063 sein.",
     "MAP0065": "KI: Ich verstehe diesen Parameter als Bitmaske fuer die Freigabe der Maschinen-Tasten je nach Microtom-Benutzerlevel. Der Raspi nutzt diese Bitmaske, um Tastereingaben zu erlauben oder zu sperren und um die zugehoerigen Taster-LEDs nur dann zu signalisieren, wenn die Bedienhandlung fachlich und rechtebezogen erlaubt ist.",
-    "MAP0066": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zur ersten LED des 1-m-LED-Streifens. Der ESP braucht diesen Wegbezug, um den Labelstatus entlang des Streifens korrekt anzuzeigen; der exakte Default muss spaeter an der realen Maschine verifiziert werden.",
+    "MAP0066": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zur ersten LED des 1-m-LED-Streifens. Der aktuelle Default 8000 entspricht 800.0 mm. Der ESP braucht diesen Wegbezug, um den Labelstatus entlang des Streifens korrekt anzuzeigen; der exakte Wert muss bei der realen Inbetriebnahme mechanisch verifiziert werden.",
     "MAS0001": "KI: Ich verstehe diesen Parameter als fuehrenden Anlagenstatus, den der Raspi gegenueber Microtom meldet. Die eigentliche Statuslogik entsteht aus Bedienbefehlen, Sicherheitsbedingungen und Maschinenfortschritt; der ESP liefert dafuer harte Prozessereignisse zu.",
     "MAS0002": "KI: Ich verstehe diesen Parameter nicht als Status, sondern als Befehlsbyte von Microtom an die Anlage. Der Raspi muss diesen Befehlswert in den passenden internen Zielzustand uebersetzen, zum Beispiel Start, Stop, Einrichten, Synchronisieren, Leerfahren, Rueckspulen oder Pause.",
     "MAS0003": "KI: Ich verstehe diesen Parameter als verdichtete Produktionsrueckmeldung pro fertig behandeltem Label. Der ESP baut die Einzelinformationen im Schieberegister auf; der Raspi packt sie in das definierte Bitfeld und meldet den Wert an Microtom sowie in das Label-Produktionslog.",
@@ -72,6 +94,17 @@ def row_key(ws, row_idx: int) -> str:
 
 def normalize_text(value: Any) -> str:
     return " ".join(str(value or "").replace("\r", "\n").replace("\n", " ").split()).strip()
+
+
+def split_ai_cell(value: Any) -> tuple[str, str]:
+    text = normalize_text(value)
+    if not text:
+        return "", ""
+    marker = "KI:"
+    idx = text.find(marker)
+    if idx < 0:
+        return text, ""
+    return text[:idx].strip(), text[idx + len(marker):].strip()
 
 
 def copy_row_style(ws, src_row: int, dst_row: int, max_col: int):
@@ -102,7 +135,7 @@ def access_text(rw: str, esp_rw: str) -> str:
         "N": "Dieser Wert ist fuer Microtom aktuell nicht freigegeben.",
     }.get(rw, f"Microtom-Rechte laut Tabelle: {rw or 'unbekannt'}.")
     esp_text = {
-        "R": "Der ESP soll ihn nur lesen bzw. intern verwenden.",
+        "R": "Der ESP soll ihn aus der Raspi-/Microtom-Seite lesen bzw. gespiegelt bekommen, aber nicht fuehrend schreiben.",
         "W": "Der ESP darf ihn im Prozess aktiv verwenden und - falls fachlich vorgesehen - auch setzen oder rueckmelden.",
         "R/W": "Der ESP darf ihn lesen und schreiben.",
         "N": "Der ESP soll ihn gemaess Masterliste nicht verwenden.",
@@ -121,6 +154,7 @@ def generic_ai_for_row(values: dict[str, str]) -> str:
     fmt = values["format_relevant"]
     mapping = values["mapping"]
     existing = values["existing_ai"]
+    operator_note = values.get("operator_note", "")
 
     if pkey in SPECIAL_AI:
         base = SPECIAL_AI[pkey]
@@ -154,6 +188,8 @@ def generic_ai_for_row(values: dict[str, str]) -> str:
 
     extras: list[str] = []
     base_plain = base.removeprefix("KI:").strip()
+    if operator_note:
+        extras.append(f"Aus der ergaenzten Fachbeschreibung wurde ausgewertet: {operator_note}.")
     extras.append(access_text(rw, esp_rw))
     if unit:
         extras.append(f"Einheit bzw. Wertebereich laut Tabelle: {unit}.")
@@ -198,10 +234,10 @@ def ensure_map0066(ws):
         "0066",
         "0",
         "30000",
-        "0",
+        "8000",
         "1/10mm",
         "W",
-        "W",
+        "R",
         "uint16",
         "MAP0066 Distanz Etikettenerfassung - erste LED LED-Streifen",
         None,
@@ -227,6 +263,7 @@ def sync_parameter_workbook(path: Path):
         pid = str(ws.cell(row_idx, 2).value or "").strip()
         if not ptype or not pid:
             continue
+        operator_note, existing_ai = split_ai_cell(ws.cell(row_idx, 17).value)
         values = {
             "pkey": f"{ptype}{pid}",
             "ptype": ptype,
@@ -237,7 +274,8 @@ def sync_parameter_workbook(path: Path):
             "rw": normalize_text(ws.cell(row_idx, 7).value).upper(),
             "esp_rw": normalize_text(ws.cell(row_idx, 8).value).upper(),
             "unit": normalize_text(ws.cell(row_idx, 6).value),
-            "existing_ai": normalize_text(ws.cell(row_idx, 17).value).removeprefix("KI:").strip() if normalize_text(ws.cell(row_idx, 17).value).startswith("KI:") else normalize_text(ws.cell(row_idx, 17).value),
+            "existing_ai": existing_ai,
+            "operator_note": operator_note,
         }
         ai_text = generic_ai_for_row(values)
         if ws.cell(row_idx, 17).value != ai_text:

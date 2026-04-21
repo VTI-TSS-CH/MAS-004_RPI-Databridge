@@ -32,8 +32,13 @@
   - expected side effects:
     - repo copy `master_data/Parameterliste SAR41-MAS-004.xlsx` is refreshed
     - repo copy `master_data/SAR41-MAS-004_SPS_I-Os.xlsx` is refreshed
-    - `MAP0066` exists
+    - `MAP0066` exists and currently defaults to `8000`
+    - user notes before `KI:` are folded into regenerated `KI:` texts
     - the full `KI-Anweisungen:` column is rewritten with `KI:` texts
+- After workbook rights or ESP-relevant MAP defaults change while TEST is offline:
+  - create a local workbook-derived SQLite snapshot from the RPI repo
+  - regenerate ESP seeds from that SQLite snapshot in `MAS-004_ESP32-PLC-Firmware`
+  - run the PlatformIO build locally before committing the firmware repo
 - Refresh hardware IO mappings from the IO workbook:
   - import through the protected Machine-Setup I/O page or the IO import endpoint
   - source workbook: `master_data/SAR41-MAS-004_SPS_I-Os.xlsx`
@@ -257,6 +262,11 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - Moxa simulation should stay enabled by default on live/test until the networked hardware is intentionally validated
   - Raspberry hardware IO remains simulation-first until an approved Industrial Shields runtime library installation is available
   - if the IO workbook changes, re-import it so the page and the backend stay aligned with the sheet
+- For parameter sync to the ESP:
+  - `ESP32 R/W = N` means no ESP transfer
+  - `ESP32 R/W = R` means Raspi/Microtom is leading and the ESP receives updates via `SYNC <key>=<value>`
+  - `ESP32 R/W = W` or `R/W` remains the ESP-leading/direct write path
+  - if a Microtom write to a MAP value starts returning `NAK_ReadOnly` from the ESP, verify that the Raspi and firmware both include the 2026-04-21 `SYNC` contract
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
   - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`
