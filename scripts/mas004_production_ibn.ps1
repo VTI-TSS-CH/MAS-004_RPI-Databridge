@@ -55,7 +55,8 @@ function Show-Plan {
     Write-Host "5. Change laptop NIC to 10.141.94.212/24, gateway 10.141.94.1, then check https://10.141.94.213:8080"
     Write-Host "6. Run: powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase StatusAfterCutover -Execute"
     Write-Host "7. Deploy ESP via USB on Raspi: -Phase DeployEspFromRaspi -Execute"
-    Write-Host "8. Deploy Abwickler and Aufwickler one after another via USB on laptop: -Phase DeployWicklerUsb"
+    Write-Host "8. Deploy Abwickler and Aufwickler one after another via USB on laptop only: -Phase DeployWicklerUsb"
+    Write-Host "   Note: Smart Wickler modules stay autonomous and are not flashed through the Raspi USB gateway."
 }
 
 function Invoke-Precheck {
@@ -165,21 +166,39 @@ function Invoke-DeployEsp {
     }
 }
 
+function Resolve-PlatformIoCommand {
+    $cmd = Get-Command pio -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $fallback = Join-Path $env:USERPROFILE ".platformio\penv\Scripts\platformio.exe"
+    if (Test-Path $fallback) {
+        return $fallback
+    }
+
+    throw "PlatformIO not found. Install PlatformIO or add pio/platformio.exe to PATH."
+}
+
 function Invoke-DeployWickler {
-    Write-Section "Smart Wickler USB deploy guidance"
+    Write-Section "Smart Wickler autonomous USB deploy guidance"
     $wicklerRepo = Join-Path $gitRoot "MAS-004_SmartWickler"
+    Write-Host "The Smart Wicklers stay autonomous; do not connect them to the Raspi for flashing."
     Write-Host "Connect exactly one Smart Wickler ESP32-S3 to this laptop by USB."
     Write-Host "Open/keep the repo: $wicklerRepo"
-    Write-Host "For Abwickler first, run:"
+    Write-Host "Recommended order:"
+    Write-Host "  1. Connect Abwickler only, run this phase with -Execute, then unplug it."
+    Write-Host "  2. Connect Aufwickler only, run this phase with -Execute again."
+    Write-Host "Equivalent manual command:"
     Write-Host "  pio run -t upload"
-    Write-Host "Then unplug Abwickler, connect Aufwickler, and run the same command again."
     Write-Host "After both flashes, set/check their web/network config:"
     Write-Host "  Abwickler: 10.141.94.216, port 3011"
     Write-Host "  Aufwickler: 10.141.94.217, port 3012"
     if ($Execute) {
         Push-Location $wicklerRepo
         try {
-            pio run -t upload
+            $platformIo = Resolve-PlatformIoCommand
+            & $platformIo run -t upload
         } finally {
             Pop-Location
         }

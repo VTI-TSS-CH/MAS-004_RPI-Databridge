@@ -47,6 +47,7 @@
   - verify the new path: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase StatusAfterCutover -Execute`
   - deploy the ESP via USB on the Raspi: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployEspFromRaspi -Execute`
   - deploy Abwickler and Aufwickler one after another via USB on the laptop: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployWicklerUsb`
+  - Smart Wicklers stay autonomous; they are intentionally not connected to the Raspi USB gateway for flashing
 - Important cutover note:
   - `ApplyRaspiNetwork` intentionally changes the OS network and can drop the current SSH session.
   - Do not run it until the laptop can be moved to `10.141.94.212/24`.

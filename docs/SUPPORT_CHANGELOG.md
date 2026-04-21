@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-21 (Smart Wickler USB Deploy Decision)
+- Confirmed the production IBN decision that the two Smart Wicklers remain autonomous.
+- The Raspi remains the USB flash gateway only for the ESP32-PLC58.
+- Abwickler and Aufwickler are flashed manually and sequentially on the engineering laptop via `DeployWicklerUsb`.
+- Updated the guided production IBN script so the Wickler phase explicitly refuses the Raspi-gateway interpretation and uses the local PlatformIO executable fallback when `pio` is not on PATH.
+
 ## 2026-04-21 (Production Stand 10.141.94.x Offline Preparation)
 - Prepared the former TEST Raspberry as the next production/commissioning stand without contacting the target.
 - Added a `production` target profile for the post-cutover Raspi address `pi@10.141.94.213`; the existing `test` target remains the bootstrap path `pi@10.27.67.68`.

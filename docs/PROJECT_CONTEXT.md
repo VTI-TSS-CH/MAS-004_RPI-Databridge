@@ -281,7 +281,7 @@
   - `MAS-004_VJ3350-Ultimate-Bridge`: HEAD `0e5b7aa`, working tree clean
   - `MAS-004_VJ6530-ZBC-Bridge`: HEAD `09f9397`, working tree clean
   - `MAS-004_ZBC-Library`: HEAD `c47563d`, working tree clean
-  - `MAS-004_SmartWickler`: local scaffold present, no commits yet
+  - `MAS-004_SmartWickler`: local Git baseline exists; Wickler flash remains manual via laptop USB
   - local master workbook copy for current parameter work: `master_data/Parameterliste SAR41-MAS-004.xlsx`
 
 ## Multi-Repo Dependency Map
