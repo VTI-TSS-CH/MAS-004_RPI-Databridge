@@ -2,9 +2,10 @@
   "profile": "production-10.141.94",
   "description": "Former TEST machine prepared as the next production/commissioning stand.",
   "bootstrap": {
-    "raspi_current_ip": "10.27.67.68",
-    "raspi_current_ssh": "pi@10.27.67.68",
-    "raspi_current_web": "https://10.27.67.68:8080"
+    "raspi_current_ip": "10.141.94.213",
+    "raspi_current_ssh": "pi@10.141.94.213",
+    "raspi_current_web": "https://10.141.94.213:8080",
+    "note": "The former temporary address is retired and must no longer be used."
   },
   "eth0": {
     "role": "Main machine network for Raspi, Microtom test laptop, printers and smart winders",

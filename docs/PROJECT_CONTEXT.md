@@ -37,9 +37,9 @@
 - New network split for the merged plant basis:
   - `eth0 / 192.168.210.20`: Microtom, VJ6530, VJ3350, Abwickler, Aufwickler
   - `eth1 / 192.168.2.100`: ESP32-PLC58 and the two Moxa E1211 modules
-- The former local TEST machine is now prepared as the next production/commissioning stand:
-  - bootstrap/current Raspi access before cutover: `pi@10.27.67.68`, UI/API `https://10.27.67.68:8080`
-  - final `eth0`: Raspi `10.141.94.213/24`, gateway `10.141.94.1`
+- The former local TEST machine is now the production/commissioning stand:
+  - current/final Raspi access: `pi@10.141.94.213`, UI/API `https://10.141.94.213:8080`
+  - `eth0`: Raspi `10.141.94.213/24`, gateway `10.141.94.1`
   - engineering laptop / Microtom testtool: `10.141.94.212`
   - TTO VJ6530: `10.141.94.214:3002`
   - Laser VJ3350: `10.141.94.215:20000`
@@ -173,13 +173,10 @@
   - `Aufwickler`: LIVE/old basis `192.168.210.24:3012`, production commissioning basis `10.141.94.217:3012`
 
 ## Deployment Topology
-- TEST/bootstrap Raspberry (former TEST, next production before IP cutover):
-  - SSH: `pi@10.27.67.68`
-  - UI/API: `https://10.27.67.68:8080`
-- Production Raspberry after IP cutover:
+- Production Raspberry (former TEST, after IP cutover):
   - SSH: `pi@10.141.94.213`
   - UI/API: `https://10.141.94.213:8080`
-  - Policy: use after the OS network cutover has completed
+  - Policy: this is now the only valid local production/commissioning Raspi address
 - LIVE Raspberry:
   - SSH: `pi@192.168.210.20`
   - Preferred SSH alias: `mas004-rpi-live`
@@ -190,10 +187,10 @@
   - `MAS004_TEST_WEB`, `MAS004_PRODUCTION_WEB`, `MAS004_LIVE_WEB`
 - Production commissioning helper phases:
   - `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase Plan`
-  - `... -Phase DeployRaspiBootstrap -Execute` while reachable at `10.27.67.68`
+  - `... -Phase DeployRaspiBootstrap -Execute` against `pi@10.141.94.213`
   - `... -Phase ApplyRaspiRuntimeConfig -Execute` to stage `10.141.94.x` endpoints in Databridge config
-  - `... -Phase ApplyRaspiNetwork -Execute` to switch the OS network to `10.141.94.213/24`
-  - after laptop NIC change to `10.141.94.212/24`: `... -Phase StatusAfterCutover -Execute`
+  - `... -Phase ApplyRaspiNetwork -Execute` to refresh the OS network as `10.141.94.213/24`
+  - with laptop NIC on `10.141.94.212/24`: `... -Phase StatusAfterCutover -Execute`
 
 ## Current LIVE Runtime Snapshot (2026-03-25)
 - Captured from `/etc/mas004_rpi_databridge/config.json` on the Microtom LIVE Raspberry.

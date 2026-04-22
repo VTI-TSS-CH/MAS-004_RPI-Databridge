@@ -2,7 +2,7 @@ param(
     [ValidateSet("Plan", "Precheck", "DeployRaspiBootstrap", "ApplyRaspiRuntimeConfig", "ApplyRaspiNetwork", "StatusAfterCutover", "DeployEspFromRaspi", "DeployWicklerUsb")]
     [string]$Phase = "Plan",
     [switch]$Execute,
-    [string]$BootstrapSsh = "pi@10.27.67.68",
+    [string]$BootstrapSsh = "pi@10.141.94.213",
     [string]$ProductionSsh = "pi@10.141.94.213",
     [string]$ProductionHost = "10.141.94.213",
     [string]$ConfigPath = "/etc/mas004_rpi_databridge/config.json"
@@ -52,11 +52,11 @@ function Show-Plan {
     Write-Host ("ESP/Moxa net:  Raspi {0}, ESP {1}, Moxa {2}/{3}" -f $topology.eth1.raspi_ip, $topology.eth1.devices.esp32_plc58.host, $topology.eth1.devices.moxa1_e1211.host, $topology.eth1.devices.moxa2_e1211.host)
 
     Write-Section "Recommended phase order for tomorrow"
-    Write-Host "1. Connect laptop to the old Raspi address and verify SSH: $BootstrapSsh"
+    Write-Host "1. Connect laptop to the production Raspi network and verify SSH: $BootstrapSsh"
     Write-Host "2. Run: powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployRaspiBootstrap -Execute"
     Write-Host "3. Run: powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase ApplyRaspiRuntimeConfig -Execute"
     Write-Host "4. Run: powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase ApplyRaspiNetwork -Execute"
-    Write-Host "5. Change laptop NIC to 10.141.94.212/24, gateway 10.141.94.1, then check https://10.141.94.213:8080"
+    Write-Host "5. Keep laptop NIC on 10.141.94.212/24, gateway 10.141.94.1, then check https://10.141.94.213:8080"
     Write-Host "6. Run: powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase StatusAfterCutover -Execute"
     Write-Host "7. Deploy ESP via USB on Raspi: -Phase DeployEspFromRaspi -Execute"
     Write-Host "8. Deploy Abwickler and Aufwickler one after another via USB on laptop only: -Phase DeployWicklerUsb"
@@ -87,7 +87,7 @@ function Invoke-Precheck {
 }
 
 function Invoke-DeployRaspiBootstrap {
-    Invoke-Planned "Deploy Raspi code while still reachable at $BootstrapSsh" {
+    Invoke-Planned "Deploy Raspi code on the production Raspi at $BootstrapSsh" {
         & (Join-Path $scriptRoot "mas004_multirepo_sync.ps1") -Target test -SshHost $BootstrapSsh -RestartServices
     }
 }
@@ -125,7 +125,7 @@ systemctl is-active mas004-rpi-databridge.service
 }
 
 function Invoke-ApplyNetwork {
-    Invoke-Planned "Apply OS network cutover on $BootstrapSsh (SSH will move to $ProductionSsh)" {
+    Invoke-Planned "Apply/refresh OS production network on $BootstrapSsh" {
         $remoteScript = @'
 set -e
 cd /opt/MAS-004_RPI-Databridge
@@ -143,7 +143,7 @@ PY
 '@
         Invoke-RemoteBash -SshTarget $BootstrapSsh -Script $remoteScript | Out-Host
         Write-Host ""
-        Write-Host "The old SSH path may now drop. Set the laptop NIC to 10.141.94.212/24 and reconnect to $ProductionSsh." -ForegroundColor Yellow
+        Write-Host "Keep the laptop NIC on 10.141.94.212/24 and reconnect to $ProductionSsh if the SSH session drops." -ForegroundColor Yellow
     }
 }
 

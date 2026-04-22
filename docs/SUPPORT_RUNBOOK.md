@@ -12,17 +12,13 @@
 6. LIVE deployment only on explicit release command:
    - `powershell -ExecutionPolicy Bypass -File scripts/mas004_multirepo_sync.ps1 -Target live -AllowLive -RestartServices`
 7. Verify runtime on Pi:
-   - `ssh pi@10.27.67.68 "systemctl status mas004-rpi-databridge.service --no-pager"` (TEST)
-   - `ssh pi@10.141.94.213 "systemctl status mas004-rpi-databridge.service --no-pager"` (production after cutover)
+   - `ssh pi@10.141.94.213 "systemctl status mas004-rpi-databridge.service --no-pager"` (production/commissioning)
    - `ssh pi@192.168.210.20 "systemctl status mas004-rpi-databridge.service --no-pager"` (LIVE)
    - `curl -k https://<raspi-ip>:8080/health`
 
 ## 1.1 Production IBN 10.141.94.x
 - This section prepares the former TEST machine as the next production/commissioning stand.
-- Current/bootstrap Raspi address before network cutover:
-  - SSH: `pi@10.27.67.68`
-  - UI/API: `https://10.27.67.68:8080`
-- Final production addresses:
+- Production commissioning addresses:
   - Raspi: `10.141.94.213/24`, gateway `10.141.94.1`
   - Laptop / Microtom testtool: `10.141.94.212`
   - TTO VJ6530: `10.141.94.214:3002`
@@ -38,8 +34,8 @@
   - `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase Plan`
 - Local precheck:
   - `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase Precheck`
-- Tomorrow's guided execution order:
-  - connect laptop to the current Raspi network and verify `ssh pi@10.27.67.68`
+- Guided execution order:
+  - connect laptop to the production Raspi network and verify `ssh pi@10.141.94.213`
   - deploy Raspi code: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase DeployRaspiBootstrap -Execute`
   - stage the production Databridge config: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase ApplyRaspiRuntimeConfig -Execute`
   - switch the OS network: `powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase ApplyRaspiNetwork -Execute`
@@ -82,19 +78,17 @@
   - expected side effect: the IO catalog, point states and workbook-backed labels are updated from the same payload
 
 ## 3. Pi Commands
-- TEST update:
-  - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
-- Production update after cutover:
+- Production update:
   - `powershell -ExecutionPolicy Bypass -File scripts/mas004_multirepo_sync.ps1 -Target production -RestartServices`
 - LIVE update (only if explicitly approved):
   - `ssh pi@192.168.210.20 "cd /opt/MAS-004_RPI-Databridge && git pull --ff-only"`
   - preferred alias on this laptop: `ssh mas004-rpi-live "cd /opt/MAS-004_RPI-Databridge && git status -sb"`
 - Reinstall package safely after pull (prevents stale `build/` artifacts):
-  - `ssh pi@10.27.67.68 "cd /opt/MAS-004_RPI-Databridge && rm -rf build && ./.venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall ."`
+  - `ssh pi@10.141.94.213 "cd /opt/MAS-004_RPI-Databridge && rm -rf build && ./.venv/bin/python -m pip install --no-deps --no-build-isolation --no-cache-dir --force-reinstall ."`
 - Restart:
-  - `ssh pi@10.27.67.68 "sudo systemctl restart mas004-rpi-databridge.service"`
+  - `ssh pi@10.141.94.213 "sudo systemctl restart mas004-rpi-databridge.service"`
 - Logs:
-  - `ssh pi@10.27.67.68 "sudo journalctl -u mas004-rpi-databridge.service -n 120 --no-pager"`
+  - `ssh pi@10.141.94.213 "sudo journalctl -u mas004-rpi-databridge.service -n 120 --no-pager"`
 
 ## 3.1 LIVE SSH Access Notes
 - Preferred access method on this laptop:

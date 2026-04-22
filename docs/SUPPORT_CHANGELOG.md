@@ -1,5 +1,13 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-22 (Production IBN Cutover)
+- Retired the temporary former-TEST Raspi address from active deployment defaults and current docs.
+- Active local production/commissioning defaults now use:
+  - Raspi/UI/API: `10.141.94.213`
+  - engineering laptop / Microtom simulator: `10.141.94.212`
+- Verified Microtom simulator HTTPS certificate and listener on `https://10.141.94.212:9090`.
+- Corrected the Raspi system clock manually during IBN because the cutover network no longer reached the old NTP path.
+
 ## 2026-04-21 (Smart Wickler USB Deploy Decision)
 - Confirmed the production IBN decision that the two Smart Wicklers remain autonomous.
 - The Raspi remains the USB flash gateway only for the ESP32-PLC58.
