@@ -19,14 +19,17 @@ class HttpClient:
             pool=self.timeout_s,
         )
 
+        verify = False if not self.verify_tls else True
+
         # Optional: an eth0 IP binden (source address)
         self._transport = None
         if self.source_ip:
             # httpx/httpcore expects the local bind address as a string on the
             # Raspi runtime; passing a tuple fails during the real send path.
-            self._transport = httpx.HTTPTransport(local_address=self.source_ip)
+            # When a custom transport is used, TLS verification must be set on
+            # the transport itself, otherwise httpx defaults back to verify=True.
+            self._transport = httpx.HTTPTransport(local_address=self.source_ip, verify=verify)
 
-        verify = False if not self.verify_tls else True
         self._client = httpx.Client(timeout=self._timeout, verify=verify, transport=self._transport)
 
     def request(self, method: str, url: str, headers: Dict[str, str], body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

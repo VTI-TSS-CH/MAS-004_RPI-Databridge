@@ -11,7 +11,7 @@ class HttpClientTests(unittest.TestCase):
         ):
             client = HttpClient(timeout_s=2.0, source_ip="10.141.94.213", verify_tls=False)
 
-        transport.assert_called_once_with(local_address="10.141.94.213")
+        transport.assert_called_once_with(local_address="10.141.94.213", verify=False)
         client.close()
 
 
