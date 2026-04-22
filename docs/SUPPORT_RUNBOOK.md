@@ -48,6 +48,10 @@
   - `ApplyRaspiNetwork` intentionally changes the OS network and can drop the current SSH session.
   - Do not run it until the laptop can be moved to `10.141.94.212/24`.
   - The commissioning config uses `peer_base_url = https://10.141.94.212:9090` while the laptop Microtom simulator/testtool is the active peer; replace this with the final Microtom endpoint before handover if Microtom uses another host.
+- ESP ownership note:
+  - The RPI-Databridge is the only service that should actively use `192.168.2.101:3010` on the production/commissioning Raspi.
+  - Keep the legacy standalone `mas004-esp32-plc-bridge.service` disabled unless the architecture is deliberately changed back; otherwise it can compete for the ESP single-client W5500 command socket.
+  - Check with: `ssh pi@10.141.94.213 "systemctl is-active mas004-esp32-plc-bridge.service; systemctl is-enabled mas004-esp32-plc-bridge.service"`.
 
 ## 2. Local Commands
 - Install env:
