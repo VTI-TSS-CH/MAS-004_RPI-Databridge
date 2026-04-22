@@ -35,6 +35,10 @@ function Invoke-Planned([string]$Title, [scriptblock]$Action) {
     & $Action
 }
 
+function Invoke-RemoteBash([string]$SshTarget, [string]$Script) {
+    ($Script -replace "`r`n", "`n" -replace "`r", "`n") | ssh $SshTarget "bash -s"
+}
+
 function Show-Plan {
     $topology = Read-JsonFile $topologyPath
     Write-Section "Production IBN profile"
@@ -116,7 +120,7 @@ sudo systemctl restart mas004-rpi-databridge.service
 systemctl is-active mas004-rpi-databridge.service
 '@
         $remoteScript = $remoteScript.Replace("__CONFIG_PATH__", $ConfigPath)
-        ssh $BootstrapSsh $remoteScript | Out-Host
+        Invoke-RemoteBash -SshTarget $BootstrapSsh -Script $remoteScript | Out-Host
     }
 }
 
@@ -137,7 +141,7 @@ print("Keeping eth1 192.168.2.100/24 without gateway")
 print(apply_static("eth1", IfaceCfg(ip="192.168.2.100", prefix=24, gw="", dns=[])))
 PY
 '@
-        ssh $BootstrapSsh $remoteScript | Out-Host
+        Invoke-RemoteBash -SshTarget $BootstrapSsh -Script $remoteScript | Out-Host
         Write-Host ""
         Write-Host "The old SSH path may now drop. Set the laptop NIC to 10.141.94.212/24 and reconnect to $ProductionSsh." -ForegroundColor Yellow
     }
