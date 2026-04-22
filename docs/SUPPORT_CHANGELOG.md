@@ -9,6 +9,10 @@
 - Fixed the outbound HTTP client source-IP bind for the Raspi runtime: `httpx.HTTPTransport(local_address=...)` now receives the source IP string instead of a `(host, port)` tuple, and custom transports receive the configured TLS verification flag directly. This resolves the source-bind `TypeError` and keeps self-signed Microtom simulator callbacks working when `tls_verify=false`.
 - Corrected the Raspi system clock manually during IBN because the cutover network no longer reached the old NTP path.
 - Disabled the legacy standalone `mas004-esp32-plc-bridge.service` on the production/commissioning Raspi. The RPI-Databridge is now the sole live owner of the ESP endpoint `192.168.2.101:3010`; keeping both services active can occupy the ESP single-client command socket and disturb direct smoke tests.
+- Reissued the production/commissioning Raspi WebUI certificate for `https://10.141.94.213:8080`:
+  - the previously active certificate still used `CN/SAN=10.27.67.68`
+  - the new self-signed certificate has SAN `IP:10.141.94.213` and is installed in the Windows CurrentUser Root store on the engineering laptop
+  - strict Windows/Schannel smoke test `curl https://10.141.94.213:8080/health` returns `{"ok":true}`
 
 ## 2026-04-21 (Smart Wickler USB Deploy Decision)
 - Confirmed the production IBN decision that the two Smart Wicklers remain autonomous.

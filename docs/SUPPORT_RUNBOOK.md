@@ -52,6 +52,10 @@
   - The RPI-Databridge is the only service that should actively use `192.168.2.101:3010` on the production/commissioning Raspi.
   - Keep the legacy standalone `mas004-esp32-plc-bridge.service` disabled unless the architecture is deliberately changed back; otherwise it can compete for the ESP single-client W5500 command socket.
   - Check with: `ssh pi@10.141.94.213 "systemctl is-active mas004-esp32-plc-bridge.service; systemctl is-enabled mas004-esp32-plc-bridge.service"`.
+- Browser certificate note:
+  - The WebUI certificate on the production/commissioning Raspi must contain SAN `IP:10.141.94.213`.
+  - The engineering laptop trusts the current self-signed Raspi certificate in `Cert:\CurrentUser\Root`.
+  - Verify without bypass: `curl.exe https://10.141.94.213:8080/health`.
 
 ## 2. Local Commands
 - Install env:
