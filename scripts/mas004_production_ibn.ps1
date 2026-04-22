@@ -5,7 +5,9 @@ param(
     [string]$BootstrapSsh = "pi@10.141.94.213",
     [string]$ProductionSsh = "pi@10.141.94.213",
     [string]$ProductionHost = "10.141.94.213",
-    [string]$ConfigPath = "/etc/mas004_rpi_databridge/config.json"
+    [string]$ConfigPath = "/etc/mas004_rpi_databridge/config.json",
+    [ValidateSet("abwickler", "aufwickler")]
+    [string]$WicklerRole = "abwickler"
 )
 
 $ErrorActionPreference = "Stop"
@@ -191,10 +193,10 @@ function Invoke-DeployWickler {
     Write-Host "Connect exactly one Smart Wickler ESP32-S3 to this laptop by USB."
     Write-Host "Open/keep the repo: $wicklerRepo"
     Write-Host "Recommended order:"
-    Write-Host "  1. Connect Abwickler only, run this phase with -Execute, then unplug it."
-    Write-Host "  2. Connect Aufwickler only, run this phase with -Execute again."
+    Write-Host "  1. Connect Abwickler only, run this phase with -WicklerRole abwickler -Execute, then unplug it."
+    Write-Host "  2. Connect Aufwickler only, run this phase with -WicklerRole aufwickler -Execute."
     Write-Host "Equivalent manual command:"
-    Write-Host "  pio run -t upload"
+    Write-Host ("  pio run -e {0} -t upload" -f $WicklerRole)
     Write-Host "After both flashes, set/check their web/network config:"
     Write-Host "  Abwickler: 10.141.94.216, port 3011"
     Write-Host "  Aufwickler: 10.141.94.217, port 3012"
@@ -202,7 +204,7 @@ function Invoke-DeployWickler {
         Push-Location $wicklerRepo
         try {
             $platformIo = Resolve-PlatformIoCommand
-            & $platformIo run -t upload
+            & $platformIo run -e $WicklerRole -t upload
         } finally {
             Pop-Location
         }

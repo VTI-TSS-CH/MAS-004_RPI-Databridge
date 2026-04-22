@@ -13,6 +13,9 @@
   - the previously active certificate still used `CN/SAN=10.27.67.68`
   - the new self-signed certificate has SAN `IP:10.141.94.213` and is installed in the Windows CurrentUser Root store on the engineering laptop
   - strict Windows/Schannel smoke test `curl https://10.141.94.213:8080/health` returns `{"ok":true}`
+- Updated the guided production IBN Wickler phase so SmartWickler flashing is role-specific:
+  - Abwickler: `-WicklerRole abwickler` -> SmartWickler env `abwickler`
+  - Aufwickler: `-WicklerRole aufwickler` -> SmartWickler env `aufwickler`
 
 ## 2026-04-21 (Smart Wickler USB Deploy Decision)
 - Confirmed the production IBN decision that the two Smart Wicklers remain autonomous.
