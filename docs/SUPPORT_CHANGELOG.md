@@ -6,6 +6,7 @@
   - Raspi/UI/API: `10.141.94.213`
   - engineering laptop / Microtom simulator: `10.141.94.212`
 - Verified Microtom simulator HTTPS certificate and listener on `https://10.141.94.212:9090`.
+- Fixed the outbound HTTP client source-IP bind for the Raspi runtime: `httpx.HTTPTransport(local_address=...)` now receives the source IP string instead of a `(host, port)` tuple, resolving `TypeError('str, bytes or bytearray expected, not tuple')` on callbacks.
 - Corrected the Raspi system clock manually during IBN because the cutover network no longer reached the old NTP path.
 
 ## 2026-04-21 (Smart Wickler USB Deploy Decision)

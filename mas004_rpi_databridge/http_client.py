@@ -22,8 +22,9 @@ class HttpClient:
         # Optional: an eth0 IP binden (source address)
         self._transport = None
         if self.source_ip:
-            # httpx/httpcore erwartet i.d.R. (host, port)
-            self._transport = httpx.HTTPTransport(local_address=(self.source_ip, 0))
+            # httpx/httpcore expects the local bind address as a string on the
+            # Raspi runtime; passing a tuple fails during the real send path.
+            self._transport = httpx.HTTPTransport(local_address=self.source_ip)
 
         verify = False if not self.verify_tls else True
         self._client = httpx.Client(timeout=self._timeout, verify=verify, transport=self._transport)
