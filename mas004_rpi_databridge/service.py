@@ -3,7 +3,11 @@ import threading
 import json
 import os
 import shutil
+import uuid
+from typing import Optional
+
 import uvicorn
+from fastapi import FastAPI, Header, HTTPException, Request
 
 from mas004_rpi_databridge.config import Settings, DEFAULT_CFG_PATH
 from mas004_rpi_databridge.db import DB
@@ -55,6 +59,60 @@ def resolve_repo_master_ios_xlsx() -> str:
         if candidate and os.path.exists(candidate):
             return candidate
     return ""
+
+
+def require_device_shared_secret(x_shared_secret: Optional[str], cfg: Settings):
+    if (cfg.shared_secret or "") and x_shared_secret != cfg.shared_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized (shared secret)")
+
+
+def build_device_inbox_app(cfg_path: str) -> FastAPI:
+    app = FastAPI(title="MAS-004 Device Inbox", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.get("/health")
+    def health():
+        return {"ok": True, "service": "device-inbox"}
+
+    @app.post("/api/inbox")
+    async def api_inbox(
+        request: Request,
+        x_idempotency_key: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg = Settings.load(cfg_path)
+        require_device_shared_secret(x_shared_secret, cfg)
+
+        raw_body = await request.body()
+        body = None
+        if raw_body:
+            try:
+                body = json.loads(raw_body.decode("utf-8"))
+            except Exception:
+                txt = raw_body.decode("utf-8", errors="replace").strip()
+                body = {"msg": txt} if txt else None
+
+        headers = dict(request.headers)
+        idem = x_idempotency_key or headers.get("x-idempotency-key") or str(uuid.uuid4())
+        source = request.client.host if request.client else None
+        if isinstance(body, dict):
+            src = body.get("source")
+            if isinstance(src, str) and src.strip():
+                source = src.strip()
+
+        inserted = Inbox(DB(cfg.db_path)).store(source, headers, body, idem)
+        return {"ok": True, "stored": inserted, "idempotency_key": idem}
+
+    return app
+
+
+def device_inbox_http_loop(cfg_path: str):
+    cfg = Settings.load(cfg_path)
+    host = cfg.device_inbox_http_host or "0.0.0.0"
+    port = int(cfg.device_inbox_http_port or 0)
+    if port <= 0:
+        return
+    print(f"[DEVICE-INBOX] HTTP listener on {host}:{port}", flush=True)
+    uvicorn.run(build_device_inbox_app(cfg_path), host=host, port=port, log_level="warning")
 
 
 def backoff_s(retry_count: int, base: float, cap: float) -> float:
@@ -355,6 +413,13 @@ def main():
 
     app = build_app(cfg_path)
     app.state.esp_push_listener_manager = push_mgr
+
+    if bool(getattr(cfg, "device_inbox_http_enabled", True)) and int(getattr(cfg, "device_inbox_http_port", 0) or 0) > 0:
+        if int(cfg.device_inbox_http_port) == int(cfg.webui_port):
+            print("[DEVICE-INBOX] skipped: device_inbox_http_port equals webui_port", flush=True)
+        else:
+            device_inbox_t = threading.Thread(target=device_inbox_http_loop, args=(cfg_path,), daemon=True)
+            device_inbox_t.start()
 
     ssl_kwargs = {}
     if cfg.webui_https:

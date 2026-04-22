@@ -1,6 +1,10 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
 ## 2026-04-22 (Production IBN Cutover)
+- Added a dedicated internal HTTP device inbox on `:8081` for ESP32/W5500 devices that cannot post to the HTTPS UI/API port directly.
+  - Public/operator UI remains HTTPS on `:8080`.
+  - The internal device inbox only exposes `/api/inbox` and `/health`.
+  - `/api/inbox` still requires the configured `X-Shared-Secret`.
 - Retired the temporary former-TEST Raspi address from active deployment defaults and current docs.
 - Active local production/commissioning defaults now use:
   - Raspi/UI/API: `10.141.94.213`

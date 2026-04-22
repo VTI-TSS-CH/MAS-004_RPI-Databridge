@@ -48,6 +48,10 @@
   - `ApplyRaspiNetwork` intentionally changes the OS network and can drop the current SSH session.
   - Do not run it until the laptop can be moved to `10.141.94.212/24`.
   - The commissioning config uses `peer_base_url = https://10.141.94.212:9090` while the laptop Microtom simulator/testtool is the active peer; replace this with the final Microtom endpoint before handover if Microtom uses another host.
+- Internal device inbox note:
+  - Browser/UI/API stay on HTTPS `https://10.141.94.213:8080`.
+  - ESP32/W5500 devices that cannot speak HTTPS post machine events to `http://10.141.94.213:8081/api/inbox`.
+  - The `8081` listener is intentionally limited to `/api/inbox` and `/health` and still requires `X-Shared-Secret`.
 - ESP ownership note:
   - The RPI-Databridge is the only service that should actively use `192.168.2.101:3010` on the production/commissioning Raspi.
   - Keep the legacy standalone `mas004-esp32-plc-bridge.service` disabled unless the architecture is deliberately changed back; otherwise it can compete for the ESP single-client W5500 command socket.

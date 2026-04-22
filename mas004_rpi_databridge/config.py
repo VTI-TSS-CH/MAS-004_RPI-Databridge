@@ -20,6 +20,9 @@ class Settings:
     webui_https: bool = False
     webui_ssl_certfile: str = "/etc/mas004_rpi_databridge/certs/raspi.crt"
     webui_ssl_keyfile: str = "/etc/mas004_rpi_databridge/certs/raspi.key"
+    device_inbox_http_enabled: bool = True
+    device_inbox_http_host: str = "0.0.0.0"
+    device_inbox_http_port: int = 8081
 
     # Interface labels (Info)
     eth0_ip: str = ""
