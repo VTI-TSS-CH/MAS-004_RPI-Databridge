@@ -3,7 +3,7 @@
 ## 2026-05-01 (Safety-Reset validiert echte Motor-Ready)
 - Safety-/Not-Aus-Reset meldet erst dann Erfolg, wenn nach `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO` und `RESET_ALARM` alle ESP-AZD-Motoren `1..9` live verifiziert `ready=true` und `alarm=false` melden.
 - Beide Smart-Wickler werden nach `stop`, `resetAlarm`, `etoRecovery`, `ready` ebenfalls ueber `/api/state` verifiziert. `HWTO/STO aktiv`, `ready=false` oder ein Wickler-Fault bleibt dadurch als Reset-Fehler sichtbar.
-- `MAS0002=2` und der Raspi-Taster `I0.7` koennen den Reset nun auch aus einem halb zurueckgesetzten Purge-/Fehlerzustand erneut starten; ein dauerhaft stehengebliebenes `MAS0002=2` wird dabei nicht in jedem Runtime-Zyklus endlos wiederholt.
+- `MAS0002=2` und der Raspi-Taster `I0.7` koennen den Reset nun auch aus einem halb zurueckgesetzten Purge-/Fehlerzustand erneut starten. Wiederholtes Senden von `MAS0002=2` wird anhand des Parameter-Update-Zeitstempels als neuer Reset-Versuch erkannt, ein unveraenderter alter Wert wird nicht endlos wiederholt.
 - Resettable Safety-Fehler (`MAS0028`, `MAE0001`, `MAE0024`, `MAE0027`, `MAE0030`, `MAE0034`) werden nur nach erfolgreicher Ready-Verifikation geloescht.
 
 ## 2026-04-30 (eth1 ESP32-PLC-Kommunikation robuster)

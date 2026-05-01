@@ -105,8 +105,9 @@ class MachineRuntime:
 
         requested_command = _safe_int(param_map.get("MAS0002", info.get("requested_command", 0)), info.get("requested_command", 0))
         reset_command_active = requested_command == 2
-        reset_command_seen = bool(safety_info.get("mas0002_reset_seen")) if reset_command_active else False
-        reset_command_rising = reset_command_active and not reset_command_seen
+        reset_command_ts = self._param_updated_ts("MAS0002") if reset_command_active else 0.0
+        reset_command_seen_ts = float(safety_info.get("mas0002_reset_seen_ts") or 0.0)
+        reset_command_rising = reset_command_active and reset_command_ts > reset_command_seen_ts
         reset_needed = (
             bool(safety_latched)
             or bool(safety_status["active"])
@@ -126,6 +127,7 @@ class MachineRuntime:
                 "last_reasons": list(safety_status.get("reasons") or []),
                 "last_reset": reset_result,
                 "mas0002_reset_seen": reset_command_active,
+                "mas0002_reset_seen_ts": reset_command_ts if reset_command_active else 0.0,
             }
             if reset_result.get("ok"):
                 safety_latched = False
@@ -143,6 +145,7 @@ class MachineRuntime:
                 "phase": SAFETY_PHASE_LATCHED,
                 "last_reasons": list(safety_status.get("reasons") or safety_info.get("last_reasons") or []),
                 "mas0002_reset_seen": reset_command_active,
+                "mas0002_reset_seen_ts": reset_command_seen_ts if reset_command_active else 0.0,
             }
             forced_state = 21
             forced_source = "safety_latched"
@@ -160,6 +163,7 @@ class MachineRuntime:
             if safety_info.get("phase") not in (SAFETY_PHASE_READY,):
                 safety_info = {"latched": False, "phase": "idle", "last_reasons": []}
             safety_info["mas0002_reset_seen"] = reset_command_active
+            safety_info["mas0002_reset_seen_ts"] = reset_command_ts if reset_command_active else 0.0
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])
         if pause_active and int(snapshot["current_state"] or 0) in (4, 5, 6):
@@ -528,6 +532,14 @@ class MachineRuntime:
                 tuple(prefixes),
             ).fetchall()
         return {str(row[0]): str(row[1] if row[1] is not None else "0") for row in rows}
+
+    def _param_updated_ts(self, pkey: str) -> float:
+        with self.db._conn() as c:
+            row = c.execute("SELECT updated_ts FROM param_values WHERE pkey=?", (str(pkey),)).fetchone()
+        try:
+            return float(row[0] or 0.0) if row else 0.0
+        except Exception:
+            return 0.0
 
     def _active_param_keys(self, ptype: str) -> list[str]:
         with self.db._conn() as c:
