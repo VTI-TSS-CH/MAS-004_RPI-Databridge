@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-01 (Safety-Reset validiert echte Motor-Ready)
+- Safety-/Not-Aus-Reset meldet erst dann Erfolg, wenn nach `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO` und `RESET_ALARM` alle ESP-AZD-Motoren `1..9` live verifiziert `ready=true` und `alarm=false` melden.
+- Beide Smart-Wickler werden nach `stop`, `resetAlarm`, `etoRecovery`, `ready` ebenfalls ueber `/api/state` verifiziert. `HWTO/STO aktiv`, `ready=false` oder ein Wickler-Fault bleibt dadurch als Reset-Fehler sichtbar.
+- `MAS0002=2` und der Raspi-Taster `I0.7` koennen den Reset nun auch aus einem halb zurueckgesetzten Purge-/Fehlerzustand erneut starten; ein dauerhaft stehengebliebenes `MAS0002=2` wird dabei nicht in jedem Runtime-Zyklus endlos wiederholt.
+- Resettable Safety-Fehler (`MAS0028`, `MAE0001`, `MAE0024`, `MAE0027`, `MAE0030`, `MAE0034`) werden nur nach erfolgreicher Ready-Verifikation geloescht.
+
 ## 2026-04-30 (eth1 ESP32-PLC-Kommunikation robuster)
 - Raspi-seitiger ESP-TCP-Client serialisiert Zugriffe pro `host:port` jetzt ueber einen Endpoint-Lock. Dadurch konkurrieren Motor-UI, IO-Snapshot, MAC-Prozesssteuerung und Parameter-Mirroring nicht mehr gleichzeitig um den Single-Client-W5500-Socket der ESP32-PLC.
 - Nach ESP-Verbindungsfehlern gibt es einen kurzen exponentiellen Cooldown statt sofortiger Retry-Stuerme auf `192.168.2.101:3010`.

@@ -50,6 +50,13 @@ def _safe_int(raw: Any, default: int = 0) -> int:
 
 
 PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026"}
+RESETTABLE_SAFETY_ERROR_KEYS = {
+    "MAE0001",  # Not-Aus
+    "MAE0024",  # Etikettenbandriss
+    "MAE0027",  # Etikettensensor prellt
+    "MAE0030",  # Abwickler Taenzerarm zu tief
+    "MAE0034",  # Aufwickler Taenzerarm zu tief
+}
 SAFETY_RESET_BUTTON = "start_pause"
 SAFETY_PHASE_LATCHED = "latched"
 SAFETY_PHASE_RESETTING = "resetting"
@@ -97,7 +104,17 @@ class MachineRuntime:
         safety_latched = bool(safety_info.get("latched")) or bool(safety_status["active"])
 
         requested_command = _safe_int(param_map.get("MAS0002", info.get("requested_command", 0)), info.get("requested_command", 0))
-        safety_reset_requested = bool(safety_latched) and (requested_command == 2 or reset_button_rising)
+        reset_command_active = requested_command == 2
+        reset_command_seen = bool(safety_info.get("mas0002_reset_seen")) if reset_command_active else False
+        reset_command_rising = reset_command_active and not reset_command_seen
+        reset_needed = (
+            bool(safety_latched)
+            or bool(safety_status["active"])
+            or bool(critical_active)
+            or _truthy(param_map.get("MAS0028", "0"))
+            or int(snapshot["current_state"] or 0) in (20, 21)
+        )
+        safety_reset_requested = bool(reset_needed) and (reset_button_rising or reset_command_rising)
         forced_state: int | None = None
         forced_source: str | None = None
 
@@ -108,13 +125,13 @@ class MachineRuntime:
                 "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
                 "last_reasons": list(safety_status.get("reasons") or []),
                 "last_reset": reset_result,
+                "mas0002_reset_seen": reset_command_active,
             }
             if reset_result.get("ok"):
                 safety_latched = False
                 forced_state = 9
                 forced_source = "safety_reset_ready"
-                self.params.apply_device_value("MAS0028", "0", promote_default=True)
-                self._notify_microtom("MAS0028", "0", dedupe_key="machine:MAS0028")
+                self._clear_resettable_safety_errors()
             else:
                 safety_latched = True
                 forced_state = 21
@@ -125,6 +142,7 @@ class MachineRuntime:
                 "latched": True,
                 "phase": SAFETY_PHASE_LATCHED,
                 "last_reasons": list(safety_status.get("reasons") or safety_info.get("last_reasons") or []),
+                "mas0002_reset_seen": reset_command_active,
             }
             forced_state = 21
             forced_source = "safety_latched"
@@ -141,6 +159,7 @@ class MachineRuntime:
                 self.logs.log("machine", "info", f"button requested command -> {requested_command}")
             if safety_info.get("phase") not in (SAFETY_PHASE_READY,):
                 safety_info = {"latched": False, "phase": "idle", "last_reasons": []}
+            safety_info["mas0002_reset_seen"] = reset_command_active
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])
         if pause_active and int(snapshot["current_state"] or 0) in (4, 5, 6):
@@ -624,6 +643,13 @@ class MachineRuntime:
         result["finished_ts"] = now_ts()
         return result
 
+    def _clear_resettable_safety_errors(self):
+        cleared = ["MAS0028", *sorted(RESETTABLE_SAFETY_ERROR_KEYS)]
+        for pkey in cleared:
+            self.params.apply_device_value(pkey, "0", promote_default=True)
+            self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
+        self.logs.log("machine", "info", "resettable safety errors cleared: " + ",".join(cleared))
+
     def _pulse_esp_reset_output(self):
         io_runtime = IoRuntime(self.cfg, self.io_store)
         point = self.io_store.get_point("esp32_plc58__Q0_2")
@@ -681,6 +707,43 @@ class MachineRuntime:
                         {"step": "reset_alarm", "motor_id": motor_id, "ok": False, "error": str(exc)}
                     )
                     hard_failures.append(f"Motor {motor_id} reset_alarm: {exc}")
+            time.sleep(0.2)
+            for motor_id in range(1, 10):
+                try:
+                    status = esp.refresh(motor_id)
+                    motor = status.get("motor") if isinstance(status, dict) else {}
+                    state = motor.get("state") if isinstance(motor, dict) else {}
+                    state = state if isinstance(state, dict) else {}
+                    verify = {
+                        "step": "verify_ready",
+                        "motor_id": motor_id,
+                        "ok": bool(
+                            status.get("ok")
+                            and state.get("link_ok")
+                            and state.get("ready")
+                            and not state.get("alarm")
+                        ),
+                        "ready": bool(state.get("ready")),
+                        "link_ok": bool(state.get("link_ok")),
+                        "alarm": bool(state.get("alarm")),
+                        "alarm_code": state.get("alarm_code"),
+                        "input_raw_hex": state.get("input_raw_hex"),
+                        "output_raw_hex": state.get("output_raw_hex"),
+                    }
+                    details["esp_motors"].append(verify)
+                    if not verify["ok"]:
+                        hard_failures.append(
+                            "Motor "
+                            f"{motor_id} not ready "
+                            f"(link={verify['link_ok']}, ready={verify['ready']}, "
+                            f"alarm={verify['alarm']}, alarm_code={verify['alarm_code']}, "
+                            f"in={verify['input_raw_hex']}, out={verify['output_raw_hex']})"
+                        )
+                except Exception as exc:
+                    details["esp_motors"].append(
+                        {"step": "verify_ready", "motor_id": motor_id, "ok": False, "error": str(exc)}
+                    )
+                    hard_failures.append(f"Motor {motor_id} verify_ready: {exc}")
         else:
             details["esp_motors"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
 
@@ -700,6 +763,34 @@ class MachineRuntime:
                 except Exception as exc:
                     role_detail["steps"].append({"step": mode, "ok": False, "error": str(exc)})
                     hard_failures.append(f"{role} {mode}: {exc}")
+            try:
+                state = client.fetch_state()
+                drive = state.get("drive") if isinstance(state, dict) else {}
+                telemetry = state.get("telemetry") if isinstance(state, dict) else {}
+                drive = drive if isinstance(drive, dict) else {}
+                telemetry = telemetry if isinstance(telemetry, dict) else {}
+                verify = {
+                    "step": "verify_ready",
+                    "ok": bool(state.get("ok") and drive.get("online") and drive.get("ready") and not drive.get("alarm")),
+                    "online": bool(drive.get("online")),
+                    "ready": bool(drive.get("ready")),
+                    "alarm": bool(drive.get("alarm")),
+                    "alarm_code": drive.get("alarmCode"),
+                    "mode": telemetry.get("modeLabel"),
+                    "fault_reason": telemetry.get("faultReason"),
+                    "raw_output": drive.get("rawOutput"),
+                }
+                role_detail["steps"].append(verify)
+                if not verify["ok"]:
+                    hard_failures.append(
+                        f"{role} not ready "
+                        f"(online={verify['online']}, ready={verify['ready']}, alarm={verify['alarm']}, "
+                        f"alarm_code={verify['alarm_code']}, mode={verify['mode']}, "
+                        f"fault={verify['fault_reason']}, raw_output={verify['raw_output']})"
+                    )
+            except Exception as exc:
+                role_detail["steps"].append({"step": "verify_ready", "ok": False, "error": str(exc)})
+                hard_failures.append(f"{role} verify_ready: {exc}")
             details["wicklers"].append(role_detail)
 
         if hard_failures:

@@ -375,7 +375,10 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - Raspi verifies `ESP I0.7=0` and `ESP I0.8=0`
     - Raspi runs `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, then `MOTOR <id> RESET_ALARM` for `1..9`
     - Raspi posts `stop`, `resetAlarm`, `etoRecovery`, `ready` to both Wicklers if they are live
-    - Raspi clears `MAS0028` and sets `MAS0001=9`
+    - Raspi verifies all ESP motors `1..9` with live `ready=true`, `alarm=false`
+    - Raspi verifies both Wicklers with live `drive.ready=true`, `drive.alarm=false`
+    - Raspi clears resettable Safety/Purge errors and sets `MAS0001=9`
+  - If any AZD-CD still reports `HWTO/STO active` or `ready=false`, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop.
   - Button LEDs:
     - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second
     - reset running: `Q0.2` blinks, no red
