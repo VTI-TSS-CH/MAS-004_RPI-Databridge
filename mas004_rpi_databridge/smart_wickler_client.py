@@ -130,6 +130,54 @@ class SmartWicklerClient:
     def device_ui_url(self) -> str:
         return f"http://{self.host}:{self.port}" if self.host and self.port > 0 else ""
 
+    def _post_form(self, path: str, data: dict[str, Any] | None = None, timeout_s: float | None = None) -> dict[str, Any]:
+        if not self.available():
+            raise RuntimeError(f"{self.descriptor.label} endpoint missing or simulation enabled")
+
+        req_timeout = float(timeout_s or max(1.0, min(10.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0))))
+        with httpx.Client(timeout=req_timeout) as client:
+            response = client.post(self.device_ui_url().rstrip("/") + path, data=data or {})
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {"ok": True, "text": response.text}
+        return dict(payload or {})
+
+    def post_mode(self, mode: str, timeout_s: float | None = None) -> dict[str, Any]:
+        return self._post_form("/api/mode", {"mode": str(mode or "").strip()}, timeout_s=timeout_s)
+
+    def post_master(self, values: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
+        return self._post_form("/api/master", values, timeout_s=timeout_s)
+
+    def start_diameter_learning(self, timeout_s: float | None = None) -> dict[str, Any]:
+        return self._post_form("/api/diameter/learn", {"action": "start"}, timeout_s=timeout_s)
+
+    def finish_diameter_learning(
+        self,
+        travel_mm: float,
+        apply: bool = False,
+        method: str = "position-local",
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        return self._post_form(
+            "/api/diameter/learn",
+            {
+                "action": "finish",
+                "travelMm": f"{float(travel_mm):.3f}",
+                "apply": "1" if apply else "0",
+                "method": method,
+            },
+            timeout_s=timeout_s,
+        )
+
+    def set_diameter(self, diameter_mm: float, persist: bool = True, timeout_s: float | None = None) -> dict[str, Any]:
+        return self._post_form(
+            "/api/diameter",
+            {"diameterMm": f"{float(diameter_mm):.3f}", "persist": "1" if persist else "0"},
+            timeout_s=timeout_s,
+        )
+
     def fetch_state(self) -> dict[str, Any]:
         if not self.available():
             return _simulation_payload(

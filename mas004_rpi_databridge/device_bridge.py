@@ -23,7 +23,7 @@ class DeviceBridge:
         self.params = params
         self.logs = logs
 
-        self._esp = EspPlcClient(cfg.esp_host, cfg.esp_port, timeout_s=cfg.http_timeout_s)
+        self._esp = EspPlcClient(cfg.esp_host, cfg.esp_port, timeout_s=self._esp_connect_timeout_s())
         self._esp_watchdog = DeviceWatchdog(
             host=(cfg.esp_watchdog_host or cfg.esp_host),
             timeout_s=cfg.watchdog_timeout_s,
@@ -32,6 +32,27 @@ class DeviceBridge:
         self._zbc = ZipherClient(cfg.vj6530_host, cfg.vj6530_port, timeout_s=cfg.http_timeout_s)
         self._zbc_bridge = ZbcBridgeClient(cfg.vj6530_host, cfg.vj6530_port, timeout_s=cfg.http_timeout_s)
         self._ultimate = UltimateClient(cfg.vj3350_host, cfg.vj3350_port, timeout_s=cfg.http_timeout_s)
+
+    def _esp_connect_timeout_s(self) -> float:
+        return max(0.2, self._cfg_float("esp_connect_timeout_s", 1.5))
+
+    def _esp_read_timeout_s(self) -> float:
+        return max(0.2, self._cfg_float("esp_read_timeout_s", 2.0))
+
+    def _esp_command_timeout_s(self) -> float:
+        return max(0.5, self._cfg_float("esp_command_timeout_s", 8.0))
+
+    def _cfg_float(self, key: str, default: float) -> float:
+        getter = getattr(self.cfg, "get_float", None)
+        if callable(getter):
+            return float(getter(key, default))
+        try:
+            raw = getattr(self.cfg, key, default)
+            if raw is None:
+                return float(default)
+            return float(raw)
+        except Exception:
+            return float(default)
 
     def execute(self, device: str, pkey: str, ptype: str, op: str, value: str, actor: str = "microtom") -> str:
         ptype = (ptype or "").upper()
@@ -128,11 +149,15 @@ class DeviceBridge:
         last_exc: Optional[Exception] = None
         for _ in range(2):
             try:
-                response = self._esp.exchange_line(line, read_timeout_s=self.cfg.http_timeout_s)
+                timeout_s = self._esp_read_timeout_s() if op == "read" else self._esp_command_timeout_s()
+                response = self._esp.exchange_line(line, read_timeout_s=timeout_s)
                 last_exc = None
                 break
             except Exception as exc:
                 last_exc = exc
+                if op != "read":
+                    break
+                time.sleep(0.15)
         if last_exc is not None:
             raise last_exc
 
@@ -372,7 +397,7 @@ class DeviceBridge:
         esp_access = self.params.actor_access(pkey, actor="esp32")
         line = f"SYNC {esp_key}={value}" if esp_access == "R" else f"{esp_key}={value}"
         try:
-            response = self._esp.exchange_line(line, read_timeout_s=self.cfg.http_timeout_s)
+            response = self._esp.exchange_line(line, read_timeout_s=self._esp_command_timeout_s())
         except Exception as exc:
             return False, repr(exc)
         self.logs.log("esp-plc", "out", f"raspi->esp-plc: {line}")

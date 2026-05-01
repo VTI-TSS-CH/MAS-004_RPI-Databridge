@@ -27,6 +27,15 @@ def _to_clean_str(value: Any) -> str:
     return str(value).strip()
 
 
+def _to_int01(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    try:
+        return 1 if int(str(value).strip()) else 0
+    except Exception:
+        return 1 if str(value).strip().lower() in {"true", "on", "high"} else 0
+
+
 def _normalize_sheet_name(sheet_name: str) -> str:
     return re.sub(r"\s+", " ", (sheet_name or "").strip().lower())
 
@@ -42,6 +51,11 @@ def _normalize_pin_label(pin_label: str) -> str:
     raw = _to_clean_str(pin_label).upper().replace(" ", "")
     raw = raw.replace(",", ".")
     return raw
+
+
+def _is_valid_pin_label(pin_label: str) -> bool:
+    pin = _normalize_pin_label(pin_label)
+    return bool(re.fullmatch(r"(?:I|Q|A|R)\d+\.\d+|(?:DI|DO|AI|AO|GPIO)\d+", pin))
 
 
 def _detect_io_dir(pin_label: str) -> str:
@@ -122,6 +136,8 @@ class IoStore:
                     continue
 
                 pin_label = _normalize_pin_label(pin_raw)
+                if not _is_valid_pin_label(pin_label):
+                    continue
                 entry = {
                     "io_key": _safe_io_key(device_code, pin_label),
                     "device_code": device_code,
@@ -257,7 +273,8 @@ class IoStore:
             row = conn.execute(
                 """SELECT p.io_key,p.device_code,p.device_label,p.sheet_name,p.zone_label,p.pin_label,p.io_dir,
                           p.channel_no,p.function_text,p.is_reserved,p.is_active,p.source_row,
-                          v.value,v.quality,v.source,v.updated_ts
+                          v.value,v.quality,v.source,v.updated_ts,
+                          v.override_value,v.override_source,v.override_updated_ts
                    FROM io_points p
                    LEFT JOIN io_values v ON v.io_key = p.io_key
                    WHERE p.io_key=?""",
@@ -278,7 +295,8 @@ class IoStore:
             rows = conn.execute(
                 f"""SELECT p.io_key,p.device_code,p.device_label,p.sheet_name,p.zone_label,p.pin_label,p.io_dir,
                            p.channel_no,p.function_text,p.is_reserved,p.is_active,p.source_row,
-                           v.value,v.quality,v.source,v.updated_ts
+                           v.value,v.quality,v.source,v.updated_ts,
+                           v.override_value,v.override_source,v.override_updated_ts
                     FROM io_points p
                     LEFT JOIN io_values v ON v.io_key = p.io_key
                     {where_sql}
@@ -338,7 +356,73 @@ class IoStore:
             )
         return True
 
+    def set_override(self, io_key: str, value: Any, source: str = "manual-ui") -> Dict[str, Any]:
+        text_value = str(_to_int01(value))
+        source_txt = _to_clean_str(source) or "manual-ui"
+        ts = now_ts()
+        with self.db._conn() as conn:
+            conn.execute(
+                """INSERT INTO io_values(io_key, value, quality, source, updated_ts,
+                                          override_value, override_source, override_updated_ts)
+                   VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(io_key) DO UPDATE SET
+                     value=excluded.value,
+                     quality=excluded.quality,
+                     source=excluded.source,
+                     updated_ts=excluded.updated_ts,
+                     override_value=excluded.override_value,
+                     override_source=excluded.override_source,
+                     override_updated_ts=excluded.override_updated_ts""",
+                (io_key, text_value, "override", source_txt, ts, text_value, source_txt, ts),
+            )
+        return {
+            "io_key": io_key,
+            "override_active": True,
+            "override_value": text_value,
+            "override_source": source_txt,
+            "override_updated_ts": ts,
+        }
+
+    def release_override(self, io_key: str) -> Dict[str, Any]:
+        ts = now_ts()
+        with self.db._conn() as conn:
+            current = conn.execute(
+                "SELECT override_value FROM io_values WHERE io_key=?",
+                (io_key,),
+            ).fetchone()
+            conn.execute(
+                """UPDATE io_values
+                   SET override_value=NULL,
+                       override_source='',
+                       override_updated_ts=0,
+                       updated_ts=?
+                   WHERE io_key=?""",
+                (ts, io_key),
+            )
+        return {"io_key": io_key, "released": bool(current and current[0] is not None)}
+
+    def release_all_overrides(self) -> Dict[str, Any]:
+        ts = now_ts()
+        with self.db._conn() as conn:
+            count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM io_values WHERE override_value IS NOT NULL"
+                ).fetchone()[0]
+                or 0
+            )
+            conn.execute(
+                """UPDATE io_values
+                   SET override_value=NULL,
+                       override_source='',
+                       override_updated_ts=0,
+                       updated_ts=?
+                   WHERE override_value IS NOT NULL""",
+                (ts,),
+            )
+        return {"released": count}
+
     def _row_to_point(self, row) -> Dict[str, Any]:
+        override_value = row[16] if len(row) > 16 else None
         return {
             "io_key": row[0],
             "device_code": row[1],
@@ -356,4 +440,8 @@ class IoStore:
             "quality": row[13] or "unknown",
             "source": row[14] or "",
             "updated_ts": float(row[15] or 0.0),
+            "override_active": override_value is not None,
+            "override_value": override_value,
+            "override_source": (row[17] if len(row) > 17 else "") or "",
+            "override_updated_ts": float((row[18] if len(row) > 18 else 0.0) or 0.0),
         }

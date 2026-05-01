@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
@@ -23,7 +24,7 @@ def _insert_param(
     pkey: str,
     ptype: str,
     pid: str,
-    default_v: str | None,
+    default_v: Optional[str],
     rw: str,
     esp_rw: str = "W",
     dtype: str = "string",
@@ -194,7 +195,31 @@ class RouterEspAccessTests(unittest.TestCase):
             ok, detail = router.device_bridge.mirror_to_esp("MAP0001", "550")
 
             self.assertTrue(ok, detail)
-            self.assertEqual([("SYNC MAP0001=550", router.cfg.http_timeout_s)], lines)
+            self.assertEqual([("SYNC MAP0001=550", router.cfg.esp_command_timeout_s)], lines)
+
+    def test_smartwickler_status_push_updates_readonly_value_without_nak(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0008", "MAS", "0008", "0", "R", "N", "uint8")
+
+            inserted = router.inbox.store(
+                "smartwickler",
+                {},
+                {"msg": "MAS0008=52", "source": "smartwickler", "origin": "smartwickler"},
+                "wickler-1",
+            )
+            self.assertTrue(inserted)
+
+            self.assertTrue(router.tick_once())
+
+            self.assertEqual("52", router.params.get_effective_value("MAS0008"))
+            job = router.outbox.next_due()
+            self.assertIsNotNone(job)
+            body = json.loads(job.body_json)
+            self.assertEqual("MAS0008=52", body["msg"])
+            self.assertEqual("smartwickler", body["origin"])
+            self.assertNotIn("NAK_ReadOnly", body["msg"])
 
 
 if __name__ == "__main__":

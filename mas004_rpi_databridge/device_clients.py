@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 from ping3 import ping
 
@@ -19,6 +20,39 @@ from mas004_rpi_databridge.device_protocols import (
     parse_zbc_message,
     parse_zbc_packet,
 )
+
+
+class _EndpointState:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.fail_count = 0
+        self.next_allowed_at = 0.0
+        self.sock: Optional[socket.socket] = None
+        self.exchange_count = 0
+
+    def close_socket(self) -> None:
+        sock = self.sock
+        self.sock = None
+        self.exchange_count = 0
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+_ESP_ENDPOINTS_GUARD = threading.Lock()
+_ESP_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
+
+
+def _esp_endpoint_state(host: str, port: int) -> _EndpointState:
+    key = ((host or "").strip(), int(port or 0))
+    with _ESP_ENDPOINTS_GUARD:
+        state = _ESP_ENDPOINTS.get(key)
+        if state is None:
+            state = _EndpointState()
+            _ESP_ENDPOINTS[key] = state
+        return state
 
 
 @dataclass
@@ -45,17 +79,56 @@ class EspPlcClient:
         self.port = int(port or 0)
         self.timeout_s = float(timeout_s or 1.0)
 
-    def exchange_line(self, line: str, read_timeout_s: float | None = None) -> str:
+    def exchange_line(
+        self,
+        line: str,
+        read_timeout_s: float | None = None,
+        *,
+        read_limit: int = 8192,
+    ) -> str:
         if not self.host or self.port <= 0:
             raise RuntimeError("ESP endpoint missing")
 
         payload = ((line or "").strip() + "\n").encode("utf-8")
         read_timeout_s = float(read_timeout_s or self.timeout_s)
+        state = _esp_endpoint_state(self.host, self.port)
 
-        with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as sock:
-            sock.settimeout(read_timeout_s)
-            sock.sendall(payload)
-            return _recv_line(sock, limit=8192).strip()
+        with state.lock:
+            deadline = time.monotonic() + max(self.timeout_s + read_timeout_s + 6.0, 8.0)
+            last_error: Optional[Exception] = None
+            for attempt in range(5):
+                now = time.monotonic()
+                if state.next_allowed_at > now:
+                    time.sleep(min(state.next_allowed_at - now, max(0.0, deadline - now)))
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    if state.sock is None:
+                        state.sock = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
+                        _tune_short_lived_socket(state.sock)
+                    state.sock.settimeout(read_timeout_s)
+                    state.sock.sendall(payload)
+                    reply = _recv_line(state.sock, limit=read_limit).strip()
+                    if not reply:
+                        raise RuntimeError("ESP endpoint empty reply")
+                    state.exchange_count += 1
+                    if state.exchange_count >= 40:
+                        state.close_socket()
+                        state.next_allowed_at = time.monotonic() + 0.15
+                    state.fail_count = 0
+                    if state.exchange_count != 0:
+                        state.next_allowed_at = time.monotonic() + 0.005
+                    return reply
+                except Exception as exc:
+                    last_error = exc
+                    state.close_socket()
+                    state.fail_count += 1
+                    # Avoid storms against the ESP/W5500 socket while still retrying
+                    # inside this call, so a transient stale socket does not lose a command.
+                    state.next_allowed_at = time.monotonic() + min(1.0, 0.12 * (2 ** min(state.fail_count, 3)))
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("ESP endpoint cooldown active")
 
 
 class UltimateClient:
@@ -160,3 +233,14 @@ def _recv_line(sock: socket.socket, limit: int = 8192) -> str:
     data = _recv_until(sock, b"\n", limit=limit)
     first_line = data.split(b"\n", 1)[0]
     return first_line.decode("utf-8", errors="replace").strip()
+
+
+def _tune_short_lived_socket(sock: socket.socket) -> None:
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except Exception:
+        pass

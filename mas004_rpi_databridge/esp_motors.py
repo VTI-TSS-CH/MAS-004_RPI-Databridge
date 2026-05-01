@@ -21,7 +21,8 @@ def _format_value(value: Any) -> str:
 class EspMotorClient:
     def __init__(self, cfg: Settings):
         self.cfg = cfg
-        self._esp = EspPlcClient(cfg.esp_host, cfg.esp_port, timeout_s=cfg.http_timeout_s)
+        connect_timeout = cfg.get_float("esp_connect_timeout_s", 1.5)
+        self._esp = EspPlcClient(cfg.esp_host, cfg.esp_port, timeout_s=connect_timeout)
 
     def available(self) -> bool:
         return bool((self.cfg.esp_host or "").strip()) and int(self.cfg.esp_port or 0) > 0 and not bool(self.cfg.esp_simulation)
@@ -29,7 +30,11 @@ class EspMotorClient:
     def _exchange(self, line: str) -> str:
         if not self.available():
             raise RuntimeError("ESP motor endpoint missing or simulation enabled")
-        return self._esp.exchange_line(line, read_timeout_s=max(2.0, float(self.cfg.http_timeout_s or 1.0) + 2.0)).strip()
+        return self._esp.exchange_line(
+            line,
+            read_timeout_s=max(2.0, self.cfg.get_float("esp_command_timeout_s", 8.0)),
+            read_limit=65536,
+        ).strip()
 
     def _json(self, line: str) -> dict[str, Any]:
         raw = self._exchange(line)
@@ -46,8 +51,17 @@ class EspMotorClient:
     def list_motors(self) -> dict[str, Any]:
         return self._json("MOTOR LIST?")
 
+    def poll_state(self) -> dict[str, Any]:
+        return self._json("MOTOR POLL?")
+
+    def set_poll(self, enabled: bool) -> dict[str, Any]:
+        return self._ack(f"MOTOR POLL={'1' if enabled else '0'}")
+
     def status(self, motor_id: int) -> dict[str, Any]:
         return self._json(f"MOTOR {int(motor_id)} STATUS?")
+
+    def refresh(self, motor_id: int) -> dict[str, Any]:
+        return self._json(f"MOTOR {int(motor_id)} REFRESH")
 
     def config(self, motor_id: int) -> dict[str, Any]:
         return self._json(f"MOTOR {int(motor_id)} CONFIG?")

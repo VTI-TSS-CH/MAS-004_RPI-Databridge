@@ -335,7 +335,15 @@ class MotorSimulationReq(BaseModel):
     enabled: bool
 
 
+class MotorPollReq(BaseModel):
+    enabled: bool
+
+
 class IoWriteReq(BaseModel):
+    value: int
+
+
+class IoOverrideReq(BaseModel):
     value: int
 
 
@@ -466,56 +474,30 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         live_successes: list[dict[str, Any]] = []
         live_error_count = 0
         live_error = ""
+        motor_poll: Optional[dict[str, Any]] = None
 
         if live_target_ids:
             if not client.available():
                 live_error = "ESP-Motor-Endpoint nicht erreichbar"
-            elif len(live_target_ids) == len(catalog_ids):
-                try:
-                    payload = client.list_motors()
-                    live_items = [dict(item) for item in (payload.get("motors") or []) if isinstance(item, dict)]
-                    live_successes = [dict(item) for item in live_items]
-                except Exception as exc:
-                    live_error = str(exc)
             else:
-                for motor_id in live_target_ids:
-                    try:
-                        payload = client.status(motor_id)
-                        raw_motor = payload.get("motor") if isinstance(payload, dict) else None
-                        motor_item = raw_motor if isinstance(raw_motor, dict) else {}
-                        if not motor_item:
-                            raise RuntimeError("ESP returned no motor payload")
-                        motor_data = dict(motor_item)
-                        motor_data["id"] = int(motor_id)
-                        live_items.append(motor_data)
-                        live_successes.append(dict(motor_data))
-                    except Exception as exc:
-                        live_error_count += 1
-                        cached = cached_motors.get(int(motor_id))
-                        if isinstance(cached, dict):
-                            fallback = dict(cached)
-                            fallback["id"] = int(motor_id)
-                            state = dict(fallback.get("state") or {})
-                            state["link_ok"] = False
-                            state["last_error"] = str(exc)
-                            fallback["state"] = state
-                            fallback["last_reply"] = str(exc)
-                            live_items.append(fallback)
-                        else:
-                            live_items.append(
-                                {
-                                    "id": int(motor_id),
-                                    "state": {"link_ok": False, "last_error": str(exc)},
-                                    "last_reply": str(exc),
-                                }
-                            )
+                try:
+                    motor_poll = client.poll_state()
+                except Exception:
+                    motor_poll = None
 
         if live_successes:
             store.remember_motors(live_successes)
             cached_motors = store.cached_motors()
+        live_available = bool(live_successes) or motor_poll is not None
 
         merged = merge_motor_payload(
-            {"ok": True, "motors": live_items, "error": live_error, "live_available": bool(live_successes)},
+            {
+                "ok": True,
+                "motors": live_items,
+                "error": live_error,
+                "live_available": live_available,
+                "motor_poll": motor_poll,
+            },
             get_motor_bindings(),
             simulated_ids=simulated_ids,
             cached_motors=cached_motors,
@@ -525,10 +507,36 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             merged["message"] = f"{count} Live-Motor{'en' if count != 1 else ''} derzeit nicht erreichbar"
         elif live_error_count:
             merged["message"] = f"{live_error_count} Live-Motor{'en' if live_error_count != 1 else ''} derzeit nicht erreichbar"
+        elif live_target_ids and motor_poll and not bool(motor_poll.get("auto_poll")):
+            merged["message"] = "Motorstatus ist gecached; Live-Werte pro Motor mit Status aktualisieren lesen"
         else:
             merged["message"] = ""
         merged["simulated_ids"] = sorted(simulated_ids)
+        merged["motor_poll"] = motor_poll
         return merged
+
+    def get_motor_poll_payload(cfg2: Optional[Settings] = None) -> dict[str, Any]:
+        cfg_local = cfg2 or Settings.load(cfg_path)
+        client = EspMotorClient(cfg_local)
+        if not client.available():
+            return {
+                "ok": False,
+                "available": False,
+                "auto_poll": False,
+                "error": "ESP motor endpoint missing or simulation enabled",
+            }
+        try:
+            payload = client.poll_state()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "available": False,
+                "auto_poll": False,
+                "error": str(exc),
+            }
+        payload["ok"] = bool(payload.get("ok", True))
+        payload["available"] = True
+        return payload
 
     def get_winder_state(role: str) -> dict[str, Any]:
         normalized = normalize_winder_role(role)
@@ -1493,9 +1501,39 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         runtime = IoRuntime(cfg2, io_store)
-        result = runtime.write_output(io_key, bool(int(req.value)))
+        result = runtime.override_output(io_key, bool(int(req.value)), source="machine-setup-ui-legacy-write")
         payload = get_io_snapshot()
         payload["write_result"] = result
+        return payload
+
+    @app.post("/api/io/{io_key}/override")
+    def io_override(request: Request, io_key: str, req: IoOverrideReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        runtime = IoRuntime(cfg2, io_store)
+        result = runtime.override_output(io_key, bool(int(req.value)), source="machine-setup-ui")
+        payload = get_io_snapshot()
+        payload["override_result"] = result
+        return payload
+
+    @app.post("/api/io/{io_key}/release")
+    def io_release(request: Request, io_key: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        runtime = IoRuntime(cfg2, io_store)
+        result = runtime.release_override(io_key)
+        payload = get_io_snapshot()
+        payload["release_result"] = result
+        return payload
+
+    @app.post("/api/io/overrides/release-all")
+    def io_release_all(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        runtime = IoRuntime(cfg2, io_store)
+        result = runtime.release_all_overrides()
+        payload = get_io_snapshot()
+        payload["release_result"] = result
         return payload
 
     @app.get("/api/params/list")
@@ -1656,6 +1694,26 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         return get_motor_overview_payload()
 
+    @app.get("/api/motors/poll")
+    def api_motor_poll_state(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_motor_poll_payload(cfg2)
+
+    @app.post("/api/motors/poll")
+    def api_motor_poll_set(request: Request, body: MotorPollReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        client = EspMotorClient(cfg2)
+        if not client.available():
+            raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
+        result = client.set_poll(bool(body.enabled))
+        if not bool(result.get("ok")):
+            raise HTTPException(status_code=502, detail=result.get("reply") or "ESP rejected MOTOR POLL command")
+        payload = get_motor_poll_payload(cfg2)
+        payload["set_result"] = result
+        return payload
+
     @app.get("/api/motors/{motor_id}")
     def api_motor_status(
         request: Request,
@@ -1778,6 +1836,22 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         return EspMotorClient(cfg2).reset_alarm(motor_id)
+
+    @app.post("/api/motors/{motor_id}/refresh")
+    def api_motor_refresh(
+        request: Request,
+        motor_id: int,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        require_live_motor_or_raise(motor_id, cfg2)
+        payload = EspMotorClient(cfg2).refresh(motor_id)
+        raw_motor = payload.get("motor") if isinstance(payload, dict) else None
+        if isinstance(raw_motor, dict):
+            get_motor_state_store().remember_motors([raw_motor])
+        return payload
 
     @app.post("/api/motors/{motor_id}/simulation")
     def api_motor_simulation(
@@ -2182,7 +2256,12 @@ setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
     .quality-live{color:var(--good); font-weight:700}
     .quality-simulation{color:var(--warn); font-weight:700}
     .quality-offline{color:var(--bad); font-weight:700}
+    .quality-override{color:#7a4f00; font-weight:700}
     .quality-default{color:#6b7280}
+    .io-high.active{background:#d7f8df; border-color:#54b96b; color:#14532d}
+    .io-low.active{background:#ffd9d9; border-color:#e57373; color:#8a1111}
+    .io-release.active{background:#fff3bf; border-color:#e0b22f; color:#654400}
+    .io-action-set{display:flex; gap:6px; flex-wrap:wrap}
     .checkline{display:inline-flex; gap:8px; align-items:center}
     @media(max-width:900px){ .hide-mobile{display:none} }
   </style>
@@ -2196,6 +2275,10 @@ setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
       <label class="btn" for="io_file">IO Workbook importieren</label>
       <input id="io_file" type="file" accept=".xlsx" style="display:none" onchange="uploadWorkbook(this.files[0])"/>
       <label class="checkline"><input type="checkbox" id="show_reserved" checked onchange="renderRows(window.__io || null)"/>Reserven anzeigen</label>
+      <label class="checkline" title="Aktiviert das ESP32-PLC Oriental-Motorpolling als 1..9 Round-Robin mit 100 ms Pause pro Motor.">
+        <input type="checkbox" id="motor_poll_enabled" onchange="setMotorPoll(this.checked)"/>ESP Motorpolling
+      </label>
+      <span id="motor_poll_status" class="muted">Motorpolling: pruefe...</span>
       <span id="status" class="muted"></span>
     </div>
     <div class="card" style="margin-bottom:12px">
@@ -2227,6 +2310,8 @@ setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
 <script>
 let refreshHandle = null;
 window.__io = null;
+window.__activeOverrides = [];
+window.__skipOverrideUnloadPrompt = false;
 
 async function api(path, opt={}){
   const r = await fetch(path, opt);
@@ -2239,6 +2324,12 @@ async function api(path, opt={}){
 function esc(v){ return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
 function qualityClass(v){ return `quality-${String(v || "default").toLowerCase()}`; }
 function valueClass(v){ return Number(v || 0) ? "state-1" : "state-0"; }
+function isPulseOnly(item){ return String(item.pin_label || "").trim().toUpperCase() === "GPIO0"; }
+function canOverride(item){ return (item.io_dir === "output" || item.io_dir === "gpio") && !isPulseOnly(item); }
+function overrideLabel(item){
+  if(!item.override_active){ return ""; }
+  return ` <span class="pill warn">Override ${Number(item.override_value || 0) ? "High" : "Low"}</span>`;
+}
 
 function renderDevices(data){
   const root = document.getElementById("devices");
@@ -2264,16 +2355,25 @@ function renderRows(data){
   if(!data){ return; }
   const showReserved = document.getElementById("show_reserved").checked;
   const rows = (data.points || []).filter(item => showReserved || !item.is_reserved).map(item => {
-    const writable = (item.io_dir === "output" || item.io_dir === "gpio") ? 1 : 0;
-    const actions = writable
-      ? `<button class="btn small" onclick="setIo('${item.io_key}',1)">Set 1</button> <button class="btn small" onclick="setIo('${item.io_key}',0)">Set 0</button>`
-      : `<span class="muted">read-only</span>`;
+    const writable = canOverride(item);
+    const overrideActive = !!item.override_active;
+    const overrideValue = Number(item.override_value || 0);
+    let actions = `<span class="muted">read-only</span>`;
+    if(writable){
+      actions = `<span class="io-action-set">
+        <button class="btn small io-high ${overrideActive && overrideValue === 1 ? "active" : ""}" onclick="overrideIo('${item.io_key}',1)">High</button>
+        <button class="btn small io-low ${overrideActive && overrideValue === 0 ? "active" : ""}" onclick="overrideIo('${item.io_key}',0)">Low</button>
+        <button class="btn small io-release ${overrideActive ? "active" : ""}" onclick="releaseIo('${item.io_key}')">Release</button>
+      </span>`;
+    }else if(isPulseOnly(item)){
+      actions = `<span class="muted">pulse/no override</span>`;
+    }
     return `<tr>
       <td>${esc(item.device_label)}</td>
       <td><strong>${esc(item.pin_label)}</strong></td>
       <td>${esc(item.io_dir)}</td>
       <td>${esc(item.function_text || (item.is_reserved ? "Reserve" : ""))}</td>
-      <td class="${valueClass(item.value)}">${esc(item.value)}</td>
+      <td class="${valueClass(item.value)}">${esc(item.value)}${overrideLabel(item)}</td>
       <td class="${qualityClass(item.quality)}">${esc(item.quality)}</td>
       <td class="hide-mobile">${esc(item.zone_label || "-")}</td>
       <td>${actions}</td>
@@ -2287,6 +2387,49 @@ function renderWorkbook(data){
   const meta = wb.meta || {};
   document.getElementById("wb_path").textContent = wb.path || "-";
   document.getElementById("wb_meta").textContent = `exists=${wb.exists ? "yes" : "no"} | size=${wb.size_bytes || 0} B | channels=${meta.channel_count || 0}`;
+}
+
+async function refreshMotorPollState(){
+  const checkbox = document.getElementById("motor_poll_enabled");
+  const label = document.getElementById("motor_poll_status");
+  if(!checkbox || !label){ return; }
+  try{
+    const data = await api("/api/motors/poll");
+    checkbox.checked = !!data.auto_poll;
+    checkbox.disabled = !data.available;
+    const interval = data.interval_ms ? `${data.interval_ms} ms` : "100 ms";
+    const nextMotor = data.next_motor ? ` | naechster Motor ${data.next_motor}` : "";
+    label.textContent = data.available
+      ? `Motorpolling: ${data.auto_poll ? "ein" : "aus"} | Round-Robin ${interval}${nextMotor}`
+      : `Motorpolling: nicht verfuegbar (${data.error || "ESP offline/simulation"})`;
+  }catch(err){
+    checkbox.checked = false;
+    checkbox.disabled = true;
+    label.textContent = `Motorpolling: ${err.message}`;
+  }
+}
+
+async function setMotorPoll(enabled){
+  const checkbox = document.getElementById("motor_poll_enabled");
+  const label = document.getElementById("motor_poll_status");
+  checkbox.disabled = true;
+  label.textContent = `Motorpolling wird ${enabled ? "aktiviert" : "deaktiviert"}...`;
+  try{
+    const data = await api("/api/motors/poll", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({enabled: !!enabled})
+    });
+    checkbox.checked = !!data.auto_poll;
+    const interval = data.interval_ms ? `${data.interval_ms} ms` : "100 ms";
+    const nextMotor = data.next_motor ? ` | naechster Motor ${data.next_motor}` : "";
+    label.textContent = `Motorpolling: ${data.auto_poll ? "ein" : "aus"} | Round-Robin ${interval}${nextMotor}`;
+  }catch(err){
+    checkbox.checked = !enabled;
+    label.textContent = `Motorpolling: ${err.message}`;
+  }finally{
+    checkbox.disabled = false;
+  }
 }
 
 function scheduleRefresh(data){
@@ -2303,21 +2446,47 @@ async function reloadAll(silent=false){
   if(!silent){ document.getElementById("status").textContent = "loading..."; }
   const data = await api("/api/io/overview");
   window.__io = data;
+  window.__activeOverrides = (data.points || []).filter(item => !!item.override_active);
   renderWorkbook(data);
   renderDevices(data);
   renderRows(data);
+  await refreshMotorPollState();
   document.getElementById("status").textContent = `${(data.points || []).length} IO-Punkte geladen`;
   scheduleRefresh(data);
 }
 
-async function setIo(ioKey, value){
-  document.getElementById("status").textContent = `schreibe ${ioKey}=${value}...`;
-  await api(`/api/io/${encodeURIComponent(ioKey)}/write`, {
+async function overrideIo(ioKey, value){
+  document.getElementById("status").textContent = `override ${ioKey}=${value ? "High" : "Low"}...`;
+  await api(`/api/io/${encodeURIComponent(ioKey)}/override`, {
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify({value})
   });
   await reloadAll(true);
+}
+
+async function releaseIo(ioKey){
+  document.getElementById("status").textContent = `release ${ioKey}...`;
+  await api(`/api/io/${encodeURIComponent(ioKey)}/release`, {method:"POST"});
+  await reloadAll(true);
+}
+
+async function releaseAllOverrides(){
+  document.getElementById("status").textContent = "gebe alle IO-Overrides frei...";
+  await api("/api/io/overrides/release-all", {method:"POST"});
+  await reloadAll(true);
+}
+
+async function handleNavigationWithOverrides(href){
+  const count = (window.__activeOverrides || []).length;
+  if(count > 0){
+    const release = confirm(`${count} IO-Ausgang/Ausgaenge sind noch uebersteuert. OK = alle freigeben, Abbrechen = uebersteuert lassen.`);
+    if(release){
+      await releaseAllOverrides();
+    }
+  }
+  window.__skipOverrideUnloadPrompt = true;
+  window.location.href = href;
 }
 
 async function uploadWorkbook(file){
@@ -2335,6 +2504,19 @@ function downloadWorkbook(){
 }
 
 reloadAll().catch(err => { document.getElementById("status").textContent = err.message; });
+document.addEventListener("click", (ev) => {
+  const link = ev.target.closest ? ev.target.closest("a[href]") : null;
+  if(!link || link.target || link.href.startsWith("javascript:")) return;
+  if((window.__activeOverrides || []).length < 1) return;
+  ev.preventDefault();
+  handleNavigationWithOverrides(link.href).catch(err => { document.getElementById("status").textContent = err.message; });
+});
+window.addEventListener("beforeunload", (ev) => {
+  if(!window.__skipOverrideUnloadPrompt && (window.__activeOverrides || []).length > 0){
+    ev.preventDefault();
+    ev.returnValue = "Es sind noch IO-Overrides aktiv. Beim Verlassen bleiben sie aktiv, wenn sie nicht freigegeben werden.";
+  }
+});
 document.addEventListener("visibilitychange", () => {
   if(!document.hidden){
     reloadAll(true).catch(err => { document.getElementById("status").textContent = err.message; });
@@ -2642,6 +2824,7 @@ load();
     __NAV__
     <div class="toolbar">
       <button class="btn" onclick="reloadAll()">Reload</button>
+      <button class="btn" onclick="refreshAllLive()">Live-Status aktualisieren</button>
       <span id="status" class="muted">loading...</span>
     </div>
     <div class="cards" id="cards"></div>
@@ -2757,6 +2940,7 @@ function renderCard(motor){
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setZero(${motor.id})">Nullpunkt setzen</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setMin(${motor.id})">Min setzen</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setMax(${motor.id})">Max setzen</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="refreshOne(${motor.id})">Status aktualisieren</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="resetAlarm(${motor.id})">Alarm Reset</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="saveConfig(${motor.id})">Parameter speichern</button>
     </div>
@@ -2883,6 +3067,23 @@ async function setZero(id){ await post(`/api/motors/${id}/zero`, {}); await relo
 async function setMin(id){ await post(`/api/motors/${id}/min`, {}); await reloadAll(); }
 async function setMax(id){ await post(`/api/motors/${id}/max`, {}); await reloadAll(); }
 async function resetAlarm(id){ await post(`/api/motors/${id}/reset-alarm`, {}); await reloadAll(); }
+async function refreshOne(id){
+  setStatus(`refresh motor ${id}...`);
+  await post(`/api/motors/${id}/refresh`, {});
+  await reloadAll();
+}
+
+async function refreshAllLive(){
+  const ids = Array.from(renderedIds).sort((a,b) => Number(a) - Number(b));
+  for(const id of ids){
+    const simEl = document.getElementById(`m-${id}-simulation`);
+    if(simEl && simEl.checked){ continue; }
+    setStatus(`refresh motor ${id}/${ids.length}...`);
+    try { await post(`/api/motors/${id}/refresh`, {}); }
+    catch(e){ console.warn(e); }
+  }
+  await reloadAll();
+}
 
 function scheduleAutoRefresh(ms){
   if(autoRefreshHandle){
@@ -2905,7 +3106,8 @@ async function reloadAll(opts = {}){
     else { updateCard(motor); }
   }
   const allSimulated = (data.motors || []).length > 0 && (data.motors || []).every(m => !!m.simulation);
-  const suffix = data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "");
+  const pollText = data.motor_poll ? ` | Auto-Poll: ${data.motor_poll.auto_poll ? "ein" : "aus"}` : "";
+  const suffix = (data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "")) + pollText;
   setStatus(`${(data.motors || []).length} Motoren geladen${suffix}`);
   const desiredMs = allSimulated ? 0 : 2000;
   if(currentAutoRefreshMs !== desiredMs){

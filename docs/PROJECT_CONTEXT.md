@@ -50,7 +50,7 @@
     - `scripts/production_topology_10_141_94.json`
     - `scripts/production_commissioning_config_patch_10_141_94.json`
     - guided runbook script `scripts/mas004_production_ibn.ps1`
-- The Raspi hardware IO layer remains simulation-first by default until a released Industrial Shields library installation is available on the Raspberry runtime.
+- The Raspi hardware IO layer uses the official `rpiplc_lib` Python API when present and otherwise falls back to the project-local `rpiplc_compat` wrapper around the installed Industrial Shields `librpiplc.so`; runtime live/simulation behavior is still controlled only by `raspi_io_simulation`.
 - The repository master workbook copy `master_data/Parameterliste SAR41-MAS-004.xlsx` was refreshed again on 2026-04-21:
   - no new or removed parameter IDs in this sync
   - 56 existing MAP rows changed, mostly `ESP32 R/W` and `KI-Anweisungen:`
@@ -62,6 +62,12 @@
   - `ESP32 R/W = R` means the ESP receives the value for use/readback but must not be the leading writer
   - Microtom writes to such `MA*` values are stored locally on the Raspi and then mirrored to the ESP via the firmware `SYNC <key>=<value>` command
   - `ESP32 R/W = W` remains the path for ESP-leading values such as motor setpoints/status mirrors
+- ESP32-PLC eth1 command channel contract:
+  - The ESP endpoint `192.168.2.101:3010` is a short-lived, single-client W5500/TCP command socket.
+  - The RPI-Databridge serializes all Raspi-originated ESP commands per endpoint and applies a short cooldown after connection failures.
+  - ESP timeouts are separated from normal HTTP timeouts: connect, short read and longer command paths are tuned independently.
+  - Writes are not blindly retried; only safe read-style commands may be retried once with a short backoff.
+  - ESP-originated `MA*` readbacks on the push listener are answered locally from the Raspi parameter store to avoid reentrant calls back into the ESP while the ESP is waiting for a reply.
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
   - `/ui/machine-setup/commissioning`
@@ -91,6 +97,8 @@
   - the motor cards are now also available when the ESP endpoint is missing or still in simulation; a fixed machine catalog acts as the baseline view and live ESP data only overlays when reachable
   - each motor now also has its own local simulation toggle on the Raspi UI; simulated motors are excluded from live polling and instead use last known cached values or the fixed catalog defaults
   - if all visible motors are simulated, the page pauses its background refresh loop to avoid `loading...` flicker and unnecessary overview calls
+  - ESP background motor polling intentionally stays off by default (`MOTOR POLL=0`) because the ESP owns a single TCP command socket and Modbus RTU timeouts can otherwise block process/Wickler control
+  - the Raspi page therefore keeps the auto-refresh view cache-based, reads only the lightweight `MOTOR POLL?` state automatically and offers an explicit per-motor `Status aktualisieren` action that sends `MOTOR <id> REFRESH` for one AZD controller at a time
 - New Smart Wickler proxy surface on the Raspi web UI:
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
@@ -249,6 +257,26 @@
 - `mas004-rpi-databridge.service`
 - Working dir on Pi: `/opt/MAS-004_RPI-Databridge`
 
+## ESP32-PLC eth1 Communication Baseline (2026-05-01)
+- ESP32-PLC endpoint on the machine subnet: `192.168.2.101:3010`
+- The Raspi is the only production orchestrator for this TCP path.
+- Use `EspPlcClient` for all runtime traffic:
+  - one per-endpoint lock serializes access
+  - semi-persistent sockets are recycled after bounded request batches
+  - a small inter-command pace avoids W5500 burst overload
+  - transient socket windows are retried inside the same command call
+- The ESP firmware is hardened for this contract:
+  - no unsolicited TCP banner
+  - one active client; parallel external clients receive `NAK_Busy`
+  - incomplete lines are closed by timeout and the listener recovers
+  - verbose per-request serial logging is disabled
+  - outbound ESP->Raspi draining waits for a quiet inbound window
+- Current field stress proof with Databridge active:
+  - `1500/1500` serial safe commands acknowledged
+  - `1600/1600` commands acknowledged with 8 contending stress workers
+  - held partial-line client returned `NAK_Busy`, then recovered to `PONG`
+- Raw unpaced socket storms are not a supported production access pattern because they bypass Raspi-side backpressure.
+
 ## Priority Rule
 - This repo is the orchestration authority.
 - Subprojects must be treated as extensions of this repo, not peers.
@@ -287,6 +315,19 @@
 - `MAS-004_VJ3350-Ultimate-Bridge`: VJ3350 transport/probe subproject
 - `MAS-004_VJ6530-ZBC-Bridge`: VJ6530 transport/probe subproject
 - `MAS-004_ZBC-Library`: shared ZBC transport/message library for the 6530 stack
+
+## Machine-Setup IO Override Contract
+- `/ui/machine-setup/io` is the protected commissioning view for hardware IO checks.
+- Output overrides are persistent by design:
+  - `High` forces an output high until `Release`.
+  - `Low` forces an output low until `Release`.
+  - normal machine runtime writers must respect the override and skip physical writes while it is active.
+- Active overrides are stored in `io_values.override_*` and shown with quality `override`.
+- `GPIO0` is reserved for the ESP LED-stripe pulse output and is excluded from manual override.
+- Leaving the IO page with active overrides should be a conscious decision; the UI asks whether all active overrides should be released or kept active.
+- The same IO page exposes `ESP Motorpolling` for commissioning:
+  - it maps to `MOTOR POLL=1/0` on the ESP32-PLC
+  - firmware-side polling is intentionally paced as one motor per step, `100 ms` between motor polls, cycling `1..9`
 
 ## TTO Mapping Source of Truth
 - The Videojet 6530 TTO mapping now uses the live-readable CLARiTY parameter archive from `MAS-004_ZBC-Library`:

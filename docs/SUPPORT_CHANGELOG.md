@@ -1,5 +1,68 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-04-30 (eth1 ESP32-PLC-Kommunikation robuster)
+- Raspi-seitiger ESP-TCP-Client serialisiert Zugriffe pro `host:port` jetzt ueber einen Endpoint-Lock. Dadurch konkurrieren Motor-UI, IO-Snapshot, MAC-Prozesssteuerung und Parameter-Mirroring nicht mehr gleichzeitig um den Single-Client-W5500-Socket der ESP32-PLC.
+- Nach ESP-Verbindungsfehlern gibt es einen kurzen exponentiellen Cooldown statt sofortiger Retry-Stuerme auf `192.168.2.101:3010`.
+- ESP-spezifische Timeouts wurden von `http_timeout_s` getrennt:
+  - `esp_connect_timeout_s = 1.5`
+  - `esp_read_timeout_s = 2.0`
+  - `esp_command_timeout_s = 8.0`
+- Wenn diese neuen Felder in einer bestehenden Runtime-Config fehlen oder `null` sind, verwendet der Code die neuen kurzen Defaults und faellt nicht mehr auf den alten allgemeinen `http_timeout_s` zurueck.
+- Schreibende ESP-Kommandos werden nicht automatisch mehrfach wiederholt, damit keine Relativfahrten oder Setzbefehle doppelt ausgefuehrt werden. Nur Read-Pfade erhalten einen kurzen, kontrollierten Retry.
+- ESP-Push-Reads fuer `MA*`-Parameter werden nun lokal aus der Raspi-Parameterdatenbank beantwortet. Damit entsteht kein reentrant TCP-Callback zum ESP, waehrend der ESP auf die Push-Antwort wartet.
+- Grosse JSON-Antworten wie `MOTOR LIST?`/Status-Snapshots nutzen explizit groessere Read-Limits; normale Kurzbefehle bleiben klein und schnell.
+- Tests ergaenzt:
+  - `tests/test_esp_plc_client.py`
+  - `tests/test_esp_push_listener.py`
+
+## 2026-04-30 (Oriental-Motorstatus ohne blockierendes ESP-Auto-Polling)
+- Ursache fuer `link:false` auf `/ui/machine-setup/motors` eingegrenzt: Der ESP32-PLC-Motor-Manager startet bewusst mit `MOTOR POLL=0`, damit fehlende oder langsame AZD-Teilnehmer den ESP-TCP-Endpunkt nicht blockieren.
+- `MOTOR POLL=1` wurde live testweise aktiviert; die ersten AZD-IDs antworteten darauf, aber der ESP-TCP-Endpunkt blockierte waehrend des RTU-Polls zeitweise. Auto-Poll wurde deshalb wieder auf `MOTOR POLL=0` gesetzt.
+- Die Raspi-Motors-UI fragt den ESP nun nicht mehr ueber den grossen Sammelbefehl `MOTOR LIST?` ab, sondern ueber kleine Einzelstatus-Frames. Das verhindert gekappte JSON-Antworten und reduziert die Last.
+- Pro Motor gibt es jetzt einen expliziten `Status aktualisieren`-Pfad (`MOTOR <id> REFRESH`), der genau diesen einen AZD ueber Modbus RTU live liest und die Werte cached.
+- Nach Verifikation am echten ESP wurde die Uebersicht weiter entschaerft: Auto-Refresh liest nur noch Cache plus `MOTOR POLL?`; auch kleine 9-fache `STATUS?`-Abfragen waren fuer den ESP/W5500-Single-Socket zu viel.
+- Die Uebersichtsseite zeigt den Auto-Poll-Zustand an; fuer IBN/Service bleibt manuelles Refresh der bevorzugte Weg, solange der ESP parallel Prozess-/Wicklersteuerung macht.
+
+## 2026-04-30 (MAC-Orchestrierung: Wickler-Indexed sauber verlassen)
+- `MAC0001=0` setzt beide Wickler vor dem Stop explizit aus `indexedModeEnabled=1` heraus und sendet danach `/api/mode stop`.
+- `MAC0001=1` schaltet die Wickler vor Reset/ETO/Einmessen ebenfalls aus dem Indexed-Modus, damit keine alte Taktfahrt in die Messfahrt hineinwirkt.
+- `MAC0001=3/4` deaktiviert vor kontinuierlichem Vor-/Ruecklauf den Wickler-Indexed-Modus.
+- Hintergrund: Nach Takt-/Messabbruechen konnte ein Wickler mit alter Indexed-Konfiguration im Drive-MOVE-Zustand haengen bleiben; der Raspi bereitet die Wickler nun vor Service-/Kontinuierlichfahrten deterministisch vor.
+
+## 2026-04-30 (Produktions-Raspi mit MAC-IBN-Stand deployed)
+- Produktions-/IBN-Raspi `10.141.94.213` wurde mit dem aktuellen Raspi-Code fuer die temporaeren `MAC0001..MAC0006`-Kommandos aktualisiert.
+- Runtime-Settings unter `/etc/mas004_rpi_databridge/config.json` wurden nicht ueberschrieben.
+- Masterliste wurde nach `/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx` kopiert und in die SQLite-Parameterdatenbank importiert.
+- Importergebnis auf dem Raspi: `inserted=21`, `updated=735`, `skipped=0`.
+- `mas004-rpi-databridge.service` wurde neu installiert/restarted und ist wieder `active`; `/health` antwortet `{"ok":true}`.
+- SmartWickler-Firmwares wurden danach erfolgreich geflasht:
+  - Abwickler ueber `COM9`
+  - Aufwickler ueber `COM8`
+- ESP32-PLC-Firmware wurde nach erneut sichtbarem `/dev/esp32plc58` ueber den Raspi erfolgreich geflasht.
+- ESP-Verifikation nach Flash:
+  - `PING -> PONG`
+  - `INFO` meldet `MAS-004_ESP32-PLC-Firmware`, `ip=192.168.2.101`, `port=3010`
+  - `PROCESS INDEXED STATUS?` liefert JSON mit `running=false`, `completed=true`, `last_error="reset"`
+
+
+## 2026-04-30 (Temporaere MAC-IBN-Kommandos fuer produktionsnahe Wickler-/Transporttests)
+- Neue Raspi-seitige `MAC`-Befehlsfamilie in der Master-Excel angelegt und als temporaer dokumentiert.
+- `MAC0001` dispatcht Microtom-Testtool-Kommandos an produktionsnahe Raspi-/ESP32-PLC-/Wickler-Abläufe:
+  - `0` Stop
+  - `1` Wickler einmessen + 1000-mm-Messfahrt + Durchmesseruebernahme
+  - `2` getakteter Testbetrieb
+  - `3` kontinuierlich vorziehen
+  - `4` kontinuierlich zurueckspulen
+- `MAC0002..MAC0006` halten Labellaenge, Geschwindigkeit, Rampe, kontinuierliche Laenge und Taktanzahl.
+- Neuer `process_test_controller.py` orchestriert diese IBN-Kommandos ueber den ESP32-PLC-Endpunkt und die beiden SmartWickler-HTTP-Serviceendpunkte.
+- Alte Laptop-/CSV-Teststeuerung wird dadurch fuer die naechsten Tests nicht mehr als fuehrender Ablauf verwendet.
+
+## 2026-04-30 (Masterdaten: Wickler-Fuellstandswarnungen getrennt)
+- Master-Workbook `Parameterliste SAR41-MAS-004.xlsx` aktualisiert und Repo-Kopie in `master_data/` synchronisiert.
+- `MAP0023` bleibt Abwickler-Vorwarnung bei niedrigem Fuellstand: `MAS0008 <= MAP0023`, Default `5 %`.
+- `MAP0024` ist jetzt die Aufwickler-Vollwarnung: `MAS0009 >= MAP0024`, Default `95 %`.
+- KI-Anweisungen und Sync-Hilfstext wurden korrigiert, damit die alte falsche Aufwickler-Logik `MAS0009 < 5 %` nicht wieder generiert wird.
+
 ## 2026-04-22 (Production IBN Cutover)
 - Added a dedicated internal HTTP device inbox on `:8081` for ESP32/W5500 devices that cannot post to the HTTPS UI/API port directly.
   - Public/operator UI remains HTTPS on `:8080`.
@@ -681,6 +744,54 @@
 - Hardened Pi package reinstall in `scripts/mas004_multirepo_sync.ps1`:
   - uses `--no-deps --no-build-isolation`
   - avoids dependency downloads during deploy, which is important when the Pi clock is wrong before first NTP sync
+
+## 2026-04-30 (MAC Test Commands + Smart Wickler Device Push)
+- Added temporary Microtom-test command handling for the process bring-up path:
+  - `MAC0001=1` runs Wickler calibration plus a 1000 mm forward/reverse diameter measurement.
+  - `MAC0001=2/3/4` starts indexed, continuous forward, or continuous reverse test motion via the ESP32-PLC.
+- Hardened the `MAC0001=1` learning run:
+  - the Raspi now waits for the expected Motor-3 travel time and position feedback before starting the reverse pass.
+  - this prevents a premature reverse pass if the ESP busy flag is not visible immediately.
+  - the measuring pass now uses the ESP command `MOTOR 3 MOVE_REL_MM_OP=...` so forward and reverse setup moves are executed through AZD operation start, not through the production hardware START hold-time path.
+- Fixed Smart Wickler status pushes into `/api/inbox`:
+  - `source=smartwickler` messages are now treated as device-originated values.
+  - read-only Microtom values such as `MAS0008`, `MAS0009`, `MAS0026`, `MAS0027`, and `MAE*` are stored locally and forwarded as status updates instead of returning `NAK_ReadOnly`.
+
+## 2026-04-30 (Raspberry PLC21 IO Runtime Fallback)
+- Added a project-local `rpiplc_compat` fallback for Raspberry PLC21 IO access.
+- The Databridge still prefers the official Industrial Shields `rpiplc_lib` module when installed.
+- If `rpiplc_lib` is missing, the fallback uses the already installed `/usr/lib/librpiplc.so` and the verified `RPIPLC_21` pin mapping for `I0.0..I0.12`, `Q0.0..Q0.7`, and `A0.5..A0.7`.
+- This fixes the Machine-Setup IO page showing all Raspberry PLC21 points as offline with `No module named 'rpiplc_lib'` on systems where the native library exists but the Python binding was not installed.
+
+## 2026-05-01 (ESP32-PLC eth1 Communication Hardening)
+- Hardened the Raspi-side ESP32-PLC TCP client:
+  - per-endpoint lock remains the single production access lane to `192.168.2.101:3010`
+  - connection reuse is now semi-persistent and deliberately recycled after 40 request/response cycles
+  - a small inter-command pace prevents burst storms against the W5500 socket
+  - transient W5500 reconnect windows are retried inside the same command call instead of immediately surfacing as lost commands
+- Added `scripts/esp_eth1_stress.py` as a non-invasive stress tool.
+- Verified on the production/test machine with Databridge running:
+  - `locked-serial`: `1500/1500` safe diagnostic commands acknowledged
+  - `locked-parallel`: `1600/1600` commands acknowledged through 8 contending worker threads
+  - `busy-probe`: incomplete half-line client returns `NAK_Busy`; after line timeout the endpoint recovers to `PONG`
+- Raw unpaced socket storms are not the production contract; production traffic must go through `EspPlcClient` so endpoint locking, pacing and retries are active.
+
+## 2026-05-01 (Machine-Setup IO Persistent Overrides)
+- Reworked `/ui/machine-setup/io` output control from momentary `Set 1` / `Set 0` writes to persistent manual overrides:
+  - `High` stores a manual high override and is highlighted light green while active.
+  - `Low` stores a manual low override and is highlighted light red while active.
+  - `Release` clears the override and is highlighted light yellow whenever either High or Low is active.
+- Normal machine/runtime writers now respect active IO overrides and do not overwrite the physical output until the override is released.
+- IO refresh keeps overridden values visible with quality `override` instead of replacing them with live/simulation snapshots.
+- `GPIO0` is treated as pulse-only for the LED stripe and cannot be manually overridden from this page.
+- Internal navigation away from the IO page asks whether active overrides should be released or intentionally kept active.
+
+## 2026-05-01 (Machine-Setup IO Motorpolling Switch)
+- Added an `ESP Motorpolling` checkbox to `/ui/machine-setup/io`.
+- Added protected endpoints:
+  - `GET /api/motors/poll` reads `MOTOR POLL?`.
+  - `POST /api/motors/poll` writes `MOTOR POLL=1/0`.
+- The ESP firmware contract is now explicit: enabled motor polling is a round-robin over motors `1..9` with `100 ms` minimum pause between individual motor polls, then wraps back to motor `1`.
 
 ## Maintenance Rule
 - Add one entry for every change that affects:

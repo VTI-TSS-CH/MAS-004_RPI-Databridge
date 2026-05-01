@@ -88,6 +88,36 @@
   - import through the protected Machine-Setup I/O page or the IO import endpoint
   - source workbook: `master_data/SAR41-MAS-004_SPS_I-Os.xlsx`
   - expected side effect: the IO catalog, point states and workbook-backed labels are updated from the same payload
+- Oriental motor live status:
+  - the 9 Oriental drives sit behind the ESP32-PLC Modbus-RTU bus, not directly behind the Raspi
+  - the ESP starts with background motor polling disabled (`MOTOR POLL=0`) so missing/slow AZD controllers cannot block the ESP TCP command socket
+  - the Machine-Setup motors page shows cached status by default, auto-reads only `MOTOR POLL?`, and has a per-motor `Status aktualisieren` action that sends `MOTOR <id> REFRESH`
+  - avoid leaving `MOTOR POLL=1` enabled during process/Wickler tests; it can block the single ESP TCP endpoint while Modbus RTU timeouts are running
+  - quick manual check from the Raspi:
+    - `PING`
+    - `MOTOR POLL?`
+    - `MOTOR 3 STATUS?`
+    - `MOTOR 3 REFRESH`
+- ESP eth1 communication hygiene:
+  - `192.168.2.101:3010` is treated as a single-client command socket; do not run additional polling tools continuously in parallel with the Databridge.
+  - Raspi runtime serializes ESP commands internally, but external manual tests should still be short and deliberate.
+  - Normal quick checks from the Raspi are `PING`, `INFO`, `STATUS?`, `MOTOR POLL?` and one targeted command such as `MOTOR 3 STATUS?`.
+  - If the ESP is slow or temporarily unreachable, let the Databridge cooldown expire instead of starting rapid repeated commands.
+  - ESP timeout defaults are intentionally shorter than generic HTTP: connect `1.5 s`, read `2.0 s`, command `8.0 s`.
+  - When diagnosing process/Wickler tests, leave diagnostics low: no continuous `MOTOR LIST?`, no background `MOTOR POLL=1`, no parallel shell stress loops.
+
+## 2.1 Temporary IBN Commands Via Microtom
+- The `MAC` command family is temporary and only for commissioning tests; remove or replace it before final Microtom interface release.
+- `MAC0001=0`: stop current process test.
+- `MAC0001=1`: calibrate both Smart Wicklers, run the 1000-mm diameter measurement forward/back, and write the learned diameters to the Wicklers.
+- `MAC0001=2`: start indexed/takt test on the ESP32-PLC.
+- `MAC0001=3`: continuous forward feed through Motor 3.
+- `MAC0001=4`: continuous reverse feed through Motor 3.
+- `MAC0002`: indexed label/travel length in 1/10 mm, default `1000` = `100.0 mm`.
+- `MAC0003`: feed speed in mm/s, default `100`.
+- `MAC0004`: acceleration/deceleration ramp in mm/s2, default `300`.
+- `MAC0005`: continuous travel length in 1/10 mm; `0` means endless until `MAC0001=0`.
+- `MAC0006`: indexed cycle count; `0` means endless until `MAC0001=0`.
 
 ## 3. Pi Commands
 - Production update:
@@ -305,18 +335,43 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `ESP32-PLC58` stays on the realtime side and should only receive the IO snapshot/control traffic it actually needs
   - the two `Moxa ioLogik E1211` modules are handled as slow field IO on the Raspi side
   - Moxa simulation should stay enabled by default on live/test until the networked hardware is intentionally validated
-  - Raspberry hardware IO remains simulation-first until an approved Industrial Shields runtime library installation is available
+  - Raspberry PLC21 IOs require either the official Industrial Shields `rpiplc_lib` Python module or the project-local `rpiplc_compat` fallback against `/usr/lib/librpiplc.so`
+  - if the UI shows `rpiplc unavailable`, verify that `/usr/lib/librpiplc.so` is present and that the deployed Databridge includes `mas004_rpi_databridge/rpiplc_compat.py`
+  - `raspi_io_simulation` is the only switch that decides whether PLC21 IOs are polled live or held in simulation
   - if the IO workbook changes, re-import it so the page and the backend stay aligned with the sheet
+  - manual output checks on `/ui/machine-setup/io` must use `High` / `Low` / `Release`, not one-shot writes
+  - an active `High` or `Low` override has priority over normal machine-state LED/status writers until `Release` is pressed
+  - before leaving the IO page, release active overrides unless the commissioning/test procedure explicitly requires them to stay forced
+  - `GPIO0` is the ESP LED-stripe pulse output and is intentionally not overrideable from the IO page
+  - the `ESP Motorpolling` checkbox on the same page toggles `MOTOR POLL=1/0` on the ESP32-PLC
+  - enabled motor polling must remain a paced ESP-side round-robin: motor `1` through `9`, `100 ms` pause between individual motor polls, then repeat
 - For parameter sync to the ESP:
   - `ESP32 R/W = N` means no ESP transfer
   - `ESP32 R/W = R` means Raspi/Microtom is leading and the ESP receives updates via `SYNC <key>=<value>`
   - `ESP32 R/W = W` or `R/W` remains the ESP-leading/direct write path
   - if a Microtom write to a MAP value starts returning `NAK_ReadOnly` from the ESP, verify that the Raspi and firmware both include the 2026-04-21 `SYNC` contract
+- For ESP32-PLC eth1 reliability:
+  - all production traffic to `192.168.2.101:3010` must use `EspPlcClient`
+  - do not add ad-hoc raw socket loops in runtime code; they bypass endpoint locking, pacing and retry protection
+  - safe non-invasive stress test:
+    - `cd /opt/MAS-004_RPI-Databridge`
+    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase locked-serial --iterations 1500`
+    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase locked-parallel --workers 8 --per-worker 200`
+    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase busy-probe --line-timeout-wait-s 2.2`
+  - expected result on the current production/test stand:
+    - serial and parallel phases have only `ok` classes
+    - busy probe returns `NAK_Busy` for a held partial line and recovers to `PONG`
+  - high parallel latency includes intentional queue wait behind the endpoint lock; it is backpressure, not lost commands
+  - if errors appear, first verify the Databridge service is active and that ESP firmware includes the 2026-05-01 W5500 hardening
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
   - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`
   - direct eth0 reachability is expected; no TCP forwarding is used anymore
   - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open inside the main Machine-Setup shell and show a stable simulation/offline state instead of failing hard
+  - Smart Wickler pushes to `/api/inbox` must include `source=smartwickler`; these messages are device status updates and must not be validated as Microtom writes.
+  - If Microtom receives `MAS0008/MAS0009/MAS0026/MAS0027/MAE* = NAK_ReadOnly` after a Wickler status change, verify that the deployed Router includes the device-origin inbox path from 2026-04-30.
+  - Temporary IBN command `MAC0001=1` performs Wickler calibration plus a 1000 mm forward/reverse diameter measurement; if only about 500 mm is travelled, inspect Motor-3 busy/position feedback and the minimum travel-time wait.
+  - The `MAC0001=1` measuring run expects ESP firmware support for `MOTOR 3 MOVE_REL_MM_OP=...`; this deliberately avoids the hardware START hold-time path that is reserved for takt/production timing.
 - For commissioning/backup handling:
   - protected `Machine-Setup` login must be required before commissioning or backup APIs are usable
   - machine serial number and machine name should be set before creating qualification-relevant backup bundles

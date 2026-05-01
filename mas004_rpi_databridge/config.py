@@ -64,6 +64,9 @@ class Settings:
     esp_port: int = 3010
     esp_simulation: bool = True
     esp_watchdog_host: str = ""
+    esp_connect_timeout_s: float = 1.5
+    esp_read_timeout_s: float = 2.0
+    esp_command_timeout_s: float = 8.0
     esp_io_poll_interval_s: float = 1.0
     raspi_plc_model: str = "RPIPLC_21"
     raspi_io_simulation: bool = True
@@ -123,3 +126,12 @@ class Settings:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.__dict__, f, indent=2, sort_keys=False)
+
+    def get_float(self, name: str, default: float) -> float:
+        value = getattr(self, name, default)
+        if value is None or value == "":
+            return float(default)
+        try:
+            return float(value)
+        except Exception:
+            return float(default)

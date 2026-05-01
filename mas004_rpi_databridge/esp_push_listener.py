@@ -167,6 +167,12 @@ class EspPushListener:
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")
             return resp
 
+        if op == "read" and dev == "esp-plc":
+            ok, msg = params.validate_read(pkey, actor="esp32")
+            resp = f"{pkey}={params.get_effective_value(pkey)}" if ok else f"{pkey}={msg}"
+            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            return resp
+
         if op == "read":
             resp = bridge.execute(device=dev, pkey=pkey, ptype=ptype, op="read", value="?", actor="esp32")
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")

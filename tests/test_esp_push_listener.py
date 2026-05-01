@@ -1,0 +1,68 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from mas004_rpi_databridge.config import Settings
+from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.device_bridge import DeviceBridge
+from mas004_rpi_databridge.esp_push_listener import EspPushListener
+from mas004_rpi_databridge.params import ParamStore
+
+
+def _insert_param(db: DB, pkey: str, ptype: str, pid: str, default_v: str, rw: str, esp_rw: str):
+    with db._conn() as c:
+        c.execute(
+            """INSERT INTO params(
+                pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                message,possible_cause,effects,remedy,updated_ts
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                pkey,
+                ptype,
+                pid,
+                None,
+                None,
+                default_v,
+                "",
+                rw,
+                esp_rw,
+                "uint16",
+                pkey,
+                "NO",
+                None,
+                None,
+                None,
+                None,
+                now_ts(),
+            ),
+        )
+
+
+class EspPushListenerTests(unittest.TestCase):
+    def test_esp_read_for_ma_param_is_served_locally_without_esp_tcp_callback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0026", "MAS", "0026", "3", "W", "R")
+            ParamStore(db).set_value("MAS0026", "7", actor="microtom")
+            cfg = Settings(db_path=str(db_path), peer_base_url="", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            with patch.object(DeviceBridge, "execute", side_effect=AssertionError("must not call ESP TCP")):
+                self.assertEqual("MAS0026=7", listener._process_line("MAS0026=?"))
+
+    def test_esp_read_for_no_access_ma_param_returns_nak_without_esp_tcp_callback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0029", "MAS", "0029", "", "W", "N")
+            cfg = Settings(db_path=str(db_path), peer_base_url="", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            with patch.object(DeviceBridge, "execute", side_effect=AssertionError("must not call ESP TCP")):
+                self.assertEqual("MAS0029=NAK_NoAccess", listener._process_line("MAS0029=?"))
+
+
+if __name__ == "__main__":
+    unittest.main()

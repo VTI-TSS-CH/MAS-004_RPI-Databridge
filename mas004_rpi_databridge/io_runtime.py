@@ -36,11 +36,20 @@ def _ensure_rpiplc(model: str):
         _RPIPLC_MODEL = model
         _RPIPLC_ERROR = ""
         return _RPIPLC_MODULE, ""
-    except Exception as exc:
-        _RPIPLC_MODULE = None
-        _RPIPLC_MODEL = ""
-        _RPIPLC_ERROR = str(exc)
-        return None, _RPIPLC_ERROR
+    except Exception as first_exc:
+        try:
+            from mas004_rpi_databridge import rpiplc_compat as rpiplc
+
+            rpiplc.init(model)
+            _RPIPLC_MODULE = rpiplc
+            _RPIPLC_MODEL = model
+            _RPIPLC_ERROR = ""
+            return _RPIPLC_MODULE, ""
+        except Exception as fallback_exc:
+            _RPIPLC_MODULE = None
+            _RPIPLC_MODEL = ""
+            _RPIPLC_ERROR = f"{first_exc}; fallback failed: {fallback_exc}"
+            return None, _RPIPLC_ERROR
 
 
 class IoRuntime:
@@ -69,20 +78,43 @@ class IoRuntime:
             "points": self.store.list_points(include_reserved=True),
         }
 
-    def write_output(self, io_key: str, enabled: bool) -> Dict[str, Any]:
+    def write_output(
+        self,
+        io_key: str,
+        enabled: bool,
+        *,
+        force: bool = False,
+        source: str = "runtime",
+    ) -> Dict[str, Any]:
         point = self.store.get_point(io_key)
         if not point:
             raise RuntimeError(f"Unknown IO point '{io_key}'")
         if point["io_dir"] not in {"output", "gpio"}:
             raise RuntimeError(f"IO point '{point['pin_label']}' is not writable")
+        if bool(point.get("override_active")) and not force:
+            override_value = _to_int01(point.get("override_value", point.get("value", "0")))
+            return {
+                "ok": True,
+                "overridden": True,
+                "requested_value": 1 if enabled else 0,
+                "value": override_value,
+                "source": source,
+            }
 
         device_code = point["device_code"]
         if device_code == "esp32_plc58":
             if bool(self.cfg.esp_simulation) or not (self.cfg.esp_host or "").strip() or int(self.cfg.esp_port or 0) <= 0:
                 self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", "esp-sim")
                 return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
-            client = EspPlcClient(self.cfg.esp_host, self.cfg.esp_port, timeout_s=self.cfg.http_timeout_s)
-            response = client.exchange_line(f"IO SET {point['pin_label']}={1 if enabled else 0}")
+            client = EspPlcClient(
+                self.cfg.esp_host,
+                self.cfg.esp_port,
+                timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
+            )
+            response = client.exchange_line(
+                f"IO SET {point['pin_label']}={1 if enabled else 0}",
+                read_timeout_s=self.cfg.get_float("esp_command_timeout_s", 8.0),
+            )
             if "NAK" in (response or "").upper():
                 raise RuntimeError(response)
             self.store.upsert_value(io_key, 1 if enabled else 0, "live", "esp32")
@@ -113,6 +145,28 @@ class IoRuntime:
 
         raise RuntimeError(f"Unsupported writable IO device '{device_code}'")
 
+    def override_output(self, io_key: str, enabled: bool, source: str = "manual-ui") -> Dict[str, Any]:
+        point = self.store.get_point(io_key)
+        if not point:
+            raise RuntimeError(f"Unknown IO point '{io_key}'")
+        if point["io_dir"] not in {"output", "gpio"}:
+            raise RuntimeError(f"IO point '{point['pin_label']}' is not writable")
+        if self._is_pulse_only(point):
+            raise RuntimeError(f"IO point '{point['pin_label']}' is pulse-only and cannot be overridden")
+        write_result = self.write_output(io_key, enabled, force=True, source=source)
+        override_result = self.store.set_override(io_key, 1 if enabled else 0, source=source)
+        write_result.update(override_result)
+        return write_result
+
+    def release_override(self, io_key: str) -> Dict[str, Any]:
+        point = self.store.get_point(io_key)
+        if not point:
+            raise RuntimeError(f"Unknown IO point '{io_key}'")
+        return self.store.release_override(io_key)
+
+    def release_all_overrides(self) -> Dict[str, Any]:
+        return self.store.release_all_overrides()
+
     def _refresh_device(self, device_code: str, device_points: List[Dict[str, Any]]) -> Dict[str, Any]:
         if device_code == "esp32_plc58":
             return self._refresh_esp(device_points)
@@ -130,14 +184,21 @@ class IoRuntime:
         if not host or port <= 0:
             return self._apply_static_quality("esp32_plc58", device_points, "offline", "esp32", "ESP endpoint missing")
         try:
-            client = EspPlcClient(host, port, timeout_s=self.cfg.http_timeout_s)
-            raw = client.exchange_line("IO SNAPSHOT?", read_timeout_s=max(1.0, float(getattr(self.cfg, "esp_io_poll_interval_s", 1.0) or 1.0) + 1.0))
+            client = EspPlcClient(
+                host,
+                port,
+                timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
+            )
+            raw = client.exchange_line(
+                "IO SNAPSHOT?",
+                read_timeout_s=max(1.0, self.cfg.get_float("esp_read_timeout_s", 2.0)),
+            )
             payload = json.loads(raw or "{}")
             snapshot = payload.get("points") if isinstance(payload, dict) else {}
             changed = 0
             for point in device_points:
                 value = _to_int01((snapshot or {}).get(point["pin_label"], point.get("value", "0")))
-                if self.store.upsert_value(point["io_key"], value, "live", "esp32"):
+                if self._upsert_runtime_value(point, value, "live", "esp32"):
                     changed += 1
             return self._device_result("esp32_plc58", device_points, False, True, "", changed)
         except Exception as exc:
@@ -162,10 +223,10 @@ class IoRuntime:
                         value = _to_int01(rpiplc.digital_read(pin))
                     except Exception:
                         value = _to_int01(point.get("value", "0"))
-                if self.store.upsert_value(point["io_key"], value, "live", "raspi"):
+                if self._upsert_runtime_value(point, value, "live", "raspi"):
                     changed += 1
             except Exception:
-                if self.store.upsert_value(point["io_key"], point.get("value", "0"), "offline", "raspi"):
+                if self._upsert_runtime_value(point, point.get("value", "0"), "offline", "raspi"):
                     changed += 1
         return self._device_result("raspi_plc21", device_points, False, True, "", changed)
 
@@ -181,7 +242,7 @@ class IoRuntime:
             changed = 0
             for point in device_points:
                 value = _to_int01(snapshot.get(point["pin_label"], point.get("value", "0")))
-                if self.store.upsert_value(point["io_key"], value, "live", device_code):
+                if self._upsert_runtime_value(point, value, "live", device_code):
                     changed += 1
             return self._device_result(device_code, device_points, False, True, "", changed)
         except Exception as exc:
@@ -198,9 +259,22 @@ class IoRuntime:
         changed = 0
         for point in device_points:
             fallback = point.get("value", "0")
-            if self.store.upsert_value(point["io_key"], fallback, quality, source):
+            if self._upsert_runtime_value(point, fallback, quality, source):
                 changed += 1
         return self._device_result(device_code, device_points, quality == "simulation", False, error, changed)
+
+    def _upsert_runtime_value(self, point: Dict[str, Any], value: Any, quality: str, source: str) -> bool:
+        if bool(point.get("override_active")):
+            return self.store.upsert_value(
+                point["io_key"],
+                _to_int01(point.get("override_value", point.get("value", "0"))),
+                "override",
+                point.get("override_source") or "manual-ui",
+            )
+        return self.store.upsert_value(point["io_key"], value, quality, source)
+
+    def _is_pulse_only(self, point: Dict[str, Any]) -> bool:
+        return str(point.get("pin_label") or "").strip().upper() == "GPIO0"
 
     def _device_result(
         self,

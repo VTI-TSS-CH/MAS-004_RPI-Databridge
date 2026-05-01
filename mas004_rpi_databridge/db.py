@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS io_values (
   quality TEXT NOT NULL DEFAULT 'unknown',
   source TEXT NOT NULL DEFAULT '',
   updated_ts REAL NOT NULL,
+  override_value TEXT,
+  override_source TEXT NOT NULL DEFAULT '',
+  override_updated_ts REAL NOT NULL DEFAULT 0,
   FOREIGN KEY(io_key) REFERENCES io_points(io_key) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_io_values_quality ON io_values(quality, updated_ts);
@@ -308,6 +311,12 @@ def _apply_migrations(conn: sqlite3.Connection):
     io_value_cols = {row[1] for row in conn.execute("PRAGMA table_info(io_values)").fetchall()}
     if io_value_cols and "source" not in io_value_cols:
         conn.execute("ALTER TABLE io_values ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+    if io_value_cols and "override_value" not in io_value_cols:
+        conn.execute("ALTER TABLE io_values ADD COLUMN override_value TEXT")
+    if io_value_cols and "override_source" not in io_value_cols:
+        conn.execute("ALTER TABLE io_values ADD COLUMN override_source TEXT NOT NULL DEFAULT ''")
+    if io_value_cols and "override_updated_ts" not in io_value_cols:
+        conn.execute("ALTER TABLE io_values ADD COLUMN override_updated_ts REAL NOT NULL DEFAULT 0")
     machine_state_cols = {row[1] for row in conn.execute("PRAGMA table_info(machine_state)").fetchall()}
     if machine_state_cols and "production_label" not in machine_state_cols:
         conn.execute("ALTER TABLE machine_state ADD COLUMN production_label TEXT NOT NULL DEFAULT ''")
