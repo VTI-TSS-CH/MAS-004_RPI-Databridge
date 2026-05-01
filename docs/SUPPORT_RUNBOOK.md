@@ -388,6 +388,12 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second
     - reset running: `Q0.2` blinks, no red
     - reset complete: `Q0.2` steady
+- For motor setup and calibration:
+  - `Parameter speichern` writes the current card values to the ESP32-PLC and then runs the persistent motor `SAVE` command.
+  - `Aufloesung definieren` moves by the configured test steps, asks for measured travel, then asks whether the direction was correct.
+  - Select `Nein, Richtung drehen` if the mechanical direction was wrong; the UI toggles `invert_direction`.
+  - The calculated `steps/mm` and direction setting are saved persistently immediately, so an extra `Parameter speichern` click is not required after this calibration.
+  - These persisted values are the values used later by the ESP32-PLC motor program flow.
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
   - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`

@@ -3114,6 +3114,40 @@ async function saveConfig(id){
   setStatus(`Motor ${id}: Parameter gespeichert und aktualisiert`);
 }
 
+function askDirectionCorrect(id){
+  return new Promise(resolve => {
+    const existing = document.getElementById("direction-modal");
+    if(existing){ existing.remove(); }
+    const overlay = document.createElement("div");
+    overlay.id = "direction-modal";
+    overlay.style.cssText = "position:fixed; inset:0; z-index:9999; background:rgba(15,23,42,.36); display:flex; align-items:center; justify-content:center; padding:18px;";
+    overlay.innerHTML = `
+      <div style="background:#fff; border-radius:18px; width:min(460px, 96vw); padding:22px; box-shadow:0 28px 80px rgba(15,23,42,.28); border:1px solid #d8e1ee;">
+        <h3 style="margin:0 0 10px 0;">Motor ${esc(id)}: Richtung pruefen</h3>
+        <p style="margin:0 0 18px 0; color:#334155; line-height:1.45;">War die Bewegungsrichtung mechanisch korrekt?</p>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+          <button class="btn" data-answer="yes">Ja, korrekt</button>
+          <button class="btn" data-answer="no" style="background:#fee2e2; border-color:#fecaca; color:#7f1d1d;">Nein, Richtung drehen</button>
+          <button class="btn" data-answer="cancel" style="background:#f1f5f9;">Abbrechen</button>
+        </div>
+      </div>`;
+    function finish(value){
+      overlay.remove();
+      resolve(value);
+    }
+    overlay.addEventListener("click", ev => {
+      if(ev.target === overlay){ finish(null); }
+      const btn = ev.target.closest ? ev.target.closest("button[data-answer]") : null;
+      if(!btn){ return; }
+      const answer = btn.getAttribute("data-answer");
+      if(answer === "yes"){ finish(true); }
+      else if(answer === "no"){ finish(false); }
+      else { finish(null); }
+    });
+    document.body.appendChild(overlay);
+  });
+}
+
 async function moveSteps(id){
   const value = numOrNull(document.getElementById(`m-${id}-test_steps`).value);
   if(value === null){ alert("Bitte Schrittzahl eingeben."); return; }
@@ -3129,7 +3163,8 @@ async function defineResolution(id){
   if(mmRaw === null) return;
   const measured = Number(mmRaw);
   if(!Number.isFinite(measured) || measured <= 0){ alert("Ungueltiger mm-Wert."); return; }
-  const directionOk = confirm("War die Bewegungsrichtung korrekt?");
+  const directionOk = await askDirectionCorrect(id);
+  if(directionOk === null){ setStatus(`Motor ${id}: Aufloesungskalibrierung abgebrochen`); return; }
   const stepsPerMm = Math.abs(stepValue) / measured;
   const spmm = document.getElementById(`m-${id}-steps_per_mm`);
   spmm.value = String(stepsPerMm.toFixed(6)).replace(/0+$/,"").replace(/\\.$/,"");
@@ -3139,7 +3174,8 @@ async function defineResolution(id){
     dir.value = dir.value === "1" ? "0" : "1";
     dirtyFields.add(fieldKey(id, "invert_direction"));
   }
-  setStatus(`Motor ${id}: neue Aufloesung berechnet, bitte speichern`);
+  setStatus(`Motor ${id}: neue Aufloesung berechnet, speichere persistent...`);
+  await saveConfig(id);
 }
 
 async function manualMove(id){

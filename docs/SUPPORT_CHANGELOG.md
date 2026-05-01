@@ -823,6 +823,16 @@
   - removed the default 2 second global motor-card refresh to prevent edited input fields from being overwritten while typing.
 - Note for commissioning: if a `Move mm` command is rejected, the message field now shows the real ESP/AZD reason; common causes are active simulation, soft limits, missing ready state or safety/HWTO state.
 
+## 2026-05-01 (Machine-Setup Motor Resolution Calibration Persistence)
+- Improved `Aufloesung definieren` in `/ui/machine-setup/motors`.
+- The direction confirmation now has explicit choices:
+  - `Ja, korrekt`
+  - `Nein, Richtung drehen`
+  - `Abbrechen`
+- If `Nein` is selected, the UI toggles the motor `invert_direction` setting.
+- The calculated `steps/mm` and optional direction inversion are written and immediately saved through the persistent motor `SAVE` command.
+- The calibration result is therefore the active persisted configuration used by the ESP32-PLC motor program flow; no extra `Parameter speichern` click is required after the calibration.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture
