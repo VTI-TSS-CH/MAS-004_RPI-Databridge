@@ -538,6 +538,46 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         payload["available"] = True
         return payload
 
+    def require_motor_ack(result: dict[str, Any], action: str) -> None:
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=502, detail=f"ESP returned invalid reply for {action}")
+        if not bool(result.get("ok", True)):
+            detail = result.get("reply") or result.get("error") or f"ESP rejected {action}"
+            raise HTTPException(status_code=502, detail=str(detail))
+
+    def refresh_motor_snapshot(client: EspMotorClient, motor_id: int) -> dict[str, Any]:
+        payload = client.refresh(motor_id)
+        raw_motor = payload.get("motor") if isinstance(payload, dict) else None
+        if isinstance(raw_motor, dict):
+            get_motor_state_store().remember_motors([raw_motor])
+        return payload
+
+    def motor_action_response(
+        client: EspMotorClient,
+        motor_id: int,
+        action: str,
+        result: dict[str, Any],
+        *,
+        refresh: bool = True,
+    ) -> dict[str, Any]:
+        require_motor_ack(result, action)
+        response: dict[str, Any] = {
+            "ok": True,
+            "action": action,
+            "reply": result.get("reply") if isinstance(result, dict) else "",
+        }
+        if refresh:
+            try:
+                refresh_payload = refresh_motor_snapshot(client, motor_id)
+                response["refresh"] = refresh_payload
+                raw_motor = refresh_payload.get("motor") if isinstance(refresh_payload, dict) else None
+                if isinstance(raw_motor, dict):
+                    response["motor"] = raw_motor
+            except Exception as exc:
+                # Command ACK is still useful; the UI shows if the follow-up refresh failed.
+                response["refresh_error"] = str(exc)
+        return response
+
     def get_winder_state(role: str) -> dict[str, Any]:
         normalized = normalize_winder_role(role)
         return SmartWicklerClient(Settings.load(cfg_path), normalized).fetch_state()
@@ -1755,11 +1795,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         client = EspMotorClient(cfg2)
         mode = (body.mode or "").strip().lower()
         if mode == "relative_steps":
-            return client.move_relative_steps(motor_id, int(round(body.value)))
+            result = client.move_relative_steps(motor_id, int(round(body.value)))
+            return motor_action_response(client, motor_id, "MOVE_REL_STEPS", result)
         if mode == "relative_mm":
-            return client.move_relative_mm(motor_id, float(body.value))
+            result = client.move_relative_mm(motor_id, float(body.value))
+            return motor_action_response(client, motor_id, "MOVE_REL_MM", result)
         if mode == "absolute_mm":
-            return client.move_absolute_mm(motor_id, float(body.value))
+            result = client.move_absolute_mm(motor_id, float(body.value))
+            return motor_action_response(client, motor_id, "MOVE_ABS_MM", result)
         raise HTTPException(status_code=400, detail="Unsupported motor move mode")
 
     @app.post("/api/motors/{motor_id}/config")
@@ -1775,7 +1818,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         payload = body.model_dump(exclude_none=True)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        return client.set_config(motor_id, payload)
+        result = client.set_config(motor_id, payload)
+        return motor_action_response(client, motor_id, "SET_CONFIG", result)
 
     @app.post("/api/motors/{motor_id}/save")
     def api_motor_save(
@@ -1787,7 +1831,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        return EspMotorClient(cfg2).save(motor_id)
+        client = EspMotorClient(cfg2)
+        result = client.save(motor_id)
+        return motor_action_response(client, motor_id, "SAVE", result)
 
     @app.post("/api/motors/{motor_id}/zero")
     def api_motor_zero(
@@ -1799,7 +1845,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        return EspMotorClient(cfg2).zero(motor_id)
+        client = EspMotorClient(cfg2)
+        result = client.zero(motor_id)
+        return motor_action_response(client, motor_id, "ZERO", result)
 
     @app.post("/api/motors/{motor_id}/min")
     def api_motor_min(
@@ -1811,7 +1859,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        return EspMotorClient(cfg2).set_min(motor_id)
+        client = EspMotorClient(cfg2)
+        result = client.set_min(motor_id)
+        return motor_action_response(client, motor_id, "SET_MIN", result)
 
     @app.post("/api/motors/{motor_id}/max")
     def api_motor_max(
@@ -1823,7 +1873,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        return EspMotorClient(cfg2).set_max(motor_id)
+        client = EspMotorClient(cfg2)
+        result = client.set_max(motor_id)
+        return motor_action_response(client, motor_id, "SET_MAX", result)
 
     @app.post("/api/motors/{motor_id}/reset-alarm")
     def api_motor_reset_alarm(
@@ -1835,7 +1887,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        return EspMotorClient(cfg2).reset_alarm(motor_id)
+        client = EspMotorClient(cfg2)
+        result = client.reset_alarm(motor_id)
+        return motor_action_response(client, motor_id, "RESET_ALARM", result)
 
     @app.post("/api/motors/{motor_id}/refresh")
     def api_motor_refresh(
@@ -1847,11 +1901,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        payload = EspMotorClient(cfg2).refresh(motor_id)
-        raw_motor = payload.get("motor") if isinstance(payload, dict) else None
-        if isinstance(raw_motor, dict):
-            get_motor_state_store().remember_motors([raw_motor])
-        return payload
+        return refresh_motor_snapshot(EspMotorClient(cfg2), motor_id)
 
     @app.post("/api/motors/{motor_id}/simulation")
     def api_motor_simulation(
@@ -2833,6 +2883,7 @@ load();
 const TOKEN_KEY = "mas004_ui_token";
 const dirtyFields = new Set();
 const renderedIds = new Set();
+const motorPollHandles = new Map();
 let autoRefreshHandle = null;
 let currentAutoRefreshMs = null;
 
@@ -2873,6 +2924,11 @@ function statusKind(v){
 }
 
 function setMotorSimulationUi(id, enabled){
+  if(enabled){
+    stopMotorPolling(id);
+    const pollEl = document.getElementById(`m-${id}-poll1s`);
+    if(pollEl){ pollEl.checked = false; }
+  }
   document.querySelectorAll(`[data-motor-id="${id}"][data-live-only="1"]`).forEach(el => {
     el.disabled = !!enabled;
   });
@@ -2899,6 +2955,7 @@ function renderCard(motor){
       <span class="pill">${esc(motor.motor_type || "")}</span>
       <span class="pill">${motor.positional ? "Positionierachse" : "Transportachse"}</span>
       <label class="pill"><input type="checkbox" id="m-${motor.id}-simulation" onchange="toggleSimulation(${motor.id}, this.checked)"/>Simulation</label>
+      <label class="pill"><input type="checkbox" id="m-${motor.id}-poll1s" data-motor-id="${motor.id}" data-live-only="1" onchange="toggleMotorPolling(${motor.id}, this.checked)"/>1s Polling</label>
     </div>
     <div class="status-grid">
       <div class="status-box">
@@ -3001,7 +3058,35 @@ async function toggleSimulation(id, enabled){
 }
 
 async function post(path, body){
-  return api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : null});
+  const result = await api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : null});
+  if(result && result.ok === false){
+    throw new Error(result.detail || result.reply || result.error || "Command rejected");
+  }
+  return result;
+}
+
+function applyMotorResult(id, result){
+  if(!result){ return; }
+  const motor = result.motor || (result.refresh && result.refresh.motor);
+  if(motor){ updateCard(motor); }
+  if(result.reply){ updateLiveText(id, "msg", result.reply); }
+  if(result.refresh_error){ updateLiveText(id, "msg", `ACK, Refresh: ${result.refresh_error}`); }
+}
+
+async function runMotorAction(id, label, action){
+  setStatus(`Motor ${id}: ${label}...`);
+  try{
+    const result = await action();
+    applyMotorResult(id, result);
+    const detail = result && result.refresh_error ? `, Refresh: ${result.refresh_error}` : "";
+    setStatus(`Motor ${id}: ${label} OK${detail}`);
+    return result || {ok:true};
+  }catch(e){
+    const msg = e && e.message ? e.message : String(e);
+    updateLiveText(id, "msg", msg);
+    setStatus(`Motor ${id}: ${label} fehlgeschlagen: ${msg}`);
+    return null;
+  }
 }
 
 function configPayload(id){
@@ -3020,25 +3105,26 @@ function configPayload(id){
 }
 
 async function saveConfig(id){
-  setStatus(`saving motor ${id}...`);
-  await post(`/api/motors/${id}/config`, configPayload(id));
-  await post(`/api/motors/${id}/save`, {});
+  const writeResult = await runMotorAction(id, "Parameter schreiben", () => post(`/api/motors/${id}/config`, configPayload(id)));
+  if(!writeResult){ return; }
+  const saveResult = await runMotorAction(id, "Parameter speichern", () => post(`/api/motors/${id}/save`, {}));
+  if(!saveResult){ return; }
   ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
-  await reloadAll();
+  await refreshOne(id, {silent:true});
+  setStatus(`Motor ${id}: Parameter gespeichert und aktualisiert`);
 }
 
 async function moveSteps(id){
   const value = numOrNull(document.getElementById(`m-${id}-test_steps`).value);
   if(value === null){ alert("Bitte Schrittzahl eingeben."); return; }
-  setStatus(`move steps motor ${id}...`);
-  await post(`/api/motors/${id}/move`, {mode:"relative_steps", value:value});
-  await reloadAll();
+  await runMotorAction(id, `Schritte fahren ${value}`, () => post(`/api/motors/${id}/move`, {mode:"relative_steps", value:value}));
 }
 
 async function defineResolution(id){
   const stepValue = numOrNull(document.getElementById(`m-${id}-test_steps`).value);
   if(stepValue === null || stepValue === 0){ alert("Bitte eine Schrittzahl ungleich 0 eingeben."); return; }
-  await post(`/api/motors/${id}/move`, {mode:"relative_steps", value:stepValue});
+  const moveResult = await runMotorAction(id, `Schritte fahren ${stepValue}`, () => post(`/api/motors/${id}/move`, {mode:"relative_steps", value:stepValue}));
+  if(!moveResult){ return; }
   const mmRaw = prompt("Wie viele mm hat sich der Motor bewegt?");
   if(mmRaw === null) return;
   const measured = Number(mmRaw);
@@ -3059,18 +3145,27 @@ async function defineResolution(id){
 async function manualMove(id){
   const value = numOrNull(document.getElementById(`m-${id}-manual_mm`).value);
   if(value === null){ alert("Bitte mm-Wert eingeben."); return; }
-  await post(`/api/motors/${id}/move`, {mode:"relative_mm", value:value});
-  await reloadAll();
+  await runMotorAction(id, `Move ${value} mm`, () => post(`/api/motors/${id}/move`, {mode:"relative_mm", value:value}));
 }
 
-async function setZero(id){ await post(`/api/motors/${id}/zero`, {}); await reloadAll(); }
-async function setMin(id){ await post(`/api/motors/${id}/min`, {}); await reloadAll(); }
-async function setMax(id){ await post(`/api/motors/${id}/max`, {}); await reloadAll(); }
-async function resetAlarm(id){ await post(`/api/motors/${id}/reset-alarm`, {}); await reloadAll(); }
-async function refreshOne(id){
-  setStatus(`refresh motor ${id}...`);
-  await post(`/api/motors/${id}/refresh`, {});
-  await reloadAll();
+async function setZero(id){ await runMotorAction(id, "Nullpunkt setzen", () => post(`/api/motors/${id}/zero`, {})); }
+async function setMin(id){ await runMotorAction(id, "Min setzen", () => post(`/api/motors/${id}/min`, {})); }
+async function setMax(id){ await runMotorAction(id, "Max setzen", () => post(`/api/motors/${id}/max`, {})); }
+async function resetAlarm(id){ await runMotorAction(id, "Alarm Reset", () => post(`/api/motors/${id}/reset-alarm`, {})); }
+async function refreshOne(id, opts = {}){
+  const silent = !!opts.silent;
+  if(!silent){ setStatus(`Motor ${id}: Status aktualisieren...`); }
+  try{
+    const result = await post(`/api/motors/${id}/refresh`, {});
+    applyMotorResult(id, result);
+    if(!silent){ setStatus(`Motor ${id}: Status aktualisiert`); }
+    return result;
+  }catch(e){
+    const msg = e && e.message ? e.message : String(e);
+    updateLiveText(id, "msg", msg);
+    if(!silent){ setStatus(`Motor ${id}: Status fehlgeschlagen: ${msg}`); }
+    return null;
+  }
 }
 
 async function refreshAllLive(){
@@ -3079,10 +3174,30 @@ async function refreshAllLive(){
     const simEl = document.getElementById(`m-${id}-simulation`);
     if(simEl && simEl.checked){ continue; }
     setStatus(`refresh motor ${id}/${ids.length}...`);
-    try { await post(`/api/motors/${id}/refresh`, {}); }
+    try { await refreshOne(id, {silent:true}); }
     catch(e){ console.warn(e); }
   }
   await reloadAll();
+}
+
+function stopMotorPolling(id){
+  const handle = motorPollHandles.get(id);
+  if(handle){ clearInterval(handle); }
+  motorPollHandles.delete(id);
+}
+
+function toggleMotorPolling(id, enabled){
+  stopMotorPolling(id);
+  if(!enabled){
+    setStatus(`Motor ${id}: 1s Polling aus`);
+    return;
+  }
+  setStatus(`Motor ${id}: 1s Polling ein`);
+  refreshOne(id, {silent:true});
+  const handle = setInterval(() => {
+    refreshOne(id, {silent:true}).catch(err => { console.warn(err); });
+  }, 1000);
+  motorPollHandles.set(id, handle);
 }
 
 function scheduleAutoRefresh(ms){
@@ -3109,7 +3224,7 @@ async function reloadAll(opts = {}){
   const pollText = data.motor_poll ? ` | Auto-Poll: ${data.motor_poll.auto_poll ? "ein" : "aus"}` : "";
   const suffix = (data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "")) + pollText;
   setStatus(`${(data.motors || []).length} Motoren geladen${suffix}`);
-  const desiredMs = allSimulated ? 0 : 2000;
+  const desiredMs = 0;
   if(currentAutoRefreshMs !== desiredMs){
     scheduleAutoRefresh(desiredMs);
   }

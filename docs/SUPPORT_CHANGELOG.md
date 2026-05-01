@@ -814,6 +814,15 @@
   - set `MAS0001=8` during reset and `MAS0001=9` when ready
 - Added Raspi motor client commands for `MOTOR APPLY_ETO_RECOVERY` and `MOTOR RECOVER_ETO`.
 
+## 2026-05-01 (Machine-Setup Motor UI Service Fixes)
+- Hardened `/ui/machine-setup/motors` for commissioning:
+  - motor command `NAK` replies from the ESP are now surfaced as UI/API errors instead of looking like silent success.
+  - `Parameter speichern` now writes parameters, saves them and immediately refreshes the affected motor snapshot.
+  - `Move mm`, `Schritte fahren`, zero/min/max and alarm reset update the affected motor card directly after the action.
+  - added a per-motor `1s Polling` checkbox for targeted live refresh without globally refreshing all motor cards.
+  - removed the default 2 second global motor-card refresh to prevent edited input fields from being overwritten while typing.
+- Note for commissioning: if a `Move mm` command is rejected, the message field now shows the real ESP/AZD reason; common causes are active simulation, soft limits, missing ready state or safety/HWTO state.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

@@ -345,6 +345,11 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `GPIO0` is the ESP LED-stripe pulse output and is intentionally not overrideable from the IO page
   - the `ESP Motorpolling` checkbox on the same page toggles `MOTOR POLL=1/0` on the ESP32-PLC
   - enabled motor polling must remain a paced ESP-side round-robin: motor `1` through `9`, `100 ms` pause between individual motor polls, then repeat
+- For the motor setup page:
+  - `Parameter speichern` writes, saves and immediately refreshes the affected motor card.
+  - `Move mm` and `Schritte fahren` are live commands; if no axis moves, inspect the card message because ESP `NAK` replies are surfaced there.
+  - the per-motor `1s Polling` checkbox is for targeted commissioning refresh and should be disabled again when not needed.
+  - edited input fields are protected from background refresh while they are dirty or focused.
 - For parameter sync to the ESP:
   - `ESP32 R/W = N` means no ESP transfer
   - `ESP32 R/W = R` means Raspi/Microtom is leading and the ESP receives updates via `SYNC <key>=<value>`
