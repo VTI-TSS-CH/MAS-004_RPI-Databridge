@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
@@ -28,6 +30,7 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager, sanitize_production_label
+from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
 
 
 def _truthy(raw: Any) -> bool:
@@ -47,6 +50,11 @@ def _safe_int(raw: Any, default: int = 0) -> int:
 
 
 PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026"}
+SAFETY_RESET_BUTTON = "start_pause"
+SAFETY_PHASE_LATCHED = "latched"
+SAFETY_PHASE_RESETTING = "resetting"
+SAFETY_PHASE_READY = "ready"
+SAFETY_PHASE_FAILED = "failed"
 
 
 class MachineRuntime:
@@ -79,18 +87,60 @@ class MachineRuntime:
         pause_active, pause_reasons = self._pause_state(param_map)
         critical_active, critical_reasons = self._critical_state(io_map, param_map)
         format_plan = build_format_plan(param_map)
+        safety_status = self._safety_status(io_map)
+        button_inputs = self._button_inputs(io_map)
+        previous_button_inputs = info.get("button_inputs") or {}
+        reset_button_rising = bool(button_inputs.get(SAFETY_RESET_BUTTON)) and not bool(
+            previous_button_inputs.get(SAFETY_RESET_BUTTON)
+        )
+        safety_info = dict(info.get("safety") or {})
+        safety_latched = bool(safety_info.get("latched")) or bool(safety_status["active"])
 
         requested_command = _safe_int(param_map.get("MAS0002", info.get("requested_command", 0)), info.get("requested_command", 0))
-        button_request = self._button_requested_command(
-            current_state=snapshot["current_state"],
-            io_map=io_map,
-            previous_inputs=info.get("button_inputs") or {},
-            button_mask=button_mask,
-        )
-        if button_request is not None:
-            requested_command = button_request
-            self.params.apply_device_value("MAS0002", str(requested_command), promote_default=True)
-            self.logs.log("machine", "info", f"button requested command -> {requested_command}")
+        safety_reset_requested = bool(safety_latched) and (requested_command == 2 or reset_button_rising)
+        forced_state: int | None = None
+        forced_source: str | None = None
+
+        if safety_reset_requested:
+            reset_result = self._perform_safety_reset(safety_status, ts)
+            safety_info = {
+                "latched": not bool(reset_result.get("ok")),
+                "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
+                "last_reasons": list(safety_status.get("reasons") or []),
+                "last_reset": reset_result,
+            }
+            if reset_result.get("ok"):
+                safety_latched = False
+                forced_state = 9
+                forced_source = "safety_reset_ready"
+                self.params.apply_device_value("MAS0028", "0", promote_default=True)
+                self._notify_microtom("MAS0028", "0", dedupe_key="machine:MAS0028")
+            else:
+                safety_latched = True
+                forced_state = 21
+                forced_source = "safety_reset_failed"
+        elif safety_latched:
+            safety_info = {
+                **safety_info,
+                "latched": True,
+                "phase": SAFETY_PHASE_LATCHED,
+                "last_reasons": list(safety_status.get("reasons") or safety_info.get("last_reasons") or []),
+            }
+            forced_state = 21
+            forced_source = "safety_latched"
+        else:
+            button_request = self._button_requested_command(
+                current_state=snapshot["current_state"],
+                io_map=io_map,
+                previous_inputs=previous_button_inputs,
+                button_mask=button_mask,
+            )
+            if button_request is not None:
+                requested_command = button_request
+                self.params.apply_device_value("MAS0002", str(requested_command), promote_default=True)
+                self.logs.log("machine", "info", f"button requested command -> {requested_command}")
+            if safety_info.get("phase") not in (SAFETY_PHASE_READY,):
+                safety_info = {"latched": False, "phase": "idle", "last_reasons": []}
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])
         if pause_active and int(snapshot["current_state"] or 0) in (4, 5, 6):
@@ -101,18 +151,27 @@ class MachineRuntime:
             self.params.apply_device_value("MAS0028", "1" if purge_active else "0", promote_default=True)
             self._notify_microtom("MAS0028", "1" if purge_active else "0", dedupe_key="machine:MAS0028")
 
-        new_state, state_source = settle_machine_state(
-            requested_state,
-            snapshot["current_state"],
-            estop_ok=self._bool_io(io_map, "esp32_plc58", "I0.7", default=True),
-            light_curtain_ok=self._bool_io(io_map, "esp32_plc58", "I0.8", default=True),
-            ups_ok=self._bool_io(io_map, "raspi_plc21", "I0.6", default=True),
-            purge_active=purge_active,
-        )
+        if forced_state is not None:
+            new_state = forced_state
+            state_source = str(forced_source or "safety")
+            requested_state = forced_state
+            purge_active = forced_state == 21
+        else:
+            new_state, state_source = settle_machine_state(
+                requested_state,
+                snapshot["current_state"],
+                estop_ok=not bool(safety_status["estop_active"]),
+                light_curtain_ok=not bool(safety_status["light_curtain_active"]),
+                ups_ok=self._bool_io(io_map, "raspi_plc21", "I0.6", default=True),
+                purge_active=purge_active,
+            )
 
-        if new_state != snapshot["current_state"]:
+        state_changed = new_state != snapshot["current_state"]
+        mas0001_value_changed = str(new_state) != str(param_map.get("MAS0001", ""))
+        if state_changed or mas0001_value_changed:
             self.params.apply_device_value("MAS0001", str(new_state), promote_default=True)
             self._notify_microtom("MAS0001", str(new_state), dedupe_key="machine:MAS0001")
+        if state_changed:
             self._record_event(
                 "state_change",
                 "info",
@@ -127,7 +186,11 @@ class MachineRuntime:
 
         actions = state_actions(new_state)
         self._apply_button_leds(new_state, button_mask, ts)
+        self._apply_safety_button_leds(new_state, safety_info, ts)
         self._apply_status_lamp(new_state, warning_active=warning_active, ts=ts)
+        button_leds = button_led_plan(new_state, button_mask, ts=ts)
+        if self._safety_led_override_active(new_state, safety_info):
+            button_leds.update(self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts))
 
         machine_label = self._current_production_label()
         info.update(
@@ -137,11 +200,13 @@ class MachineRuntime:
                 "allowed_actions": actions,
                 "button_inputs": self._button_inputs(io_map),
                 "critical_reasons": critical_reasons,
+                "safety": safety_info,
+                "safety_status": safety_status,
                 "pause_reasons": pause_reasons,
                 "warning_keys": self._active_param_keys("MAW"),
                 "error_keys": self._active_param_keys("MAE"),
                 "status_lamp": lamp_outputs_for_state(new_state, warning_active=warning_active, ts=ts),
-                "button_leds": button_led_plan(new_state, button_mask, ts=ts),
+                "button_leds": button_leds,
                 "format_plan": format_plan,
             }
         )
@@ -466,10 +531,27 @@ class MachineRuntime:
         reasons = [pkey for pkey in sorted(PAUSE_ERROR_KEYS) if _truthy(param_map.get(pkey))]
         return bool(reasons), reasons
 
+    def _safety_status(self, io_map: dict[tuple[str, str], str]) -> dict[str, Any]:
+        estop_active = self._bool_io(io_map, "esp32_plc58", "I0.7", default=False)
+        light_curtain_active = self._bool_io(io_map, "esp32_plc58", "I0.8", default=False)
+        reasons: list[str] = []
+        if estop_active:
+            reasons.append("notaus")
+        if light_curtain_active:
+            reasons.append("lichtgitter")
+        return {
+            "active": bool(reasons),
+            "estop_active": estop_active,
+            "light_curtain_active": light_curtain_active,
+            "reasons": reasons,
+        }
+
     def _critical_state(self, io_map: dict[tuple[str, str], str], param_map: dict[str, str]) -> tuple[bool, list[str]]:
         reasons: list[str] = []
-        if not self._bool_io(io_map, "esp32_plc58", "I0.7", default=True):
+        if self._bool_io(io_map, "esp32_plc58", "I0.7", default=False):
             reasons.append("notaus")
+        if self._bool_io(io_map, "esp32_plc58", "I0.8", default=False):
+            reasons.append("lichtgitter")
         if not self._bool_io(io_map, "raspi_plc21", "I0.6", default=True):
             reasons.append("usv_not_ok")
         if self._bool_io(io_map, "esp32_plc58", "I0.4", default=False):
@@ -482,6 +564,147 @@ class MachineRuntime:
             if pkey.startswith("MAE") and _truthy(value):
                 reasons.append(pkey)
         return bool(reasons), reasons
+
+    def _perform_safety_reset(self, safety_status: dict[str, Any], ts: float) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": False,
+            "started_ts": now_ts(),
+            "initial_reasons": list(safety_status.get("reasons") or []),
+            "steps": [],
+        }
+        self.logs.log("machine", "info", "safety reset requested")
+        self.params.apply_device_value("MAS0001", "8", promote_default=True)
+        self._notify_microtom("MAS0001", "8", dedupe_key="machine:MAS0001")
+        self._record_event(
+            "safety_reset",
+            "info",
+            "Safety-Reset gestartet: ESP Q0.2 Reset-Sequenz, danach Motor-/Wickler-Reset",
+            {"initial_reasons": result["initial_reasons"]},
+        )
+        self._apply_status_lamp(8, warning_active=False, ts=ts)
+        self._apply_safety_button_leds(8, {"phase": SAFETY_PHASE_RESETTING}, ts)
+
+        try:
+            self._pulse_esp_reset_output()
+            result["steps"].append({"step": "esp_q0_2_reset_pulse", "ok": True})
+        except Exception as exc:
+            result["steps"].append({"step": "esp_q0_2_reset_pulse", "ok": False, "error": str(exc)})
+            result["error"] = f"ESP reset pulse failed: {exc}"
+            return result
+
+        refreshed = self._refresh_single_io_device("esp32_plc58")
+        result["steps"].append({"step": "refresh_esp_io", "ok": bool(refreshed.get("ok", True)), "detail": refreshed})
+        refreshed_io = self._io_values()
+        refreshed_safety = self._safety_status(refreshed_io)
+        if refreshed_safety["active"]:
+            result["steps"].append(
+                {"step": "verify_safety_inputs_low", "ok": False, "reasons": refreshed_safety["reasons"]}
+            )
+            result["error"] = "ESP safety input still HIGH after reset sequence: " + ",".join(refreshed_safety["reasons"])
+            return result
+        result["steps"].append({"step": "verify_safety_inputs_low", "ok": True})
+
+        motion_result = self._reset_motion_devices()
+        result["steps"].append({"step": "reset_motion_devices", **motion_result})
+        if not motion_result.get("ok"):
+            result["error"] = motion_result.get("error") or "motion device reset failed"
+            return result
+
+        self.params.apply_device_value("MAS0001", "9", promote_default=True)
+        self._notify_microtom("MAS0001", "9", dedupe_key="machine:MAS0001")
+        self._record_event(
+            "safety_reset",
+            "info",
+            "Safety-Reset abgeschlossen: Motoren geprueft, MAS0001=9",
+            motion_result,
+        )
+        self._apply_status_lamp(9, warning_active=False, ts=now_ts())
+        self._apply_safety_button_leds(9, {"phase": SAFETY_PHASE_READY}, now_ts())
+        result["ok"] = True
+        result["finished_ts"] = now_ts()
+        return result
+
+    def _pulse_esp_reset_output(self):
+        io_runtime = IoRuntime(self.cfg, self.io_store)
+        point = self.io_store.get_point("esp32_plc58__Q0_2")
+        if not point:
+            raise RuntimeError("ESP reset output Q0.2 is not defined in IO master")
+        io_runtime.write_output(point["io_key"], True, force=True, source="safety-reset")
+        time.sleep(0.2)
+        io_runtime.write_output(point["io_key"], False, force=True, source="safety-reset")
+        time.sleep(0.1)
+        io_runtime.write_output(point["io_key"], True, force=True, source="safety-reset")
+        time.sleep(0.2)
+        io_runtime.write_output(point["io_key"], False, force=True, source="safety-reset")
+
+    def _refresh_single_io_device(self, device_code: str) -> dict[str, Any]:
+        points = [
+            point
+            for point in self.io_store.list_points(include_reserved=True)
+            if str(point.get("device_code") or "") == str(device_code or "")
+        ]
+        if not points:
+            return {"ok": False, "error": f"no IO points for {device_code}"}
+        try:
+            device_result = IoRuntime(self.cfg, self.io_store)._refresh_device(device_code, points)
+            return {"ok": True, "device": device_result}
+        except Exception as exc:
+            self.logs.log("machine", "warning", f"single IO refresh failed for {device_code}: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _reset_motion_devices(self) -> dict[str, Any]:
+        details: dict[str, Any] = {"esp_motors": [], "wicklers": []}
+        hard_failures: list[str] = []
+
+        esp = EspMotorClient(self.cfg)
+        if esp.available():
+            for label, action in (
+                ("apply_eto_recovery", esp.apply_eto_recovery),
+                ("recover_eto", esp.recover_eto),
+            ):
+                try:
+                    reply = action()
+                    details["esp_motors"].append({"step": label, **reply})
+                    if not reply.get("ok"):
+                        hard_failures.append(f"ESP motor {label}: {reply.get('reply')}")
+                except Exception as exc:
+                    details["esp_motors"].append({"step": label, "ok": False, "error": str(exc)})
+                    hard_failures.append(f"ESP motor {label}: {exc}")
+            for motor_id in range(1, 10):
+                try:
+                    reply = esp.reset_alarm(motor_id)
+                    details["esp_motors"].append({"step": "reset_alarm", "motor_id": motor_id, **reply})
+                    if not reply.get("ok"):
+                        hard_failures.append(f"Motor {motor_id} reset_alarm: {reply.get('reply')}")
+                except Exception as exc:
+                    details["esp_motors"].append(
+                        {"step": "reset_alarm", "motor_id": motor_id, "ok": False, "error": str(exc)}
+                    )
+                    hard_failures.append(f"Motor {motor_id} reset_alarm: {exc}")
+        else:
+            details["esp_motors"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
+
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            role_detail: dict[str, Any] = {"role": role, "steps": []}
+            if not client.available():
+                role_detail["steps"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
+                details["wicklers"].append(role_detail)
+                continue
+            for mode in ("stop", "resetAlarm", "etoRecovery", "ready"):
+                try:
+                    reply = client.post_mode(mode, timeout_s=8.0)
+                    role_detail["steps"].append({"step": mode, "ok": bool(reply.get("ok", True)), "reply": reply})
+                    if reply.get("ok") is False:
+                        hard_failures.append(f"{role} {mode}: {reply}")
+                except Exception as exc:
+                    role_detail["steps"].append({"step": mode, "ok": False, "error": str(exc)})
+                    hard_failures.append(f"{role} {mode}: {exc}")
+            details["wicklers"].append(role_detail)
+
+        if hard_failures:
+            return {"ok": False, "error": "; ".join(hard_failures[:5]), "details": details}
+        return {"ok": True, "details": details}
 
     def _io_values(self) -> dict[tuple[str, str], str]:
         values: dict[tuple[str, str], str] = {}
@@ -543,6 +766,41 @@ class MachineRuntime:
                     io_runtime.write_output(point["io_key"], bool(led_plan.get(pin, False)))
                 except RuntimeError as exc:
                     self.logs.log("machine", "info", f"button-led write skipped for {point['io_key']}: {exc}")
+
+    def _safety_led_override_active(self, state: int, safety_info: dict[str, Any]) -> bool:
+        phase = str((safety_info or {}).get("phase") or "")
+        return int(state or 0) in (8, 9, 21) and phase in {
+            SAFETY_PHASE_LATCHED,
+            SAFETY_PHASE_RESETTING,
+            SAFETY_PHASE_READY,
+            SAFETY_PHASE_FAILED,
+        }
+
+    def _safety_button_led_plan(self, phase: str, ts: float) -> dict[str, bool]:
+        plan = {pin: False for pins in BUTTON_LED_OUTPUTS.values() for _device, pin in pins}
+        second_on = int(ts) % 2 == 0
+        if phase in {SAFETY_PHASE_LATCHED, SAFETY_PHASE_FAILED}:
+            plan["Q0.0"] = second_on
+            plan["Q0.2"] = not second_on
+        elif phase == SAFETY_PHASE_RESETTING:
+            plan["Q0.2"] = second_on
+        elif phase == SAFETY_PHASE_READY:
+            plan["Q0.2"] = True
+        return plan
+
+    def _apply_safety_button_leds(self, state: int, safety_info: dict[str, Any], ts: float):
+        if not self._safety_led_override_active(state, safety_info):
+            return
+        io_runtime = IoRuntime(self.cfg, self.io_store)
+        plan = self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts)
+        for pin in ("Q0.0", "Q0.2"):
+            point = self.io_store.get_point(f"raspi_plc21__{pin.replace('.', '_')}")
+            if not point:
+                continue
+            try:
+                io_runtime.write_output(point["io_key"], bool(plan.get(pin, False)), force=True, source="safety-led")
+            except RuntimeError as exc:
+                self.logs.log("machine", "info", f"safety-led write skipped for {point['io_key']}: {exc}")
 
     def _apply_status_lamp(self, state: int, *, warning_active: bool, ts: float):
         io_runtime = IoRuntime(self.cfg, self.io_store)

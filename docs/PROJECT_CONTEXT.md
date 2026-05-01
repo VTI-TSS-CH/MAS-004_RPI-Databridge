@@ -329,6 +329,26 @@
   - it maps to `MOTOR POLL=1/0` on the ESP32-PLC
   - firmware-side polling is intentionally paced as one motor per step, `100 ms` between motor polls, cycling `1..9`
 
+## Machine Safety / Reset Contract
+- The ESP32-PLC safety inputs are active-high:
+  - `ESP32-PLC58 I0.7 = 1` means hard Notaus present.
+  - `ESP32-PLC58 I0.8 = 1` means Lichtgitter interrupted.
+- For now Notaus and Lichtgitter both latch the Raspi machine runtime into `MAS0001=21` and set `MAS0028=1`.
+- The ESP firmware handles the time-critical stop path:
+  - hard Notaus releases Wickler run-level outputs and stops Motor 3 immediately.
+  - Lichtgitter additionally commands AZD-CD motors `1`, `2`, and `3` to stop before the external delayed ETO relay removes torque.
+- Reset is a coordinated Raspi-led sequence:
+  - requested by Microtom/Raspi value `MAS0002=2` or by the Raspi reset button on `raspi_plc21 I0.7`
+  - Raspi pulses `ESP Q0.2` as `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
+  - ESP safety inputs must be LOW before motion devices are recovered
+  - ESP motors `1..9` receive ETO recovery / alarm reset
+  - both Smart Wicklers receive `stop`, `resetAlarm`, `etoRecovery`, and `ready`
+  - `MAS0001=8` while recovery is running, then `MAS0001=9` when reset is complete
+- Raspi button LED override during safety:
+  - `MAS0001=21`: `Q0.0` and `Q0.2` alternate every second
+  - `MAS0001=8`: `Q0.2` blinks blue
+  - `MAS0001=9`: `Q0.2` is steady blue
+
 ## TTO Mapping Source of Truth
 - The Videojet 6530 TTO mapping now uses the live-readable CLARiTY parameter archive from `MAS-004_ZBC-Library`:
   - `FRQ[CURRENT_PARAMETERS]` on the 6530 returns the UTF-16 parameter XML

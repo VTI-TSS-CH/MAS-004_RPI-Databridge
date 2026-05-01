@@ -793,6 +793,21 @@
   - `POST /api/motors/poll` writes `MOTOR POLL=1/0`.
 - The ESP firmware contract is now explicit: enabled motor polling is a round-robin over motors `1..9` with `100 ms` minimum pause between individual motor polls, then wraps back to motor `1`.
 
+## 2026-05-01 (Safety Stop + Reset Contract)
+- Updated the machine runtime safety semantics:
+  - ESP `I0.7` is now interpreted active-high as hard Notaus.
+  - ESP `I0.8` is now interpreted active-high as Lichtgitter and currently follows the same machine-state/reset behavior as Notaus.
+- Safety activation latches `MAS0001=21` / `MAS0028=1`, blocks normal button transitions, sets the status lamp red and overrides Raspi button LEDs:
+  - `Q0.0` and `Q0.2` alternate every second while latched/failed.
+- Added the reset flow requested for commissioning:
+  - trigger by `MAS0002=2` or Raspi `I0.7`
+  - pulse ESP `Q0.2` as `200 ms HIGH / 100 ms LOW / 200 ms HIGH / LOW`
+  - verify ESP safety inputs are LOW
+  - run ESP motor ETO recovery and alarm reset for motors `1..9`
+  - run Smart-Wickler `stop`, `resetAlarm`, `etoRecovery`, `ready`
+  - set `MAS0001=8` during reset and `MAS0001=9` when ready
+- Added Raspi motor client commands for `MOTOR APPLY_ETO_RECOVERY` and `MOTOR RECOVER_ETO`.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

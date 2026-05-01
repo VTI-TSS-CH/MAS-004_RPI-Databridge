@@ -57,6 +57,12 @@ class EspMotorClient:
     def set_poll(self, enabled: bool) -> dict[str, Any]:
         return self._ack(f"MOTOR POLL={'1' if enabled else '0'}")
 
+    def apply_eto_recovery(self) -> dict[str, Any]:
+        return self._ack("MOTOR APPLY_ETO_RECOVERY")
+
+    def recover_eto(self) -> dict[str, Any]:
+        return self._ack("MOTOR RECOVER_ETO")
+
     def status(self, motor_id: int) -> dict[str, Any]:
         return self._json(f"MOTOR {int(motor_id)} STATUS?")
 

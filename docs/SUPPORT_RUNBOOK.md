@@ -363,6 +363,23 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - busy probe returns `NAK_Busy` for a held partial line and recovers to `PONG`
   - high parallel latency includes intentional queue wait behind the endpoint lock; it is backpressure, not lost commands
   - if errors appear, first verify the Databridge service is active and that ESP firmware includes the 2026-05-01 W5500 hardening
+- For Notaus / Lichtgitter / Reset:
+  - ESP `I0.7` and `I0.8` are active-high safety inputs.
+  - `I0.7=1` is hard Notaus; the external safety circuit removes torque immediately.
+  - `I0.8=1` is Lichtgitter; the ESP firmware must release Wickler run-levels and stop AZD-CD motors `1`, `2`, `3` before the delayed ETO relay removes torque.
+  - Raspi runtime should latch `MAS0001=21` and `MAS0028=1` on either input.
+  - Reset may be started with `MAS0002=2` or the Raspi reset button `I0.7`.
+  - Expected reset sequence:
+    - Raspi sets `MAS0001=8`
+    - Raspi pulses ESP `Q0.2`: `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
+    - Raspi verifies `ESP I0.7=0` and `ESP I0.8=0`
+    - Raspi runs `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, then `MOTOR <id> RESET_ALARM` for `1..9`
+    - Raspi posts `stop`, `resetAlarm`, `etoRecovery`, `ready` to both Wicklers if they are live
+    - Raspi clears `MAS0028` and sets `MAS0001=9`
+  - Button LEDs:
+    - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second
+    - reset running: `Q0.2` blinks, no red
+    - reset complete: `Q0.2` steady
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
   - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`

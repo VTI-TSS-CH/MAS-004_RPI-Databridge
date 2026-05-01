@@ -149,7 +149,7 @@ class MachineRuntimeTests(unittest.TestCase):
             _insert_io_point(self.db, "raspi_plc21", "Raspberry PLC 21", pin, "input", value)
         for pin in ("Q0.0", "Q0.1", "Q0.2", "Q0.3", "Q0.4", "Q0.5", "Q0.6", "Q0.7"):
             _insert_io_point(self.db, "raspi_plc21", "Raspberry PLC 21", pin, "output", "0")
-        for pin, value in (("I0.4", "0"), ("I0.7", "1"), ("I0.8", "1"), ("I0.11", "0")):
+        for pin, value in (("I0.4", "0"), ("I0.7", "0"), ("I0.8", "0"), ("I0.11", "0")):
             _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", pin, "input", value)
         for pin in ("DO4", "DO5", "DO6"):
             _insert_io_point(self.db, "moxa_e1211_2", "Moxa ioLogik E1211 #2", pin, "output", "0")
@@ -231,6 +231,17 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertFalse(snapshot["purge_active"])
         self.assertEqual(["MAE0025"], snapshot["info"]["pause_reasons"])
         self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+
+    def test_esp_active_high_notaus_forces_state_21(self):
+        runtime = self.build_runtime()
+        self.io_store.upsert_value("esp32_plc58__I0_7", "1", "simulation", "test")
+
+        snapshot = runtime.refresh()
+
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertTrue(snapshot["purge_active"])
+        self.assertIn("notaus", snapshot["info"]["critical_reasons"])
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
 
 
 if __name__ == "__main__":

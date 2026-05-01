@@ -26,8 +26,13 @@ class EspMotorClientTests(unittest.TestCase):
 
         self.assertFalse(client.poll_state()["auto_poll"])
         self.assertTrue(client.set_poll(True)["ok"])
+        self.assertTrue(client.apply_eto_recovery()["ok"])
+        self.assertTrue(client.recover_eto()["ok"])
         self.assertTrue(client.refresh(3)["motor"]["state"]["link_ok"])
-        self.assertEqual(["MOTOR POLL?", "MOTOR POLL=1", "MOTOR 3 REFRESH"], client.lines)
+        self.assertEqual(
+            ["MOTOR POLL?", "MOTOR POLL=1", "MOTOR APPLY_ETO_RECOVERY", "MOTOR RECOVER_ETO", "MOTOR 3 REFRESH"],
+            client.lines,
+        )
 
 
 if __name__ == "__main__":
