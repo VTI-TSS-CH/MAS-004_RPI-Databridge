@@ -11,7 +11,7 @@ from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
-from mas004_rpi_databridge.machine_runtime import MachineRuntime
+from mas004_rpi_databridge.machine_runtime import MachineRuntime, mark_external_purge_clear, recent_external_purge_clear
 from mas004_rpi_databridge.machine_semantics import pack_label_status_word
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
@@ -242,6 +242,26 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(snapshot["purge_active"])
         self.assertIn("notaus", snapshot["info"]["critical_reasons"])
         self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+
+    def test_external_purge_clear_marks_runtime_and_clears_soft_latch(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+
+        mark_external_purge_clear(self.db)
+        snapshot = runtime.snapshot()
+
+        self.assertFalse(snapshot["purge_active"])
+        self.assertTrue(recent_external_purge_clear(self.db))
+        self.assertEqual("microtom", snapshot["info"]["purge"]["external_clear_source"])
 
 
 if __name__ == "__main__":

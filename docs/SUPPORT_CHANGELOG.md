@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-08 (MAS0028 Purge Clear Anti-Echo)
+- Fixed a Purge echo/race where `MAS0028=0` from Microtom/DIClient could be followed by an older or stale `MAS0028=1` callback.
+- Deduplicated machine/device status callbacks now use a latest-state-wins queue mode, so stale pending status values cannot overtake a newer state value after peer downtime or retries.
+- A successful Microtom write `MAS0028=0` now removes pending `MAS0028=<state>` callbacks before the ACK is queued, while keeping the actual `ACK_MAS0028=0` response.
+- Immediate ESP/device-origin `MAS0028=1` echoes are ignored for a short grace window after an external clear; hard active safety/critical causes are still allowed to reassert `MAS0028=1` through the machine runtime.
+- Added regression tests for Outbox status replacement, Microtom purge clear cleanup, ESP stale-echo suppression and runtime clear marking.
+
 ## 2026-05-08 (Production Logfile Ready-State Self-Healing)
 - Fixed a stale production-log state where UI could show `Files ready=yes` while the production file list was empty and `MAS0030=?` returned `0`.
 - `MAS0002=1` is now blocked only when real downloadable production logfiles exist. A stale `_production_state.json` with `ready=true` but no files is self-healed to `ready=false` and `MAS0030=0`.

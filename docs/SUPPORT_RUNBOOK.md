@@ -88,6 +88,17 @@
     - send `MAS0030=?`; the answer must match the `ready` value derived from the file list.
     - user notes before `KI:` are folded into regenerated `KI:` texts
     - the full `KI-Anweisungen:` column is rewritten with `KI:` texts
+- Purge clear / `MAS0028` anti-echo check:
+  - `MAS0028=0` from Microtom/DIClient is treated as an external soft clear of the Purge latch.
+  - On a successful `MAS0028=0` write, the Raspi removes stale pending `MAS0028=<state>` callbacks from the Outbox before queuing `ACK_MAS0028=0`.
+  - Immediate ESP/device-origin `MAS0028=1` echoes are ignored for a short grace window after this external clear.
+  - This grace window only suppresses stale echoes. If a real critical reason is still active, the machine runtime may correctly reassert `MAS0028=1`.
+  - Typical real reassertion causes are active Notaus/Lichtgitter inputs, resettable safety errors such as `MAE0027`, or any runtime critical reason listed in the machine state.
+  - Production diagnostics:
+    - `sqlite3 /var/lib/mas004_rpi_databridge/databridge.db "select pkey,value,updated_ts from param_values where pkey in ('MAS0028','MAE0027');"`
+    - check `/ui/machine-setup/io` for `ESP32-PLC58 I0.7` and `I0.8`
+    - `journalctl -u mas004-rpi-databridge.service -n 200 --no-pager | grep MAS0028`
+  - If Microtom sees `MAS0028=0` followed by `MAS0028=1`, first verify whether `origin` is `machine-runtime` and whether a hard safety input is still active. That case is expected, not a simulator echo.
 - After workbook rights or ESP-relevant MAP defaults change while TEST is offline:
   - create a local workbook-derived SQLite snapshot from the RPI repo
   - regenerate ESP seeds from that SQLite snapshot in `MAS-004_ESP32-PLC-Firmware`

@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.inbox import Inbox
+from mas004_rpi_databridge.machine_runtime import mark_external_purge_clear, recent_external_purge_clear
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -80,6 +81,11 @@ def _is_esp_source(source: Optional[str]) -> bool:
     return "esp" in source_l or "plc" in source_l
 
 
+def _truthy_value(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text not in ("", "0", "false", "off", "no", "none", "null")
+
+
 class Router:
     def __init__(self, cfg: Settings, inbox: Inbox, outbox: Outbox, params: ParamStore, logs: LogStore):
         self.cfg = cfg
@@ -96,6 +102,8 @@ class Router:
         line: str,
         correlation: Optional[str] = None,
         origin: Optional[str] = None,
+        dedupe_key: Optional[str] = None,
+        replace_existing: bool = False,
     ):
         targets = peer_urls(self.cfg, "/api/inbox")
         if not targets:
@@ -118,6 +126,9 @@ class Router:
                 body,
                 None,
                 priority=10,
+                dedupe_key=dedupe_key,
+                drop_if_duplicate=bool(dedupe_key),
+                replace_existing=replace_existing,
             )
 
     def handle_microtom_line(self, line: str, correlation: Optional[str]) -> Optional[str]:
@@ -155,6 +166,11 @@ class Router:
         self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
         self.logs.log("raspi", "out", f"to microtom: {resp}")
         if op == "write" and "NAK" not in resp.upper():
+            if pkey == "MAS0028" and str(value).strip() == "0":
+                mark_external_purge_clear(self.params.db, source="microtom")
+                deleted = self.outbox.delete_status_updates("MAS0028")
+                if deleted:
+                    self.logs.log("raspi", "info", f"cleared {deleted} pending stale MAS0028 status callback(s)")
             event = self.production_logs.handle_param_change(pkey, value)
             if event and event.get("event") == "start":
                 self.logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
@@ -179,6 +195,14 @@ class Router:
             self.logs.log("raspi", "info", f"device message ignored (read op): {line}")
             return None
 
+        if pkey == "MAS0028" and _truthy_value(value) and recent_external_purge_clear(self.params.db):
+            self.logs.log(
+                "raspi",
+                "info",
+                f"ignored stale device-origin MAS0028=1 from {device_source} immediately after external clear",
+            )
+            return f"ACK_{pkey}=1"
+
         ok, detail = self.params.apply_device_value(pkey, str(value), promote_default=False)
         if not ok:
             self.logs.log("raspi", "error", f"device value rejected for {pkey} from {device_source}: {detail}")
@@ -190,7 +214,15 @@ class Router:
         if self.params.can_actor_read(pkey, actor="microtom"):
             response_line = f"{pkey}={value}"
             self.logs.log("raspi", "out", f"to microtom: {response_line}")
-            self._enqueue_to_microtom(response_line, correlation=correlation, origin=device_source)
+            state_signal = ptype in {"MAS", "MAE", "MAW"}
+            dedupe = f"state:{pkey}" if state_signal else None
+            self._enqueue_to_microtom(
+                response_line,
+                correlation=correlation,
+                origin=device_source,
+                dedupe_key=dedupe,
+                replace_existing=state_signal,
+            )
         else:
             self.logs.log("raspi", "info", f"skip microtom forward for {pkey}: microtom access=N")
 

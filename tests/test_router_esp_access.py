@@ -12,6 +12,7 @@ from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.machine_runtime import mark_external_purge_clear
 
 sys.modules.setdefault("ping3", SimpleNamespace(ping=lambda *_args, **_kwargs: 1.0))
 
@@ -220,6 +221,51 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertEqual("MAS0008=52", body["msg"])
             self.assertEqual("smartwickler", body["origin"])
             self.assertNotIn("NAK_ReadOnly", body["msg"])
+
+    def test_microtom_purge_clear_removes_stale_pending_status_callbacks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0028", "MAS", "0028", "1", "W", "W", "bool")
+            def _fake_esp_live(pkey, op, value, actor="microtom"):
+                router.params.set_value(pkey, value, actor=actor)
+                return f"ACK_{pkey}={value}"
+
+            router.device_bridge._esp_live = _fake_esp_live
+            router.device_bridge.mirror_to_esp = lambda pkey, value: (True, f"ACK_{pkey}={value}")
+            router.outbox.enqueue(
+                "POST",
+                "https://peer-a:9090/api/inbox",
+                {},
+                {"msg": "MAS0028=1", "source": "raspi", "origin": "esp-plc"},
+                dedupe_key="esp-plc:MAS0028",
+            )
+
+            resp = router.handle_microtom_line("MAS0028=0", correlation="purge-clear")
+
+            self.assertEqual("ACK_MAS0028=0", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAS0028"))
+            jobs = []
+            while True:
+                job = router.outbox.next_due()
+                if not job:
+                    break
+                jobs.append(json.loads(job.body_json)["msg"])
+                router.outbox.delete(job.id)
+            self.assertEqual(["ACK_MAS0028=0"], jobs)
+
+    def test_device_purge_echo_is_ignored_immediately_after_microtom_clear(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0028", "MAS", "0028", "0", "W", "W", "bool")
+            mark_external_purge_clear(router.params.db)
+
+            resp = router.handle_device_line("MAS0028=1", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAS0028=1", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAS0028"))
+            self.assertEqual(0, router.outbox.count())
 
 
 if __name__ == "__main__":

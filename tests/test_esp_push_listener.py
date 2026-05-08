@@ -7,6 +7,8 @@ from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.esp_push_listener import EspPushListener
+from mas004_rpi_databridge.machine_runtime import mark_external_purge_clear
+from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 
 
@@ -62,6 +64,19 @@ class EspPushListenerTests(unittest.TestCase):
 
             with patch.object(DeviceBridge, "execute", side_effect=AssertionError("must not call ESP TCP")):
                 self.assertEqual("MAS0029=NAK_NoAccess", listener._process_line("MAS0029=?"))
+
+    def test_stale_esp_purge_echo_is_ignored_after_external_clear(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0028", "MAS", "0028", "0", "W", "W")
+            mark_external_purge_clear(db)
+            cfg = Settings(db_path=str(db_path), peer_base_url="https://peer-a:9090", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            self.assertEqual("ACK_MAS0028=1", listener._process_line("MAS0028=1"))
+            self.assertEqual("0", ParamStore(db).get_effective_value("MAS0028"))
+            self.assertEqual(0, Outbox(db).count())
 
 
 if __name__ == "__main__":

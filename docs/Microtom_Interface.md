@@ -556,6 +556,47 @@ Inhalt der Produktionsdateien:
 3. Parametername aus der Parameterliste
 4. Beschreibung/Message aus der Parameterliste
 
+### 8.4 Purge-Status `MAS0028`
+`MAS0028` ist der Purge-/kritische Maschinenzustand aus Sicht der Gesamtanlage.
+
+Microtom/DIClient kann einen Purge ausloesen:
+
+```text
+MAS0028=1
+```
+
+Positive Rueckmeldung:
+
+```text
+ACK_MAS0028=1
+```
+
+Microtom/DIClient kann einen extern abgeschlossenen Purge-Prozess wieder freigeben:
+
+```text
+MAS0028=0
+```
+
+Positive Rueckmeldung:
+
+```text
+ACK_MAS0028=0
+```
+
+Konsistenzregel ab 2026-05-08:
+1. Ein erfolgreiches `MAS0028=0` entfernt alte noch nicht zugestellte `MAS0028=<state>` Status-Callbacks aus der Raspi-Outbox.
+2. Ein unmittelbares altes ESP-/Device-Echo `MAS0028=1` wird fuer ein kurzes Zeitfenster unterdrueckt.
+3. Diese Unterdrueckung gilt nur fuer stale Echo-/Retry-Faelle.
+4. Wenn die Maschine weiterhin einen echten kritischen Grund erkennt, darf und muss der Raspi wieder `MAS0028=1` senden.
+
+Beispiele fuer echte Reassertion:
+1. Notaus oder Lichtgitter ist am ESP noch aktiv.
+2. Ein resettable Safety-Fehler wie `MAE0027` ist noch aktiv.
+3. Die Machine-Runtime ist weiterhin in `MAS0001=21`.
+
+Wichtig fuer Microtom:
+`MAS0028=0` bedeutet "DIClient/Purge-Prozess wurde extern freigegeben". Es hebt keinen real aktiven Sicherheitskreis auf. Wenn nach `ACK_MAS0028=0` wieder ein `MAS0028=1` mit `origin=machine-runtime` kommt, ist das ein realer Maschinenzustand und kein Simulator-/Outbox-Echo.
+
 ## 9. Performance und Zuverlässigkeit
 
 ### 9.1 Aktuelle Optimierungen

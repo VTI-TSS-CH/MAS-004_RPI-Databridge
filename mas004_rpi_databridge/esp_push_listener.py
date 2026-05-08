@@ -9,7 +9,7 @@ from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
-from mas004_rpi_databridge.machine_runtime import MachineRuntime, parse_machine_event_line
+from mas004_rpi_databridge.machine_runtime import MachineRuntime, parse_machine_event_line, recent_external_purge_clear
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -188,6 +188,13 @@ class EspPushListener:
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")
                 return resp
 
+        if pkey == "MAS0028" and str(value or "").strip().lower() not in ("", "0", "false", "off", "no", "none", "null"):
+            if recent_external_purge_clear(db):
+                resp = f"ACK_{pkey}=1"
+                logs.log("raspi", "info", "ignored stale ESP MAS0028=1 immediately after external clear")
+                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+                return resp
+
         if ptype.startswith("MA"):
             ok, msg = params.apply_device_value(pkey, value)
             if not ok:
@@ -224,9 +231,10 @@ class EspPushListener:
             dedupe_key = None
             drop_if_duplicate = False
             if ptype in {"MAS", "MAE", "MAW"}:
-                dedupe_key = f"esp-plc:{pkey}"
+                dedupe_key = f"state:{pkey}"
                 drop_if_duplicate = True
             for url in targets:
+                state_signal = ptype in {"MAS", "MAE", "MAW"}
                 outbox.enqueue(
                     "POST",
                     url,
@@ -236,6 +244,7 @@ class EspPushListener:
                     priority=100,
                     dedupe_key=dedupe_key,
                     drop_if_duplicate=drop_if_duplicate,
+                    replace_existing=state_signal,
                 )
             logs.log("raspi", "out", f"forward to microtom: {forwarded_line}")
 

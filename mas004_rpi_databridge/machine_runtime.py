@@ -62,6 +62,114 @@ SAFETY_PHASE_LATCHED = "latched"
 SAFETY_PHASE_RESETTING = "resetting"
 SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
+PURGE_EXTERNAL_CLEAR_GRACE_S = 3.0
+
+
+def mark_external_purge_clear(db: DB, *, source: str = "microtom"):
+    state = _machine_state_row_from_db(db)
+    info = dict(state.get("info") or {})
+    purge_info = dict(info.get("purge") or {})
+    purge_info["external_clear_ts"] = now_ts()
+    purge_info["external_clear_source"] = str(source or "microtom")
+    info["purge"] = purge_info
+    _write_machine_state_to_db(
+        db,
+        current_state=state["current_state"],
+        requested_state=state["requested_state"],
+        state_source=state["state_source"],
+        warning_active=state["warning_active"],
+        purge_active=False,
+        production_label=state["production_label"],
+        last_label_no=state["last_label_no"],
+        info=info,
+    )
+
+
+def recent_external_purge_clear(db: DB, *, max_age_s: float = PURGE_EXTERNAL_CLEAR_GRACE_S) -> bool:
+    state = _machine_state_row_from_db(db)
+    try:
+        clear_ts = float(((state.get("info") or {}).get("purge") or {}).get("external_clear_ts") or 0.0)
+    except Exception:
+        clear_ts = 0.0
+    return clear_ts > 0.0 and (now_ts() - clear_ts) <= max(0.1, float(max_age_s))
+
+
+def _machine_state_row_from_db(db: DB) -> dict[str, Any]:
+    with db._conn() as c:
+        row = c.execute(
+            """SELECT current_state,requested_state,state_source,warning_active,purge_active,
+                      production_label,last_label_no,info_json,updated_ts
+               FROM machine_state WHERE singleton_id=1"""
+        ).fetchone()
+    if not row:
+        return {
+            "current_state": 1,
+            "requested_state": 1,
+            "state_source": "runtime",
+            "warning_active": False,
+            "purge_active": False,
+            "production_label": "",
+            "last_label_no": 0,
+            "info": {},
+            "updated_ts": 0.0,
+        }
+    try:
+        info = json.loads(row[7] or "{}")
+    except Exception:
+        info = {}
+    return {
+        "current_state": int(row[0] or 1),
+        "requested_state": int(row[1] or 1),
+        "state_source": str(row[2] or "runtime"),
+        "warning_active": bool(row[3]),
+        "purge_active": bool(row[4]),
+        "production_label": str(row[5] or ""),
+        "last_label_no": int(row[6] or 0),
+        "info": info,
+        "updated_ts": float(row[8] or 0.0),
+    }
+
+
+def _write_machine_state_to_db(
+    db: DB,
+    *,
+    current_state: int,
+    requested_state: int,
+    state_source: str,
+    warning_active: bool,
+    purge_active: bool,
+    production_label: str,
+    last_label_no: int,
+    info: dict[str, Any],
+):
+    with db._conn() as c:
+        c.execute(
+            """INSERT INTO machine_state(
+                   singleton_id,current_state,requested_state,state_source,warning_active,purge_active,
+                   production_label,last_label_no,info_json,updated_ts
+               ) VALUES(1,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(singleton_id) DO UPDATE SET
+                 current_state=excluded.current_state,
+                 requested_state=excluded.requested_state,
+                 state_source=excluded.state_source,
+                 warning_active=excluded.warning_active,
+                 purge_active=excluded.purge_active,
+                 production_label=excluded.production_label,
+                 last_label_no=excluded.last_label_no,
+                 info_json=excluded.info_json,
+                 updated_ts=excluded.updated_ts""",
+            (
+                int(current_state),
+                int(requested_state),
+                str(state_source or "runtime"),
+                int(bool(warning_active)),
+                int(bool(purge_active)),
+                str(production_label or ""),
+                int(last_label_no or 0),
+                json.dumps(info, ensure_ascii=False),
+                now_ts(),
+            ),
+        )
 
 
 class MachineRuntime:
@@ -932,6 +1040,7 @@ class MachineRuntime:
         if self.outbox is None:
             return
         targets = peer_urls(self.cfg, "/api/inbox")
+        effective_dedupe = f"state:{pkey}" if dedupe_key else None
         for url in targets:
             self.outbox.enqueue(
                 "POST",
@@ -940,8 +1049,9 @@ class MachineRuntime:
                 {"msg": f"{pkey}={value}", "source": "raspi", "origin": "machine-runtime"},
                 None,
                 priority=20,
-                dedupe_key=dedupe_key,
-                drop_if_duplicate=bool(dedupe_key),
+                dedupe_key=effective_dedupe,
+                drop_if_duplicate=bool(effective_dedupe),
+                replace_existing=bool(effective_dedupe),
             )
 
 

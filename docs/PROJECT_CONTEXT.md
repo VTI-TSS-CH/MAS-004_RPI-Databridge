@@ -152,6 +152,7 @@
 - The fallback poller also stands down while the async owner session is healthy, even if no fresh state change happened recently.
 - Background 6530 cache warmup is skipped while async ownership is enabled, avoiding a second control client on `3002` during startup.
 - Outbox dedupe now only collapses consecutive identical values; non-consecutive state changes remain lossless.
+- `MAS0028=0` from Microtom/DIClient is a purge soft-clear and removes stale pending `MAS0028=<state>` callbacks before the ACK is queued. Device/ESP `MAS0028=1` echoes are suppressed briefly after that clear, while real machine-runtime critical causes may still reassert `MAS0028=1`.
 - Live TEST proof on `192.168.2.103:3002`:
   - idle `AIS` without synchronous traffic closes after about 15s
   - `IRQ([])` keepalives keep the async session open

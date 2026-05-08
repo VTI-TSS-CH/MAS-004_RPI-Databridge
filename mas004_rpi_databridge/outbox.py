@@ -41,6 +41,7 @@ class Outbox:
         priority: int = 100,
         dedupe_key: Optional[str] = None,
         drop_if_duplicate: bool = False,
+        replace_existing: bool = False,
     ):
         if idempotency_key is None:
             idempotency_key = str(uuid.uuid4())
@@ -57,6 +58,14 @@ class Outbox:
         priority = max(0, min(1000, priority))
 
         with self.db._conn() as c:
+            if dedupe_key and replace_existing:
+                c.execute(
+                    """DELETE FROM outbox
+                       WHERE method=?
+                         AND url=?
+                         AND dedupe_key=?""",
+                    (method.upper(), url, dedupe_key),
+                )
             if dedupe_key and drop_if_duplicate:
                 latest = c.execute(
                     """SELECT idempotency_key, body_json
@@ -77,6 +86,23 @@ class Outbox:
                 (now_ts(), method.upper(), url, json.dumps(headers), body_json, idempotency_key, priority, dedupe_key)
             )
         return idempotency_key
+
+    def delete_status_updates(self, pkey: str) -> int:
+        key = (pkey or "").strip().upper()
+        if not key:
+            return 0
+        patterns = [
+            f'%"msg": "{key}=%',
+            f'%"msg":"{key}=%',
+        ]
+        with self.db._conn() as c:
+            before = int(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0])
+            c.execute(
+                "DELETE FROM outbox WHERE body_json LIKE ? OR body_json LIKE ?",
+                tuple(patterns),
+            )
+            after = int(c.execute("SELECT COUNT(*) FROM outbox").fetchone()[0])
+        return max(0, before - after)
 
     def next_due(
         self,

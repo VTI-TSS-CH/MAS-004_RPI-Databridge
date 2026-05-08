@@ -88,6 +88,45 @@ class QueueBehaviorTests(unittest.TestCase):
 
             self.assertEqual(3, outbox.count())
 
+    def test_outbox_can_replace_pending_state_for_same_dedupe_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            outbox = Outbox(db)
+
+            outbox.enqueue(
+                "POST",
+                "https://peer/api/inbox",
+                {},
+                {"msg": "MAS0028=1", "source": "raspi", "origin": "esp-plc"},
+                dedupe_key="state:MAS0028",
+                replace_existing=True,
+            )
+            outbox.enqueue(
+                "POST",
+                "https://peer/api/inbox",
+                {},
+                {"msg": "MAS0028=0", "source": "raspi", "origin": "machine-runtime"},
+                dedupe_key="state:MAS0028",
+                replace_existing=True,
+            )
+
+            self.assertEqual(1, outbox.count())
+            job = outbox.next_due()
+            self.assertIn("MAS0028=0", job.body_json or "")
+
+    def test_outbox_deletes_pending_status_updates_without_touching_ack(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = DB(str(Path(tmpdir) / "db.sqlite3"))
+            outbox = Outbox(db)
+
+            outbox.enqueue("POST", "https://peer/api/inbox", {}, {"msg": "MAS0028=1", "source": "raspi"})
+            outbox.enqueue("POST", "https://peer/api/inbox", {}, {"msg": "ACK_MAS0028=0", "source": "raspi"})
+
+            self.assertEqual(1, outbox.delete_status_updates("MAS0028"))
+            self.assertEqual(1, outbox.count())
+            job = outbox.next_due()
+            self.assertIn("ACK_MAS0028=0", job.body_json or "")
+
     def test_outbox_can_select_primary_and_non_primary_lanes_independently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db = DB(str(Path(tmpdir) / "db.sqlite3"))
