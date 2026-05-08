@@ -4,7 +4,7 @@ import argparse
 import shutil
 from copy import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from openpyxl import load_workbook
 
@@ -96,6 +96,37 @@ def row_key(ws, row_idx: int) -> str:
     ptype = str(ws.cell(row_idx, 1).value or "").strip().upper()
     pid = str(ws.cell(row_idx, 2).value or "").strip()
     return f"{ptype}{pid}" if ptype and pid else ""
+
+
+def norm_header(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    for ch in ".:/\\_-?":
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
+def header_map(ws) -> dict[str, int]:
+    return {
+        norm_header(ws.cell(1, col_idx).value): col_idx
+        for col_idx in range(1, ws.max_column + 1)
+        if norm_header(ws.cell(1, col_idx).value)
+    }
+
+
+def col_any(headers: dict[str, int], *names: str) -> int:
+    for name in names:
+        key = norm_header(name)
+        if key in headers:
+            return headers[key]
+    raise RuntimeError(f"Missing expected workbook column. Tried: {', '.join(names)}")
+
+
+def col_optional(headers: dict[str, int], *names: str) -> Optional[int]:
+    for name in names:
+        key = norm_header(name)
+        if key in headers:
+            return headers[key]
+    return None
 
 
 def normalize_text(value: Any) -> str:
@@ -216,6 +247,26 @@ def generic_ai_for_row(values: dict[str, str]) -> str:
 
 
 def ensure_map0066(ws):
+    headers = header_map(ws)
+    c_type = col_any(headers, "Params_Type.:", "Params_Type")
+    c_id = col_any(headers, "Param. ID.:", "Param ID")
+    c_min = col_any(headers, "Min.:", "Min")
+    c_max = col_any(headers, "Max.:", "Max")
+    c_default = col_any(headers, "Default Value:", "Default Value")
+    c_unit = col_any(headers, "Einheit:", "Einheit", "Unit")
+    c_user_range = col_optional(headers, "Microtom User Range:", "Microtom User Range")
+    c_rw = col_any(headers, "R/W:", "R/W")
+    c_esp_rw = col_any(headers, "ESP32 R/W:", "ESP32 R/W")
+    c_dtype = col_any(headers, "Data Type:", "Data Type")
+    c_name = col_any(headers, "Name:", "Name")
+    c_zbc_mapping = col_optional(headers, "ZBC Mapping:", "ZBC Mapping")
+    c_format = col_any(headers, "Format relevant?:", "Format relevant")
+    c_message = col_any(headers, "Message:", "Message")
+    c_cause = col_any(headers, "Possible Cause:", "Possible Cause")
+    c_effects = col_any(headers, "Effects:", "Effects")
+    c_remedy = col_any(headers, "Remedy:", "Remedy")
+    c_ai = col_any(headers, "KI-Anweisungen:", "KI-Anweisungen", "AI Instructions")
+
     existing_row = None
     map0065_row = None
     for row_idx in range(2, ws.max_row + 1):
@@ -235,26 +286,30 @@ def ensure_map0066(ws):
         copy_row_style(ws, map0065_row, target_row, ws.max_column)
         existing_row = target_row
 
-    values = [
-        "MAP",
-        "0066",
-        "0",
-        "30000",
-        "8000",
-        "1/10mm",
-        "W",
-        "R",
-        "uint16",
-        "MAP0066 Distanz Etikettenerfassung - erste LED LED-Streifen",
-        None,
-        "NO",
-        "Distanz von der Etikettenerfassung bis zur ersten LED des LED-Streifens",
-        None,
-        None,
-        None,
-        SPECIAL_AI["MAP0066"],
-    ]
-    for col_idx, value in enumerate(values, start=1):
+    values_by_col = {
+        c_type: "MAP",
+        c_id: "0066",
+        c_min: "0",
+        c_max: "30000",
+        c_default: "8000",
+        c_unit: "1/10mm",
+        c_rw: "W",
+        c_esp_rw: "R",
+        c_dtype: "uint16",
+        c_name: "MAP0066 Distanz Etikettenerfassung - erste LED LED-Streifen",
+        c_format: "NO",
+        c_message: "Distanz von der Etikettenerfassung bis zur ersten LED des LED-Streifens",
+        c_cause: None,
+        c_effects: None,
+        c_remedy: None,
+        c_ai: SPECIAL_AI["MAP0066"],
+    }
+    if c_user_range is not None:
+        values_by_col[c_user_range] = None
+    if c_zbc_mapping is not None:
+        values_by_col[c_zbc_mapping] = None
+
+    for col_idx, value in values_by_col.items():
         ws.cell(existing_row, col_idx).value = value
 
 
@@ -262,30 +317,41 @@ def sync_parameter_workbook(path: Path):
     wb = load_workbook(path)
     ws = wb["Parameter"]
     ensure_map0066(ws)
+    headers = header_map(ws)
+    c_type = col_any(headers, "Params_Type.:", "Params_Type")
+    c_id = col_any(headers, "Param. ID.:", "Param ID")
+    c_unit = col_any(headers, "Einheit:", "Einheit", "Unit")
+    c_rw = col_any(headers, "R/W:", "R/W")
+    c_esp_rw = col_any(headers, "ESP32 R/W:", "ESP32 R/W")
+    c_name = col_any(headers, "Name:", "Name")
+    c_mapping = col_optional(headers, "ZBC Mapping:", "ZBC Mapping", "ESP Key")
+    c_format = col_any(headers, "Format relevant?:", "Format relevant")
+    c_message = col_any(headers, "Message:", "Message")
+    c_ai = col_any(headers, "KI-Anweisungen:", "KI-Anweisungen", "AI Instructions")
 
     updated = 0
     for row_idx in range(2, ws.max_row + 1):
-        ptype = str(ws.cell(row_idx, 1).value or "").strip().upper()
-        pid = str(ws.cell(row_idx, 2).value or "").strip()
+        ptype = str(ws.cell(row_idx, c_type).value or "").strip().upper()
+        pid = str(ws.cell(row_idx, c_id).value or "").strip()
         if not ptype or not pid:
             continue
-        operator_note, existing_ai = split_ai_cell(ws.cell(row_idx, 17).value)
+        operator_note, existing_ai = split_ai_cell(ws.cell(row_idx, c_ai).value)
         values = {
             "pkey": f"{ptype}{pid}",
             "ptype": ptype,
-            "name": normalize_text(ws.cell(row_idx, 10).value),
-            "mapping": normalize_text(ws.cell(row_idx, 11).value),
-            "format_relevant": normalize_text(ws.cell(row_idx, 12).value),
-            "message": normalize_text(ws.cell(row_idx, 13).value),
-            "rw": normalize_text(ws.cell(row_idx, 7).value).upper(),
-            "esp_rw": normalize_text(ws.cell(row_idx, 8).value).upper(),
-            "unit": normalize_text(ws.cell(row_idx, 6).value),
+            "name": normalize_text(ws.cell(row_idx, c_name).value),
+            "mapping": normalize_text(ws.cell(row_idx, c_mapping).value) if c_mapping else "",
+            "format_relevant": normalize_text(ws.cell(row_idx, c_format).value),
+            "message": normalize_text(ws.cell(row_idx, c_message).value),
+            "rw": normalize_text(ws.cell(row_idx, c_rw).value).upper(),
+            "esp_rw": normalize_text(ws.cell(row_idx, c_esp_rw).value).upper(),
+            "unit": normalize_text(ws.cell(row_idx, c_unit).value),
             "existing_ai": existing_ai,
             "operator_note": operator_note,
         }
         ai_text = generic_ai_for_row(values)
-        if ws.cell(row_idx, 17).value != ai_text:
-            ws.cell(row_idx, 17).value = ai_text
+        if ws.cell(row_idx, c_ai).value != ai_text:
+            ws.cell(row_idx, c_ai).value = ai_text
             updated += 1
 
     wb.save(path)

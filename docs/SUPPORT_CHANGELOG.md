@@ -833,6 +833,16 @@
 - The calculated `steps/mm` and optional direction inversion are written and immediately saved through the persistent motor `SAVE` command.
 - The calibration result is therefore the active persisted configuration used by the ESP32-PLC motor program flow; no extra `Parameter speichern` click is required after the calibration.
 
+## 2026-05-08 (Parameter Workbook Microtom User Range)
+- Updated the master-parameter workflow for the new workbook column `Microtom User Range` at column `G`.
+- The column is treated as Microtom-only metadata and is intentionally not imported into the Databridge parameter schema.
+- Workbook sync/enrichment now resolves columns by header name instead of fixed column numbers, so `R/W`, `ESP32 R/W`, `ZBC Mapping`, `Format relevant`, `Message`, `Remedy` and `KI-Anweisungen` remain correct after the one-column shift.
+- Pulled production-only parameter rows into the master workbook and repo copy:
+  - `MAE0031` Abwicklung falscher Kernadapter
+  - `MAE0035` Aufwicklung falscher Kernadapter
+- Refreshed KI entries in the shifted `KI-Anweisungen` column using the current project logic.
+- Transient production runtime values such as live `MAS`/`MAE` states were not promoted to workbook defaults; they remain runtime state in `param_values`.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

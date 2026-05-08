@@ -355,6 +355,11 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `ESP32 R/W = R` means Raspi/Microtom is leading and the ESP receives updates via `SYNC <key>=<value>`
   - `ESP32 R/W = W` or `R/W` remains the ESP-leading/direct write path
   - if a Microtom write to a MAP value starts returning `NAK_ReadOnly` from the ESP, verify that the Raspi and firmware both include the 2026-04-21 `SYNC` contract
+- For master-parameter workbook maintenance:
+  - `Microtom User Range` is column `G` and is Microtom-only metadata.
+  - The Databridge importer ignores this column and continues to use the header names for all functional columns.
+  - Do not reintroduce fixed column numbers in workbook-sync scripts; use header lookup so `KI-Anweisungen` remains correct if Microtom adds more metadata columns.
+  - Do not promote transient live statuses (`MAS`/`MAE`/`MAW` state values) into workbook defaults unless explicitly requested; those belong in `param_values`.
 - For ESP32-PLC eth1 reliability:
   - all production traffic to `192.168.2.101:3010` must use `EspPlcClient`
   - do not add ad-hoc raw socket loops in runtime code; they bypass endpoint locking, pacing and retry protection
