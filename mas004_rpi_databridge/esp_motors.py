@@ -90,6 +90,9 @@ class EspMotorClient:
     def move_absolute_mm(self, motor_id: int, absolute_mm: float) -> dict[str, Any]:
         return self._ack(f"MOTOR {int(motor_id)} MOVE_ABS_MM={_format_value(absolute_mm)}")
 
+    def set_current_position_mm(self, motor_id: int, absolute_mm: float) -> dict[str, Any]:
+        return self._ack(f"MOTOR {int(motor_id)} SET_POSITION_MM={_format_value(absolute_mm)}")
+
     def zero(self, motor_id: int) -> dict[str, Any]:
         return self._ack(f"MOTOR {int(motor_id)} ZERO")
 

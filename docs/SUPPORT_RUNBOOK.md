@@ -417,6 +417,8 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `Aufloesung definieren` moves by the configured test steps, asks for measured travel, then asks whether the direction was correct.
   - Select `Nein, Richtung drehen` if the mechanical direction was wrong; the UI toggles `invert_direction`.
   - The calculated `steps/mm` and direction setting are saved persistently immediately, so an extra `Parameter speichern` click is not required after this calibration.
+  - `Istposition setzen [mm]` captures the current live motor position as the entered absolute position and saves the resulting offset persistently.
+  - `Absolut fahren nach [mm]` commands the axis to an entered absolute millimeter position via `MOVE_ABS_MM`.
   - These persisted values are the values used later by the ESP32-PLC motor program flow.
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`

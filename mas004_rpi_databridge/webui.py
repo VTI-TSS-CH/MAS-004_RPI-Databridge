@@ -318,6 +318,10 @@ class MotorMoveReq(BaseModel):
     value: float
 
 
+class MotorPositionReq(BaseModel):
+    value: float
+
+
 class MotorConfigReq(BaseModel):
     steps_per_mm: Optional[float] = None
     speed_mm_s: Optional[float] = None
@@ -1805,6 +1809,28 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             return motor_action_response(client, motor_id, "MOVE_ABS_MM", result)
         raise HTTPException(status_code=400, detail="Unsupported motor move mode")
 
+    @app.post("/api/motors/{motor_id}/position")
+    def api_motor_position(
+        request: Request,
+        motor_id: int,
+        body: MotorPositionReq,
+        x_token: Optional[str] = Header(default=None),
+        x_shared_secret: Optional[str] = Header(default=None),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        require_live_motor_or_raise(motor_id, cfg2)
+        client = EspMotorClient(cfg2)
+        result = client.set_current_position_mm(motor_id, float(body.value))
+        require_motor_ack(result, "SET_POSITION_MM")
+        save_result = client.save(motor_id)
+        require_motor_ack(save_result, "SAVE")
+        combined = {
+            "ok": True,
+            "reply": f"{result.get('reply', '')}; {save_result.get('reply', '')}".strip("; "),
+        }
+        return motor_action_response(client, motor_id, "SET_POSITION_MM", combined)
+
     @app.post("/api/motors/{motor_id}/config")
     def api_motor_config(
         request: Request,
@@ -2923,6 +2949,12 @@ function statusKind(v){
   return "warn";
 }
 
+function tenthsToMmText(value){
+  const n = Number(value);
+  if(!Number.isFinite(n)){ return ""; }
+  return String((n / 10).toFixed(3)).replace(/0+$/,"").replace(/\\.$/,"");
+}
+
 function setMotorSimulationUi(id, enabled){
   if(enabled){
     stopMotorPolling(id);
@@ -2978,6 +3010,8 @@ function renderCard(motor){
     <div class="grid">
       <div class="field"><label>Test-Schritte</label><input id="m-${motor.id}-test_steps" data-motor-id="${motor.id}" data-live-only="1" value="1000"/></div>
       <div class="field"><label>Manuell bewegen [mm]</label><input id="m-${motor.id}-manual_mm" data-motor-id="${motor.id}" data-live-only="1" value="0"/></div>
+      <div class="field"><label>Istposition setzen [mm]</label><input id="m-${motor.id}-position_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Absolut fahren nach [mm]</label><input id="m-${motor.id}-absolute_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Steps / mm</label><input id="m-${motor.id}-steps_per_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Geschwindigkeit [mm/s]</label><input id="m-${motor.id}-speed_mm_s" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Acceleration [mm/s2]</label><input id="m-${motor.id}-accel_mm_s2" data-motor-id="${motor.id}" data-live-only="1"/></div>
@@ -2994,6 +3028,8 @@ function renderCard(motor){
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="moveSteps(${motor.id})">Schritte fahren</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="defineResolution(${motor.id})">Auflösung definieren</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="manualMove(${motor.id})">Move mm</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setAbsolutePosition(${motor.id})">Istposition übernehmen</button>
+      <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="moveAbsolute(${motor.id})">Absolut fahren</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setZero(${motor.id})">Nullpunkt setzen</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setMin(${motor.id})">Min setzen</button>
       <button class="btn" data-motor-id="${motor.id}" data-live-only="1" onclick="setMax(${motor.id})">Max setzen</button>
@@ -3006,7 +3042,7 @@ function renderCard(motor){
   `;
   document.getElementById("cards").appendChild(card);
 
-  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled","test_steps","manual_mm"].forEach(field => {
+  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled","test_steps","manual_mm","position_mm","absolute_mm"].forEach(field => {
     const el = document.getElementById(`m-${motor.id}-${field}`);
     if(el) bindDirty(el, motor.id, field);
   });
@@ -3035,6 +3071,8 @@ function updateCard(motor){
   setInputValueIfClean(motor.id, "max_tenths_mm", cfg.max_tenths_mm ?? "");
   setInputValueIfClean(motor.id, "min_enabled", cfg.min_enabled ? "1" : "0");
   setInputValueIfClean(motor.id, "max_enabled", cfg.max_enabled ? "1" : "0");
+  setInputValueIfClean(motor.id, "position_mm", tenthsToMmText(state.feedback_tenths_mm));
+  setInputValueIfClean(motor.id, "absolute_mm", tenthsToMmText(state.target_tenths_mm ?? state.command_tenths_mm ?? state.feedback_tenths_mm));
 
   updateLiveText(motor.id, "link", String(state.link_ok ?? ""), statusKind(state.link_ok));
   updateLiveText(motor.id, "ready", String(state.ready ?? ""), statusKind(state.ready));
@@ -3182,6 +3220,19 @@ async function manualMove(id){
   const value = numOrNull(document.getElementById(`m-${id}-manual_mm`).value);
   if(value === null){ alert("Bitte mm-Wert eingeben."); return; }
   await runMotorAction(id, `Move ${value} mm`, () => post(`/api/motors/${id}/move`, {mode:"relative_mm", value:value}));
+}
+
+async function setAbsolutePosition(id){
+  const value = numOrNull(document.getElementById(`m-${id}-position_mm`).value);
+  if(value === null){ alert("Bitte absolute Istposition in mm eingeben."); return; }
+  const result = await runMotorAction(id, `Istposition = ${value} mm übernehmen`, () => post(`/api/motors/${id}/position`, {value:value}));
+  if(result){ dirtyFields.delete(fieldKey(id, "position_mm")); }
+}
+
+async function moveAbsolute(id){
+  const value = numOrNull(document.getElementById(`m-${id}-absolute_mm`).value);
+  if(value === null){ alert("Bitte absolute Zielposition in mm eingeben."); return; }
+  await runMotorAction(id, `Absolut fahren ${value} mm`, () => post(`/api/motors/${id}/move`, {mode:"absolute_mm", value:value}));
 }
 
 async function setZero(id){ await runMotorAction(id, "Nullpunkt setzen", () => post(`/api/motors/${id}/zero`, {})); }

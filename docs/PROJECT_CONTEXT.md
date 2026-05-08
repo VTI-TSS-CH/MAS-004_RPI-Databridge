@@ -100,6 +100,7 @@
   - ESP background motor polling intentionally stays off by default (`MOTOR POLL=0`) because the ESP owns a single TCP command socket and Modbus RTU timeouts can otherwise block process/Wickler control
   - the Raspi page therefore keeps the auto-refresh view cache-based, reads only the lightweight `MOTOR POLL?` state automatically and offers an explicit per-motor `Status aktualisieren` action that sends `MOTOR <id> REFRESH` for one AZD controller at a time
   - motor command actions now surface ESP `NAK` replies directly, update the affected card after successful actions and offer per-card `1s Polling` for commissioning
+  - the motor cards can capture the current physical position as an entered absolute millimeter value and can command absolute millimeter target moves
   - the page no longer runs a default global 2 second refresh loop; this avoids losing in-progress edits while setting up drives
 - New Smart Wickler proxy surface on the Raspi web UI:
   - `/ui/machine-setup/winders/unwinder`

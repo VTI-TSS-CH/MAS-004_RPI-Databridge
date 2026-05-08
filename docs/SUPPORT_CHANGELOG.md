@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-08 (Motor Setup Absolute Position)
+- Added absolute-position commissioning controls to `/ui/machine-setup/motors`.
+- New field `Istposition setzen [mm]` assigns the current physical axis position to an entered absolute millimeter value and saves the resulting ESP motor offset persistently.
+- New field `Absolut fahren nach [mm]` sends `MOVE_ABS_MM` so a motor can be driven directly to an entered absolute position.
+- Added Raspi API wrapper `/api/motors/{motor_id}/position` and ESP motor client support for `MOTOR <id> SET_POSITION_MM=<mm>`.
+
 ## 2026-05-08 (MAS0028 Purge Clear Anti-Echo)
 - Fixed a Purge echo/race where `MAS0028=0` from Microtom/DIClient could be followed by an older or stale `MAS0028=1` callback.
 - Deduplicated machine/device status callbacks now use a latest-state-wins queue mode, so stale pending status values cannot overtake a newer state value after peer downtime or retries.
