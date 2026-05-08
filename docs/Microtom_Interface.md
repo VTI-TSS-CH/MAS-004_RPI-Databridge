@@ -541,6 +541,9 @@ curl -k -o "gesamtanlage_Testproduktion2.txt" \
    1. wird `MAS0030` automatisch auf `0` gesetzt
    2. und `MAS0030=0` wird automatisch an Microtom gemeldet
 
+Konsistenzregel ab 2026-05-08:
+`MAS0030=?`, die Settings-Anzeige und `GET /api/production/logfiles/list` werden aus demselben bereinigten Zustand abgeleitet. `MAS0002=1` darf nur dann mit `NAK_ProductionLogfilesPending` antworten, wenn die Produktions-API tatsaechlich noch herunterladbare Dateien liefert. Ein veraltetes Ready-Flag ohne Dateien wird automatisch auf `MAS0030=0` bereinigt.
+
 Typische Produktionsdateien:
 1. `gesamtanlage_<MAS0029>.txt`
 2. `esp32_plc_<MAS0029>.txt`

@@ -1,5 +1,13 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-08 (Production Logfile Ready-State Self-Healing)
+- Fixed a stale production-log state where UI could show `Files ready=yes` while the production file list was empty and `MAS0030=?` returned `0`.
+- `MAS0002=1` is now blocked only when real downloadable production logfiles exist. A stale `_production_state.json` with `ready=true` but no files is self-healed to `ready=false` and `MAS0030=0`.
+- `MAS0030=?` now reconciles the production-log state before answering, so Microtom sees the same state as `/api/production/logfiles/list`.
+- Start/stop lifecycle lines are written directly by `ProductionLogManager`, so even a quiet production creates at least `gesamtanlage_<label>.txt`.
+- If stopped production files exist but `MAS0030` was stale at `0`, the manifest recovers `MAS0030=1` and keeps the next start blocked until the files are downloaded.
+- Added regression tests for stale-ready cleanup, stopped-file recovery and quiet-production logfile creation.
+
 ## 2026-05-01 (Safety-Reset validiert echte Motor-Ready)
 - Safety-/Not-Aus-Reset meldet erst dann Erfolg, wenn nach `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO` und `RESET_ALARM` alle ESP-AZD-Motoren `1..9` live verifiziert `ready=true` und `alarm=false` melden.
 - Beide Smart-Wickler werden nach `stop`, `resetAlarm`, `etoRecovery`, `ready` ebenfalls ueber `/api/state` verifiziert. `HWTO/STO aktiv`, `ready=false` oder ein Wickler-Fault bleibt dadurch als Reset-Fehler sichtbar.

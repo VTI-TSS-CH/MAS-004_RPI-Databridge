@@ -148,6 +148,9 @@ class Router:
                 self._enqueue_to_microtom(resp, correlation=correlation)
                 return resp
 
+        if pkey == "MAS0030" and op == "read":
+            self.production_logs.ready_manifest()
+
         resp = self.device_bridge.execute(device=dev, pkey=pkey, ptype=ptype, op=op, value=value, actor="microtom")
         self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
         self.logs.log("raspi", "out", f"to microtom: {resp}")

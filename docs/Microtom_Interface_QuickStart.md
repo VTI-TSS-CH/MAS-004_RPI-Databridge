@@ -176,6 +176,7 @@ Wichtig:
 1. Jeder Produktions-Download loescht genau diese Datei sofort auf dem Raspi.
 2. Nach dem letzten Download setzt der Raspi automatisch `MAS0030=0` und meldet diesen Wert an Microtom zurueck.
 3. Solange noch Produktionsdateien offen sind, wird ein neuer Start mit `MAS0002=1` abgewiesen mit:
+4. `MAS0030=?` und `/api/production/logfiles/list` muessen denselben Zustand zeigen; ein Ready-Flag ohne vorhandene Dateien wird automatisch bereinigt.
 
 ```text
 MAS0002=NAK_ProductionLogfilesPending

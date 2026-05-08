@@ -139,6 +139,95 @@ class ProductionLogTests(unittest.TestCase):
             self.assertFalse(allowed)
             self.assertEqual("NAK_ProductionLogfilesPending", reason)
 
+    def test_stale_ready_state_without_files_is_self_healed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db = DB(str(base / "db.sqlite3"))
+            _insert_param(db, "MAS0002", "MAS", "0002", "0", "W", "W", "uint8")
+            _insert_param(db, "MAS0029", "MAS", "0029", "", "W", "R", "string")
+            _insert_param(db, "MAS0030", "MAS", "0030", "1", "R", "N", "uint8")
+            params = ParamStore(db)
+            manager = ProductionLogManager(db, log_dir=str(base / "production"))
+
+            manager._write_state(
+                {
+                    "active": False,
+                    "ready": True,
+                    "production_label": "BATCH_WITHOUT_FILES",
+                    "production_label_raw": "BATCH_WITHOUT_FILES",
+                    "started_ts": now_ts(),
+                    "stopped_ts": now_ts(),
+                    "files": [production_file_name("all", "BATCH_WITHOUT_FILES")],
+                }
+            )
+
+            manifest = manager.ready_manifest()
+            self.assertFalse(manifest["ready"])
+            self.assertEqual([], manifest["files"])
+            self.assertEqual("0", params.get_effective_value("MAS0030"))
+
+            allowed, reason = manager.can_start_new_production()
+            self.assertTrue(allowed)
+            self.assertEqual("OK", reason)
+
+    def test_stopped_state_with_files_recovers_mas0030(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db = DB(str(base / "db.sqlite3"))
+            _insert_param(db, "MAS0002", "MAS", "0002", "0", "W", "W", "uint8")
+            _insert_param(db, "MAS0029", "MAS", "0029", "", "W", "R", "string")
+            _insert_param(db, "MAS0030", "MAS", "0030", "0", "R", "N", "uint8")
+            params = ParamStore(db)
+            manager = ProductionLogManager(db, log_dir=str(base / "production"))
+
+            manager._write_state(
+                {
+                    "active": False,
+                    "ready": False,
+                    "production_label": "BATCH_RECOVERY",
+                    "production_label_raw": "BATCH_RECOVERY",
+                    "started_ts": now_ts(),
+                    "stopped_ts": now_ts(),
+                    "files": [],
+                }
+            )
+            (base / "production" / production_file_name("all", "BATCH_RECOVERY")).write_text(
+                "ready\n", encoding="utf-8"
+            )
+
+            manifest = manager.ready_manifest()
+            self.assertTrue(manifest["ready"])
+            self.assertEqual([production_file_name("all", "BATCH_RECOVERY")], [item["name"] for item in manifest["files"]])
+            self.assertEqual("1", params.get_effective_value("MAS0030"))
+
+            allowed, reason = manager.can_start_new_production()
+            self.assertFalse(allowed)
+            self.assertEqual("NAK_ProductionLogfilesPending", reason)
+
+    def test_start_stop_without_external_log_lines_still_creates_downloadable_logfile(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db = DB(str(base / "db.sqlite3"))
+            _insert_param(db, "MAS0002", "MAS", "0002", "0", "W", "W", "uint8")
+            _insert_param(db, "MAS0029", "MAS", "0029", "JOB_NO_TRAFFIC", "W", "R", "string")
+            _insert_param(db, "MAS0030", "MAS", "0030", "0", "R", "N", "uint8")
+            params = ParamStore(db)
+            manager = ProductionLogManager(db, log_dir=str(base / "production"))
+
+            started = manager.handle_param_change("MAS0002", "1")
+            self.assertEqual("start", started["event"])
+            stopped = manager.handle_param_change("MAS0002", "2")
+            self.assertEqual("stop", stopped["event"])
+
+            manifest = manager.ready_manifest()
+            self.assertTrue(manifest["ready"])
+            self.assertEqual("1", params.get_effective_value("MAS0030"))
+            names = [item["name"] for item in manifest["files"]]
+            self.assertEqual([production_file_name("all", "JOB_NO_TRAFFIC")], names)
+            content = (base / "production" / names[0]).read_text(encoding="utf-8")
+            self.assertIn("production logging started", content)
+            self.assertIn("production logging stopped", content)
+
     def test_logfiles_include_parameter_name_and_description(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

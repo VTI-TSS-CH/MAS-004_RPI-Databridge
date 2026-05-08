@@ -78,6 +78,14 @@
     - repo copy `master_data/Parameterliste SAR41-MAS-004.xlsx` is refreshed
     - repo copy `master_data/SAR41-MAS-004_SPS_I-Os.xlsx` is refreshed
     - `MAP0066` exists and currently defaults to `8000`
+- Production-log ready-state check:
+  - `MAS0030=?` and `/api/production/logfiles/list` must always agree.
+  - `MAS0002=1` may only return `NAK_ProductionLogfilesPending` when `/api/production/logfiles/list` contains downloadable files.
+  - A stale state with `Files ready=yes` and an empty file list is auto-cleared to `MAS0030=0`.
+  - A quiet production still creates at least `gesamtanlage_<production_label>.txt` through ProductionLogManager lifecycle lines.
+  - Quick verification on a Raspi:
+    - `curl -k https://<raspi-ip>:8080/api/production/logfiles/list`
+    - send `MAS0030=?`; the answer must match the `ready` value derived from the file list.
     - user notes before `KI:` are folded into regenerated `KI:` texts
     - the full `KI-Anweisungen:` column is rewritten with `KI:` texts
 - After workbook rights or ESP-relevant MAP defaults change while TEST is offline:

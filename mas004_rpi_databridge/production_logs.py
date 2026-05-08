@@ -9,7 +9,7 @@ from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
-from mas004_rpi_databridge.timeutil import local_now
+from mas004_rpi_databridge.timeutil import format_local_timestamp, local_now
 
 DEFAULT_PRODUCTION_LOG_DIR = "/var/lib/mas004_rpi_databridge/production_logs"
 PRODUCTION_STATE_FILE = "_production_state.json"
@@ -134,26 +134,22 @@ class ProductionLogManager:
         except Exception:
             pass
 
-    def ready_manifest(self) -> Dict[str, Any]:
-        state = self._read_state()
-        label = (state.get("production_label") or "").strip()
-        out = {
-            "ok": True,
-            "active": bool(state.get("active")),
-            "ready": bool(state.get("ready")),
-            "production_label": label,
-            "production_label_raw": state.get("production_label_raw") or "",
-            "started_ts": state.get("started_ts"),
-            "stopped_ts": state.get("stopped_ts"),
-            "files": [],
-        }
-        if not label:
-            return out
+    def _append_lifecycle_line(self, label: str, message: str):
+        prod_label = str(label or "").strip()
+        if not prod_label:
+            return
+        line = f"[{format_local_timestamp(now_ts())}] [raspi] INFO {message}\n"
+        self.append_line("all", prod_label, line)
+
+    def _existing_ready_files(self, label: str) -> List[Dict[str, Any]]:
+        prod_label = str(label or "").strip()
+        if not prod_label:
+            return []
 
         files: List[Dict[str, Any]] = []
         for group, group_label in PRODUCTION_GROUP_LABELS.items():
-            name = production_file_name(group, label)
-            path = self.path_for_group(group, label)
+            name = production_file_name(group, prod_label)
+            path = self.path_for_group(group, prod_label)
             if not os.path.exists(path):
                 continue
             try:
@@ -170,8 +166,57 @@ class ProductionLogManager:
                 }
             )
         files.sort(key=lambda item: item["name"])
-        out["files"] = files
-        return out
+        return files
+
+    def _set_ready_param_if_needed(self, value: str):
+        params = ParamStore(self.db)
+        if not params.get_meta("MAS0030"):
+            return
+        if str(params.get_effective_value("MAS0030")) == str(value):
+            return
+        params.apply_device_value("MAS0030", str(value), promote_default=False)
+
+    def _reconcile_ready_state(self, state: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[str, Any]], bool]:
+        state = dict(state)
+        active = bool(state.get("active"))
+        label = (state.get("production_label") or "").strip()
+        existing_files = self._existing_ready_files(label)
+        file_names = [item["name"] for item in existing_files]
+
+        # A production is only "ready for download" after stop, never while recording.
+        should_be_ready = False
+        if not active and existing_files:
+            should_be_ready = bool(state.get("ready")) or bool(state.get("stopped_ts"))
+
+        changed = False
+        if bool(state.get("ready")) != should_be_ready:
+            state["ready"] = should_be_ready
+            changed = True
+        if list(state.get("files") or []) != file_names:
+            state["files"] = file_names
+            changed = True
+
+        if changed:
+            self._write_state(state)
+
+        self._set_ready_param_if_needed("1" if should_be_ready else "0")
+        exposed_files = existing_files if should_be_ready else []
+        return state, exposed_files, should_be_ready
+
+    def ready_manifest(self) -> Dict[str, Any]:
+        state = self._read_state()
+        state, files, ready = self._reconcile_ready_state(state)
+        label = (state.get("production_label") or "").strip()
+        return {
+            "ok": True,
+            "active": bool(state.get("active")),
+            "ready": ready,
+            "production_label": label,
+            "production_label_raw": state.get("production_label_raw") or "",
+            "started_ts": state.get("started_ts"),
+            "stopped_ts": state.get("stopped_ts"),
+            "files": files,
+        }
 
     def can_start_new_production(self) -> tuple[bool, str]:
         manifest = self.ready_manifest()
@@ -195,7 +240,7 @@ class ProductionLogManager:
         params = ParamStore(self.db)
         if not params.get_meta("MAS0030"):
             return
-        params.apply_device_value("MAS0030", str(value), promote_default=True)
+        params.apply_device_value("MAS0030", str(value), promote_default=False)
 
     def _notify_ready_to_microtom(self, value: str):
         if self.cfg is None or self.outbox is None:
@@ -237,29 +282,30 @@ class ProductionLogManager:
             }
             self._write_state(new_state)
             self._set_ready_param("0")
+            self._append_lifecycle_line(label, f"production logging started: {label}")
             return {"event": "start", "production_label": label}
 
         if text_value == "2":
             if not state.get("active"):
                 return None
             label = (state.get("production_label") or "").strip()
+            self._append_lifecycle_line(label, f"production logging stopped: {label}")
             state["active"] = False
-            state["ready"] = True
+            files = self._existing_ready_files(label)
+            state["ready"] = bool(files)
             state["stopped_ts"] = now_ts()
-            state["files"] = [production_file_name(group, label) for group in PRODUCTION_GROUP_LABELS] if label else []
+            state["files"] = [item["name"] for item in files]
             self._write_state(state)
-            self._set_ready_param("1")
-            self._notify_ready_to_microtom("1")
+            if state["ready"]:
+                self._set_ready_param("1")
+                self._notify_ready_to_microtom("1")
+            else:
+                self._set_ready_param("0")
             return {"event": "stop", "production_label": label}
 
         return None
 
     def acknowledge_ready(self) -> Dict[str, Any]:
-        state = self._read_state()
-        if state.get("ready") and not self.ready_manifest().get("files"):
-            state["ready"] = False
-            self._write_state(state)
-            self._set_ready_param("0")
         return self.ready_manifest()
 
     def consume_ready_file(self, name: str, max_bytes: int = 5_000_000) -> bytes:
@@ -276,13 +322,20 @@ class ProductionLogManager:
         return data
 
     def _refresh_ready_state_after_removal(self):
-        manifest = self.ready_manifest()
-        if manifest.get("files"):
-            return
         state = self._read_state()
+        label = (state.get("production_label") or "").strip()
+        files = self._existing_ready_files(label)
+        if files:
+            file_names = [item["name"] for item in files]
+            if list(state.get("files") or []) != file_names:
+                state["files"] = file_names
+                self._write_state(state)
+            return
         if not state.get("ready"):
+            self._set_ready_param_if_needed("0")
             return
         state["ready"] = False
+        state["files"] = []
         self._write_state(state)
         self._set_ready_param("0")
         self._notify_ready_to_microtom("0")

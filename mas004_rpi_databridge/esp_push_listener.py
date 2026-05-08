@@ -168,6 +168,8 @@ class EspPushListener:
             return resp
 
         if op == "read" and dev == "esp-plc":
+            if pkey == "MAS0030":
+                production_logs.ready_manifest()
             ok, msg = params.validate_read(pkey, actor="esp32")
             resp = f"{pkey}={params.get_effective_value(pkey)}" if ok else f"{pkey}={msg}"
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")
