@@ -414,6 +414,8 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - reset complete: `Q0.2` steady
 - For motor setup and calibration:
   - `Parameter speichern` writes the current card values to the ESP32-PLC and then runs the persistent motor `SAVE` command.
+  - `Fahrstrom [%]` maps to ESP `current_pct` and AZD `Base current`.
+  - `Haltestrom [%]` maps to ESP `hold_current_pct` and AZD `Stop current`; if Haltestrom is below Fahrstrom, the ESP enables AZD automatic current cutback with the standard switching time.
   - `Aufloesung definieren` moves by the configured test steps, asks for measured travel, then asks whether the direction was correct.
   - Select `Nein, Richtung drehen` if the mechanical direction was wrong; the UI toggles `invert_direction`.
   - The calculated `steps/mm` and direction setting are saved persistently immediately, so an extra `Parameter speichern` click is not required after this calibration.

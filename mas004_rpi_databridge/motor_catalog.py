@@ -87,6 +87,7 @@ def _default_config() -> dict[str, Any]:
         "accel_mm_s2": 100,
         "decel_mm_s2": 100,
         "current_pct": 100,
+        "hold_current_pct": 50,
         "invert_direction": False,
         "min_tenths_mm": 0,
         "max_tenths_mm": 0,

@@ -328,6 +328,7 @@ class MotorConfigReq(BaseModel):
     accel_mm_s2: Optional[float] = None
     decel_mm_s2: Optional[float] = None
     current_pct: Optional[float] = None
+    hold_current_pct: Optional[float] = None
     invert_direction: Optional[bool] = None
     min_tenths_mm: Optional[int] = None
     max_tenths_mm: Optional[int] = None
@@ -3016,7 +3017,8 @@ function renderCard(motor){
       <div class="field"><label>Geschwindigkeit [mm/s]</label><input id="m-${motor.id}-speed_mm_s" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Acceleration [mm/s2]</label><input id="m-${motor.id}-accel_mm_s2" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Deceleration [mm/s2]</label><input id="m-${motor.id}-decel_mm_s2" data-motor-id="${motor.id}" data-live-only="1"/></div>
-      <div class="field"><label>Strom [%]</label><input id="m-${motor.id}-current_pct" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Fahrstrom [%]</label><input id="m-${motor.id}-current_pct" data-motor-id="${motor.id}" data-live-only="1"/></div>
+      <div class="field"><label>Haltestrom [%]</label><input id="m-${motor.id}-hold_current_pct" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Drehrichtung</label><select id="m-${motor.id}-invert_direction" data-motor-id="${motor.id}" data-live-only="1"><option value="0">Normal</option><option value="1">Invertiert</option></select></div>
       <div class="field"><label>Min [1/10mm]</label><input id="m-${motor.id}-min_tenths_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
       <div class="field"><label>Max [1/10mm]</label><input id="m-${motor.id}-max_tenths_mm" data-motor-id="${motor.id}" data-live-only="1"/></div>
@@ -3042,7 +3044,7 @@ function renderCard(motor){
   `;
   document.getElementById("cards").appendChild(card);
 
-  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled","test_steps","manual_mm","position_mm","absolute_mm"].forEach(field => {
+  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","hold_current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled","test_steps","manual_mm","position_mm","absolute_mm"].forEach(field => {
     const el = document.getElementById(`m-${motor.id}-${field}`);
     if(el) bindDirty(el, motor.id, field);
   });
@@ -3066,6 +3068,7 @@ function updateCard(motor){
   setInputValueIfClean(motor.id, "accel_mm_s2", cfg.accel_mm_s2 ?? "");
   setInputValueIfClean(motor.id, "decel_mm_s2", cfg.decel_mm_s2 ?? "");
   setInputValueIfClean(motor.id, "current_pct", cfg.current_pct ?? "");
+  setInputValueIfClean(motor.id, "hold_current_pct", cfg.hold_current_pct ?? "");
   setInputValueIfClean(motor.id, "invert_direction", cfg.invert_direction ? "1" : "0");
   setInputValueIfClean(motor.id, "min_tenths_mm", cfg.min_tenths_mm ?? "");
   setInputValueIfClean(motor.id, "max_tenths_mm", cfg.max_tenths_mm ?? "");
@@ -3134,6 +3137,7 @@ function configPayload(id){
     accel_mm_s2: numOrNull(document.getElementById(`m-${id}-accel_mm_s2`).value),
     decel_mm_s2: numOrNull(document.getElementById(`m-${id}-decel_mm_s2`).value),
     current_pct: numOrNull(document.getElementById(`m-${id}-current_pct`).value),
+    hold_current_pct: numOrNull(document.getElementById(`m-${id}-hold_current_pct`).value),
     invert_direction: boolFromInput(`m-${id}-invert_direction`),
     min_tenths_mm: numOrNull(document.getElementById(`m-${id}-min_tenths_mm`).value),
     max_tenths_mm: numOrNull(document.getElementById(`m-${id}-max_tenths_mm`).value),
@@ -3147,7 +3151,7 @@ async function saveConfig(id){
   if(!writeResult){ return; }
   const saveResult = await runMotorAction(id, "Parameter speichern", () => post(`/api/motors/${id}/save`, {}));
   if(!saveResult){ return; }
-  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
+  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","hold_current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
   await refreshOne(id, {silent:true});
   setStatus(`Motor ${id}: Parameter gespeichert und aktualisiert`);
 }

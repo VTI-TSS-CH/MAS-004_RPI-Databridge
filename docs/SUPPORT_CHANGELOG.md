@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-09 (Motor Setup Fahr-/Haltestrom)
+- Extended `/ui/machine-setup/motors` with separate fields for `Fahrstrom [%]` and `Haltestrom [%]`.
+- `current_pct` remains the backwards-compatible Fahrstrom/Base-current value used for motion commands.
+- New `hold_current_pct` is sent to the ESP32-PLC as the Haltestrom/Stop-current value.
+- `Parameter speichern` now persists both current values through the ESP `MOTOR <id> SAVE` path so the AZD drive current settings and ESP motor config stay aligned.
+
 ## 2026-05-08 (Motor Setup Absolute Position)
 - Added absolute-position commissioning controls to `/ui/machine-setup/motors`.
 - New field `Istposition setzen [mm]` assigns the current physical axis position to an entered absolute millimeter value and saves the resulting ESP motor offset persistently.

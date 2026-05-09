@@ -28,6 +28,7 @@ class EspMotorClientTests(unittest.TestCase):
         self.assertTrue(client.set_poll(True)["ok"])
         self.assertTrue(client.apply_eto_recovery()["ok"])
         self.assertTrue(client.recover_eto()["ok"])
+        self.assertTrue(client.set_config(3, {"current_pct": 90, "hold_current_pct": 35})["ok"])
         self.assertTrue(client.set_current_position_mm(3, 12.5)["ok"])
         self.assertTrue(client.move_absolute_mm(3, 42.25)["ok"])
         self.assertTrue(client.refresh(3)["motor"]["state"]["link_ok"])
@@ -37,6 +38,7 @@ class EspMotorClientTests(unittest.TestCase):
                 "MOTOR POLL=1",
                 "MOTOR APPLY_ETO_RECOVERY",
                 "MOTOR RECOVER_ETO",
+                "MOTOR 3 SET current_pct=90 hold_current_pct=35",
                 "MOTOR 3 SET_POSITION_MM=12.5",
                 "MOTOR 3 MOVE_ABS_MM=42.25",
                 "MOTOR 3 REFRESH",
