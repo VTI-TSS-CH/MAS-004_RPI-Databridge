@@ -36,6 +36,7 @@ from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.machine_runtime import MachineRuntime
+from mas004_rpi_databridge.machine_control_ui import build_machine_control_ui_html
 from mas004_rpi_databridge.commissioning import CommissioningStore
 from mas004_rpi_databridge.commissioning_ui import build_commissioning_ui_html
 from mas004_rpi_databridge.machine_backups import MachineBackupManager
@@ -275,6 +276,7 @@ class ConfigUpdate(BaseModel):
     logs_keep_days_esp: Optional[int] = None
     logs_keep_days_tto: Optional[int] = None
     logs_keep_days_laser: Optional[int] = None
+    machine_audit_keep_hours: Optional[int] = None
 
 
 class NetworkUpdate(BaseModel):
@@ -356,6 +358,14 @@ class MachineSetupLoginReq(BaseModel):
     username: str
     password: str
     next: Optional[str] = "/ui/machine-setup/motors"
+
+
+class MachineButtonReq(BaseModel):
+    button: str
+
+
+class MachineAuditRetentionReq(BaseModel):
+    keep_hours: int
 
 
 class CommissioningStartReq(BaseModel):
@@ -655,7 +665,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         items = [
             ("commissioning", "/ui/machine-setup/commissioning", "Commissioning"),
             ("backups", "/ui/machine-setup/backups", "Backups"),
-            ("process", "/ui/machine-setup/process", "Process"),
+            ("process", "/ui/machine-setup/process", "Control / Audit"),
             ("io", "/ui/machine-setup/io", "I/O"),
             ("motors", "/ui/machine-setup/motors", "Motors"),
             ("unwinder", "/ui/machine-setup/winders/unwinder", "Abwickler"),
@@ -1111,6 +1121,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except Exception:
             cfg2.moxa_poll_interval_s = 1.0
         cfg2.moxa_poll_interval_s = max(0.2, min(60.0, cfg2.moxa_poll_interval_s))
+        try:
+            cfg2.machine_audit_keep_hours = int(float(getattr(cfg2, "machine_audit_keep_hours", 72) or 72))
+        except Exception:
+            cfg2.machine_audit_keep_hours = 72
+        cfg2.machine_audit_keep_hours = max(1, min(24 * 3650, cfg2.machine_audit_keep_hours))
         cfg2.raspi_plc_model = str(getattr(cfg2, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21").strip() or "RPIPLC_21"
 
         cfg2.save(cfg_path)
@@ -1966,6 +1981,65 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         return get_machine_overview()
 
+    @app.post("/api/machine/button")
+    def api_machine_button(request: Request, body: MachineButtonReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
+        try:
+            return runtime.press_virtual_button(body.button)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/machine/audit")
+    def api_machine_audit(
+        request: Request,
+        hours: Optional[int] = Query(default=None),
+        limit: int = Query(default=500),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        logs.apply_audit_retention(cfg2)
+        keep_hours = logs.audit_keep_hours_from_settings(cfg2)
+        view_hours = hours if hours is not None else keep_hours
+        return {
+            "ok": True,
+            "keep_hours": keep_hours,
+            "view_hours": view_hours,
+            "entries": logs.list_audit_entries(hours=view_hours, limit=limit),
+        }
+
+    @app.post("/api/machine/audit/retention")
+    def api_machine_audit_retention(request: Request, body: MachineAuditRetentionReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            keep_hours = int(float(body.keep_hours))
+        except Exception:
+            keep_hours = 72
+        cfg2.machine_audit_keep_hours = max(1, min(24 * 3650, keep_hours))
+        cfg2.save(cfg_path)
+        logs.apply_audit_retention(cfg2)
+        return {"ok": True, "keep_hours": cfg2.machine_audit_keep_hours}
+
+    @app.get("/api/machine/audit/download")
+    def api_machine_audit_download(
+        request: Request,
+        hours: Optional[int] = Query(default=None),
+        limit: int = Query(default=5000),
+    ):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        keep_hours = logs.audit_keep_hours_from_settings(cfg2)
+        view_hours = hours if hours is not None else keep_hours
+        content = logs.read_audit_log(hours=view_hours, limit=limit)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(
+            content,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="mas004_machine_audit_{stamp}.log"'},
+        )
+
     @app.get("/api/commissioning/overview")
     def api_commissioning_overview(request: Request):
         cfg2 = Settings.load(cfg_path)
@@ -2165,6 +2239,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             target = "/ui/machine-setup/process"
             return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
         nav = nav_html("machine_setup") + machine_setup_nav_html("process")
+        return build_machine_control_ui_html(nav)
         return """
 <!doctype html>
 <html>
@@ -3627,6 +3702,7 @@ reloadAll().catch(err => { setStatus(err.message); });
       <div class="field"><label>Keep days (ESP32)</label><input id="logs_keep_days_esp" type="number" min="1" max="3650"/></div>
       <div class="field"><label>Keep days (TTO)</label><input id="logs_keep_days_tto" type="number" min="1" max="3650"/></div>
       <div class="field"><label>Keep days (Laser)</label><input id="logs_keep_days_laser" type="number" min="1" max="3650"/></div>
+      <div class="field"><label>Machine audit keep hours</label><input id="machine_audit_keep_hours" type="number" min="1" max="87600"/></div>
     </div>
     <div class="actions">
       <button onclick="saveLogSettings()">Save Log Settings + Restart</button>
@@ -3864,6 +3940,7 @@ async function reloadAll(){
   document.getElementById("logs_keep_days_esp").value = c.logs_keep_days_esp ?? 30;
   document.getElementById("logs_keep_days_tto").value = c.logs_keep_days_tto ?? 30;
   document.getElementById("logs_keep_days_laser").value = c.logs_keep_days_laser ?? 30;
+  document.getElementById("machine_audit_keep_hours").value = c.machine_audit_keep_hours ?? 72;
 
   // network
   const net = await api("/api/system/network");
@@ -4025,6 +4102,12 @@ function toNum(id, fallback){
   return Math.max(1, Math.min(3650, Math.round(v)));
 }
 
+function toHours(id, fallback){
+  const v = Number(document.getElementById(id).value.trim());
+  if(!Number.isFinite(v)) return fallback;
+  return Math.max(1, Math.min(87600, Math.round(v)));
+}
+
 function fmtBytes(n){
   const v = Number(n || 0);
   if(v < 1024) return `${v} B`;
@@ -4038,7 +4121,8 @@ async function saveLogSettings(){
     logs_keep_days_all: toNum("logs_keep_days_all", 30),
     logs_keep_days_esp: toNum("logs_keep_days_esp", 30),
     logs_keep_days_tto: toNum("logs_keep_days_tto", 30),
-    logs_keep_days_laser: toNum("logs_keep_days_laser", 30)
+    logs_keep_days_laser: toNum("logs_keep_days_laser", 30),
+    machine_audit_keep_hours: toHours("machine_audit_keep_hours", 72)
   };
   await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
   document.getElementById("logcfg_status").textContent = "saved (service restarted)";

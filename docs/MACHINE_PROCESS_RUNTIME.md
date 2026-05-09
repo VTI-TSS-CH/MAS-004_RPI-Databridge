@@ -41,9 +41,29 @@
     - `/ui/machine-setup/process`
   - protected API:
     - `/api/machine/overview`
+    - `/api/machine/button`
+    - `/api/machine/audit`
+    - `/api/machine/audit/download`
+    - `/api/machine/audit/retention`
+- `machine_control_ui.py`
+  - renders the protected Machine Control / Audit page
+  - exposes virtual Start/Pause, Stop, Einrichten, Synchronisieren, Leerfahren and Zurueckspulen buttons
+  - visualizes communication and machine events as a human-readable production audit stream
+  - uses `machine_audit_keep_hours` for detailed DB audit retention
 - `production_logs.py`
   - now also supports the extra production logfile group:
     - `LabelProductionLog`
+
+## Machine Control / Audit Behavior
+- Virtual buttons call the same `MAS0002` command path as physical Raspi PLC buttons.
+- Allowed actions are checked against the current machine state and `MAP0065`.
+- In Not-Stop/Purge reset context the virtual Start/Pause button sends the same reset/stop command path (`MAS0002=2`) used by the reset flow.
+- The audit view combines:
+  - DB communication logs from `logs`
+  - machine events from `machine_events`
+  - label events from `label_events`
+  - parameter descriptions from the master data where a `MAP`/`MAS`/`MAE`/device code is detected
+- Audit download is non-consuming. It does not delete production logfiles and is separate from the consuming production logfile download flow.
 
 ## Current ESP -> Raspi Event Contract
 - The Raspi listener accepts active ESP event pushes on the existing push socket as lines starting with:

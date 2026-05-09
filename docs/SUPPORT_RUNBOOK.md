@@ -179,6 +179,22 @@
   - `/api/winders/*`
 - Legacy `/ui/motors` and `/ui/winders/*` URLs are only compatibility redirects into the protected section.
 
+## 3.3.1 Machine Control / Audit
+- Main protected page: `/ui/machine-setup/process`.
+- Use this page to:
+  - inspect current `MAS0001`/`MAS0002`, warning, purge and safety state
+  - trigger virtual Start/Pause, Stop, Einrichten, Synchronisieren, Leerfahren and Zurueckspulen buttons
+  - view Microtom, Raspi and device traffic as a human-readable production audit stream
+- Virtual buttons intentionally do not write Raspberry IOs directly. They call the same machine command path as the physical buttons and are blocked by the same state and `MAP0065` rules.
+- Audit retention:
+  - setting: `machine_audit_keep_hours`
+  - UI field: Settings -> Daily Log Files -> `Machine audit keep hours`
+  - detailed DB audit entries older than this are pruned from `logs`, `machine_events` and `label_events`
+  - daily text log files still use the existing keep-days settings
+- Download current audit window:
+  - browser: Machine Control / Audit -> `Download`
+  - API: `GET /api/machine/audit/download?hours=<h>&limit=<n>`
+
 ## 3.4 Commissioning Assistant
 - Main protected page: `/ui/machine-setup/commissioning`
 - Use this page for:

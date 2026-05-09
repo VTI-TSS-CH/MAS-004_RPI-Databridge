@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-09 (Machine Control / Audit Log)
+- Reworked protected `/ui/machine-setup/process` into a Machine Control / Audit page.
+- Added virtual buttons for Start/Pause, Stop, Einrichten, Synchronisieren, Leerfahren and Zurueckspulen. They use the same `MAS0002`, state and `MAP0065` permission logic as the physical Raspi PLC buttons.
+- Added `/api/machine/button` for protected virtual button actions.
+- Added a central human-readable audit view combining Raspi/Microtom communication logs, device traffic, machine events and label events with code metadata from the parameter master.
+- Added audit logfile download and configurable detailed audit retention in hours through `/api/machine/audit*` and Settings.
+
 ## 2026-05-09 (Motor Setup Fahr-/Haltestrom)
 - Extended `/ui/machine-setup/motors` with separate fields for `Fahrstrom [%]` and `Haltestrom [%]`.
 - `current_pct` remains the backwards-compatible Fahrstrom/Base-current value used for motion commands.

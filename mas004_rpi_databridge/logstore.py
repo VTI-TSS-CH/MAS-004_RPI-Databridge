@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from datetime import datetime, timedelta, date
@@ -39,6 +40,18 @@ DAILY_CHANNEL_GROUP = {
     "esp-plc": DAILY_GROUP_ESP,
     "vj6530": DAILY_GROUP_TTO,
     "vj3350": DAILY_GROUP_LASER,
+}
+
+AUDIT_CHANNEL_LABELS = {
+    "raspi": "Raspi / Microtom",
+    "machine": "Maschinensteuerung",
+    "esp-plc": "ESP32-PLC",
+    "raspi-io": "Raspberry PLC 21 I/O",
+    "moxa1": "Moxa E1211 #1",
+    "moxa2": "Moxa E1211 #2",
+    "vj6530": "Videojet 6530 TTO",
+    "vj3350": "Videojet 3350 Laser",
+    "smartwickler": "Smart Wickler",
 }
 
 
@@ -206,8 +219,180 @@ class LogStore:
         self._next_housekeeping_ts = ts + 300.0
         try:
             self.apply_retention()
+            self.apply_audit_retention()
         except Exception:
             pass
+
+    def _safe_hours(self, value: Any, default_v: int) -> int:
+        try:
+            n = int(float(value))
+        except Exception:
+            n = int(default_v)
+        return max(1, min(n, 24 * 3650))
+
+    def audit_keep_hours_from_settings(self, cfg: Optional[Settings] = None) -> int:
+        cfg2 = cfg if cfg is not None else Settings.load(self.cfg_path)
+        return self._safe_hours(getattr(cfg2, "machine_audit_keep_hours", 72), 72)
+
+    def apply_audit_retention(self, cfg: Optional[Settings] = None):
+        keep_hours = self.audit_keep_hours_from_settings(cfg)
+        cutoff = now_ts() - (keep_hours * 3600.0)
+        with self.db._conn() as c:
+            c.execute("DELETE FROM logs WHERE ts < ?", (cutoff,))
+            c.execute("DELETE FROM machine_events WHERE ts < ?", (cutoff,))
+            c.execute("DELETE FROM label_events WHERE ts < ?", (cutoff,))
+
+    def _extract_pkey_value(self, message: str) -> tuple[Optional[str], Optional[str], bool]:
+        s = (message or "").strip()
+        if not s:
+            return None, None, False
+        m = re.search(r"\b(ACK_)?([A-Z]{3})(\d{4,5})\s*=\s*([^|\s]+)", s)
+        if not m:
+            return None, None, False
+        return f"{m.group(2)}{m.group(3)}", m.group(4), bool(m.group(1))
+
+    def _audit_summary_for_log(self, channel: str, direction: str, message: str) -> dict[str, Any]:
+        pkey, value, ack = self._extract_pkey_value(message)
+        meta = self._meta_for_pkey(pkey) if pkey else None
+        device = AUDIT_CHANNEL_LABELS.get((channel or "").strip(), channel or "Unbekannt")
+        direction_text = {
+            "IN": "empfangen",
+            "OUT": "gesendet",
+            "INFO": "Info",
+            "ERR": "Fehler",
+            "ERROR": "Fehler",
+        }.get((direction or "").strip().upper(), (direction or "").strip() or "Info")
+        title = self._clean_meta_text((meta or {}).get("name")) if meta else ""
+        desc = self._clean_meta_text((meta or {}).get("message")) if meta else ""
+        if pkey:
+            code_text = f"{'ACK ' if ack else ''}{pkey}={value if value is not None else ''}".strip()
+            human = f"{device}: {direction_text} {code_text}"
+            if title:
+                human += f" - {title}"
+            if desc:
+                human += f" ({desc})"
+        else:
+            human = f"{device}: {direction_text} {(message or '').strip()}"
+        return {
+            "pkey": pkey or "",
+            "value": value if value is not None else "",
+            "ack": ack,
+            "device": device,
+            "summary": human,
+            "description": desc,
+            "name": title,
+        }
+
+    def list_audit_entries(self, *, hours: Optional[int] = None, limit: int = 500) -> List[Dict[str, Any]]:
+        keep_hours = self._safe_hours(hours if hours is not None else self.audit_keep_hours_from_settings(), 72)
+        limit = max(1, min(int(limit), 5000))
+        cutoff = now_ts() - (keep_hours * 3600.0)
+        entries: List[Dict[str, Any]] = []
+        with self.db._conn() as c:
+            log_rows = c.execute(
+                """SELECT ts, channel, direction, message
+                   FROM logs
+                   WHERE ts >= ?
+                   ORDER BY ts DESC
+                   LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+            event_rows = c.execute(
+                """SELECT ts, event_type, severity, message, payload_json
+                   FROM machine_events
+                   WHERE ts >= ?
+                   ORDER BY ts DESC
+                   LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+            label_rows = c.execute(
+                """SELECT ts, production_label, label_no, event_type, payload_json
+                   FROM label_events
+                   WHERE ts >= ?
+                   ORDER BY ts DESC
+                   LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+
+        for ts, channel, direction, message in log_rows:
+            summary = self._audit_summary_for_log(str(channel or ""), str(direction or ""), str(message or ""))
+            entries.append(
+                {
+                    "ts": float(ts or 0.0),
+                    "ts_display": format_local_timestamp(float(ts or 0.0)),
+                    "category": "communication",
+                    "source": channel,
+                    "direction": direction,
+                    "message": message,
+                    **summary,
+                }
+            )
+        for ts, event_type, severity, message, payload_json in event_rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {}
+            entries.append(
+                {
+                    "ts": float(ts or 0.0),
+                    "ts_display": format_local_timestamp(float(ts or 0.0)),
+                    "category": "machine",
+                    "source": "machine",
+                    "direction": str(severity or "info").upper(),
+                    "message": message,
+                    "pkey": "",
+                    "value": "",
+                    "ack": False,
+                    "device": "Maschinensteuerung",
+                    "summary": f"Maschinenereignis: {message}",
+                    "description": str(event_type or ""),
+                    "name": str(event_type or ""),
+                    "payload": payload,
+                }
+            )
+        for ts, production_label, label_no, event_type, payload_json in label_rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {}
+            entries.append(
+                {
+                    "ts": float(ts or 0.0),
+                    "ts_display": format_local_timestamp(float(ts or 0.0)),
+                    "category": "label",
+                    "source": "label-process",
+                    "direction": "INFO",
+                    "message": f"Label {label_no} {event_type}",
+                    "pkey": "MAS0003",
+                    "value": "",
+                    "ack": False,
+                    "device": "Etikettenprozess",
+                    "summary": f"Label {label_no} fuer Produktion {production_label}: {event_type}",
+                    "description": "Label-Schieberegister / Produktions-Audit",
+                    "name": "Labelereignis",
+                    "payload": payload,
+                }
+            )
+        entries.sort(key=lambda item: float(item.get("ts") or 0.0), reverse=True)
+        return entries[:limit]
+
+    def read_audit_log(self, *, hours: Optional[int] = None, limit: int = 5000) -> str:
+        entries = self.list_audit_entries(hours=hours, limit=limit)
+        lines = [
+            "# MAS-004 Machine Audit Log",
+            f"# generated: {format_local_timestamp(now_ts())}",
+            f"# window_hours: {self._safe_hours(hours if hours is not None else self.audit_keep_hours_from_settings(), 72)}",
+            "",
+        ]
+        for item in reversed(entries):
+            lines.append(
+                f"[{item.get('ts_display','')}] "
+                f"[{item.get('category','')}] "
+                f"[{item.get('source','')}] "
+                f"{item.get('direction','')} "
+                f"{item.get('summary','')}"
+            )
+        return "\n".join(lines) + "\n"
 
     def list_logs(self, channel: str, limit: int = 200) -> List[Dict[str, Any]]:
         """

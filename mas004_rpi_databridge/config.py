@@ -102,6 +102,7 @@ class Settings:
     logs_keep_days_esp: int = 30
     logs_keep_days_tto: int = 30
     logs_keep_days_laser: int = 30
+    machine_audit_keep_hours: int = 72
 
     # UI/API auth
     ui_token: str = "change-me"

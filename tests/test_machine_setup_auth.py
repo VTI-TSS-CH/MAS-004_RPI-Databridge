@@ -78,6 +78,10 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(401, backups_api.status_code)
         self.assertEqual("Machine-Setup login required", backups_api.json()["detail"])
 
+        audit_api = client.get("/api/machine/audit")
+        self.assertEqual(401, audit_api.status_code)
+        self.assertEqual("Machine-Setup login required", audit_api.json()["detail"])
+
     def test_machine_setup_login_unlocks_ui_and_api(self):
         client = self.build_client()
 
@@ -106,8 +110,9 @@ class MachineSetupAuthTests(unittest.TestCase):
 
         process_page = client.get("/ui/machine-setup/process")
         self.assertEqual(200, process_page.status_code)
-        self.assertIn("Machine Process", process_page.text)
-        self.assertIn(">Process<", process_page.text)
+        self.assertIn("Machine Control", process_page.text)
+        self.assertIn("Virtuelle Maschinentasten", process_page.text)
+        self.assertIn(">Control / Audit<", process_page.text)
 
         commissioning_page = client.get("/ui/machine-setup/commissioning")
         self.assertEqual(200, commissioning_page.status_code)
@@ -132,6 +137,18 @@ class MachineSetupAuthTests(unittest.TestCase):
         process_api = client.get("/api/machine/overview")
         self.assertEqual(200, process_api.status_code)
         self.assertIn("current_state", process_api.json())
+
+        audit_api = client.get("/api/machine/audit?hours=1&limit=50")
+        self.assertEqual(200, audit_api.status_code)
+        self.assertIn("entries", audit_api.json())
+
+        audit_retention = client.post("/api/machine/audit/retention", json={"keep_hours": 24})
+        self.assertEqual(200, audit_retention.status_code)
+        self.assertEqual(24, audit_retention.json()["keep_hours"])
+
+        audit_download = client.get("/api/machine/audit/download?hours=1&limit=50")
+        self.assertEqual(200, audit_download.status_code)
+        self.assertIn("MAS-004 Machine Audit Log", audit_download.text)
 
         commissioning_api = client.get("/api/commissioning/overview")
         self.assertEqual(200, commissioning_api.status_code)

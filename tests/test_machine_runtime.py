@@ -176,6 +176,47 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(3, second["requested_state"])
         self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
 
+    def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=3,
+            requested_state=3,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+
+        result = runtime.press_virtual_button("start_pause")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("start_pause", result["button"])
+        self.assertEqual(1, result["command"])
+        self.assertEqual(5, result["target_state"])
+        self.assertEqual("1", self.params.get_effective_value("MAS0002"))
+
+    def test_virtual_start_pause_resets_from_purge_context(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+
+        result = runtime.press_virtual_button("start")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("start_pause", result["button"])
+        self.assertEqual(2, result["command"])
+        self.assertEqual("2", self.params.get_effective_value("MAS0002"))
+
     def test_label_complete_event_updates_register_and_mas0003(self):
         runtime = self.build_runtime()
 

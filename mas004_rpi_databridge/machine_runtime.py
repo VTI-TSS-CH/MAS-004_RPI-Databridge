@@ -389,6 +389,66 @@ class MachineRuntime:
             return {"ok": True, "accepted": True, "event": event_type}
         return {"ok": False, "accepted": False, "detail": "missing event type"}
 
+    def press_virtual_button(self, button: str, *, actor: str = "machine-ui") -> dict[str, Any]:
+        button_name = str(button or "").strip().lower().replace("-", "_")
+        if button_name == "start":
+            button_name = "start_pause"
+        if button_name == "pause":
+            button_name = "start_pause"
+        valid = {"start_pause", "stop", "setup", "sync", "empty", "rewind"}
+        if button_name not in valid:
+            raise RuntimeError(f"unknown machine button: {button}")
+
+        snapshot = self._state_row()
+        current_state = int(snapshot["current_state"] or 1)
+        info = dict(snapshot.get("info") or {})
+        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        button_mask = parse_button_mask(param_map.get("MAP0065", "1111111"))
+        allowed_actions = state_actions(current_state)
+        safety_info = dict(info.get("safety") or {})
+        reset_context = current_state in (20, 21) or bool(snapshot.get("purge_active")) or bool(safety_info.get("latched"))
+
+        command = button_to_command(button_name, current_state)
+        action_name = "pause" if button_name == "start_pause" and current_state == 5 else (
+            "start" if button_name == "start_pause" else button_name
+        )
+        if button_name == "start_pause" and reset_context:
+            command = 2
+            action_name = "stop"
+        if command is None:
+            raise RuntimeError(f"button {button_name} is not valid in state {current_state}")
+        if not reset_context and not allowed_actions.get(action_name, False):
+            raise RuntimeError(f"button {button_name} is not allowed in state {current_state}")
+        if not reset_context and not button_mask.get(action_name, False):
+            raise RuntimeError(f"button {button_name} blocked by MAP0065")
+
+        ok, msg = self.params.set_value("MAS0002", str(command), actor="microtom")
+        if not ok:
+            raise RuntimeError(msg)
+        target_state = command_to_target_state(command, current_state)
+        payload = {
+            "button": button_name,
+            "action": action_name,
+            "command": command,
+            "from_state": current_state,
+            "target_state": target_state,
+            "actor": actor,
+            "reset_context": reset_context,
+        }
+        self.logs.log(
+            "machine",
+            "info",
+            f"virtual button {button_name} -> MAS0002={command} ({state_label(target_state)})",
+        )
+        self._record_event(
+            "virtual_button",
+            "info",
+            f"Virtuelle Taste {button_name} ausgeloest -> {state_label(target_state)}",
+            payload,
+        )
+        refreshed = self.refresh()
+        return {"ok": True, "button": button_name, "command": command, "target_state": target_state, "snapshot": refreshed}
+
     def _handle_label_complete(self, payload: dict[str, Any]) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
         if label_no <= 0:

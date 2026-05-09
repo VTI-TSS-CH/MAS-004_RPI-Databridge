@@ -23,8 +23,8 @@
   - `machine_semantics.py` centralizes MAS001/MAS0002 semantics, button masks, lamp colors and `MAS0003` packing
   - `format_semantics.py` derives the current MAP format/process plan from the master workbook defaults and runtime values
   - database additions: `machine_state`, `machine_events`, `label_register`, `label_events`
-  - protected process view: `/ui/machine-setup/process`
-  - protected overview API: `/api/machine/overview`
+  - protected process/control/audit view: `/ui/machine-setup/process`
+  - protected overview/control/audit APIs: `/api/machine/overview`, `/api/machine/button`, `/api/machine/audit*`
   - reference doc: `docs/MACHINE_PROCESS_RUNTIME.md`
 - Parameter engine: `params.py`, `params_store.py`, `protocol.py`, `device_bridge.py`
 - The Databridge now persists the workbook column `KI-Anweisungen:` as `ai_instructions` and derives Oriental motor bindings from it for the new setup UI.
@@ -103,6 +103,11 @@
   - the motor cards can capture the current physical position as an entered absolute millimeter value and can command absolute millimeter target moves
   - motor cards expose separate Fahrstrom/Haltestrom settings; `current_pct` is the AZD Base-current path and `hold_current_pct` is the AZD Stop-current path saved through `MOTOR <id> SAVE`
   - the page no longer runs a default global 2 second refresh loop; this avoids losing in-progress edits while setting up drives
+- New Machine Control / Audit surface inside Machine-Setup:
+  - `/ui/machine-setup/process` shows current machine status, safety state, allowed button actions and virtual machine buttons
+  - virtual Start/Pause, Stop, Einrichten, Synchronisieren, Leerfahren and Zurueckspulen use the same `MAS0002`, state and `MAP0065` rules as the physical Raspi PLC buttons
+  - the central audit view combines Microtom/Raspi communication, device traffic, machine events and label events with parameter-master Klartext where available
+  - detailed audit retention is configurable in hours through `machine_audit_keep_hours`, while daily text log retention remains day-based
 - New Smart Wickler proxy surface on the Raspi web UI:
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
