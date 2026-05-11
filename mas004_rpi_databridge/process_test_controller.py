@@ -53,6 +53,14 @@ class TemporaryProcessCommandController:
                 self._stop_all()
                 return "ACK_MAC0001=0"
             if command == "1":
+                allowed, reason = self._wickler_learning_allowed()
+                if not allowed:
+                    self.logs.log(
+                        "raspi",
+                        "warning",
+                        f"MAC0001=1 rejected: wickler learning requires Einrichten/setup ({reason})",
+                    )
+                    return f"MAC0001=NAK_{reason}"
                 return self._calibrate_wicklers_and_learn()
             if command == "2":
                 return self._start_indexed_production()
@@ -76,6 +84,45 @@ class TemporaryProcessCommandController:
             return int(float(self.params.get_effective_value(pkey)))
         except Exception:
             return int(default_value)
+
+    def _machine_state_snapshot(self) -> dict[str, Any]:
+        try:
+            with self.params.db._conn() as conn:
+                row = conn.execute(
+                    """SELECT current_state, requested_state, purge_active, info_json
+                       FROM machine_state WHERE singleton_id=1"""
+                ).fetchone()
+        except Exception:
+            row = None
+        if not row:
+            return {"current_state": 1, "requested_state": 1, "purge_active": False, "info": {}}
+        try:
+            info = json.loads(row[3] or "{}")
+        except Exception:
+            info = {}
+        return {
+            "current_state": int(row[0] or 1),
+            "requested_state": int(row[1] or 1),
+            "purge_active": bool(row[2]),
+            "info": info if isinstance(info, dict) else {},
+        }
+
+    def _wickler_learning_allowed(self) -> tuple[bool, str]:
+        """
+        MAC0001=1 is only a temporary IBN helper. The production rule is that
+        Wickler calibration plus diameter measuring run belongs to setup mode;
+        reset/purge handling must never start it implicitly.
+        """
+        snapshot = self._machine_state_snapshot()
+        current_state = int(snapshot.get("current_state") or 1)
+        requested_state = int(snapshot.get("requested_state") or 1)
+        requested_command = self._read_int("MAS0002", 0)
+        purge_active = bool(snapshot.get("purge_active")) or self._read_int("MAS0028", 0) != 0
+        if purge_active or current_state in (20, 21):
+            return False, "PurgeActive"
+        if requested_command == 3 or current_state in (2, 3) or requested_state in (2, 3):
+            return True, "setup"
+        return False, "SetupRequired"
 
     def _esp(self, line: str, read_timeout_s: float | None = None) -> str:
         response = self.esp.exchange_line(

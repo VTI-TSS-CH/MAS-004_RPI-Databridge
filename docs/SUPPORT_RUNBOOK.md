@@ -132,6 +132,9 @@
 - The `MAC` command family is temporary and only for commissioning tests; remove or replace it before final Microtom interface release.
 - `MAC0001=0`: stop current process test.
 - `MAC0001=1`: calibrate both Smart Wicklers, run the 1000-mm diameter measurement forward/back, and write the learned diameters to the Wicklers.
+  - This command is accepted only in setup context: `MAS0002=3`, `MAS0001=2/3`, or requested state `2/3`.
+  - During active Purge/Not-Stop it returns `MAC0001=NAK_PurgeActive`; outside setup it returns `MAC0001=NAK_SetupRequired`.
+  - Reset/Purge recovery must only recover drives (`stop/resetAlarm/etoRecovery/ready`) and must not start Wickler calibration or measuring motion.
 - `MAC0001=2`: start indexed/takt test on the ESP32-PLC.
 - `MAC0001=3`: continuous forward feed through Motor 3.
 - `MAC0001=4`: continuous reverse feed through Motor 3.

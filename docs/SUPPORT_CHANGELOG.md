@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Wickler-Einmessen nur im Einrichtkontext)
+- `MAC0001=1` ist weiterhin ein temporaerer IBN-Helfer, startet Wickler-Einmessen plus 1000-mm-Messfahrt aber nicht mehr frei aus jedem Maschinenzustand.
+- Bei aktivem Purge/Not-Stop wird `MAC0001=1` mit `MAC0001=NAK_PurgeActive` abgewiesen.
+- Ausserhalb von `MAS0002=3` bzw. Maschinenzustand `2/3` wird `MAC0001=1` mit `MAC0001=NAK_SetupRequired` abgewiesen.
+- Damit kann ein Reset-/Purge-Ablauf nicht versehentlich Wicklerbewegungen oder Messfahrten ausloesen; Einmessen gehoert zur Einrichten-Taste bzw. zum Einrichtmodus.
+
 ## 2026-05-11 (Production Microtom Peer Topology)
 - Documented and staged the current production peer topology:
   - primary Microtom/DIClient peer: `https://10.141.94.202:5000`
