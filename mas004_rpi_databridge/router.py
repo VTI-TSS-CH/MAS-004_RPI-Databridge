@@ -16,6 +16,17 @@ from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 
+RPI_AUTHORITATIVE_MA_KEYS = {
+    # Machine state and high-level runtime latches are owned by the Raspi
+    # runtime. The ESP receives mirrored values, but Microtom reads must never
+    # be answered from a stale ESP mirror.
+    "MAS0001",
+    "MAS0002",
+    "MAS0028",
+    "MAS0030",
+}
+
+
 def _channel_for_operation(params: ParamStore, ptype: str, pid: str, op: str = "") -> str:
     ptype = (ptype or "").upper()
     if ptype.startswith("TT"):  # TTP/TTE/TTW
@@ -24,6 +35,8 @@ def _channel_for_operation(params: ParamStore, ptype: str, pid: str, op: str = "
         return "vj3350"
     if ptype.startswith("MA"):  # MAP/MAS/MAE/MAW
         pkey = f"{ptype}{pid}"
+        if pkey in RPI_AUTHORITATIVE_MA_KEYS:
+            return "raspi"
         meta = params.get_meta(pkey)
         esp_access = params.actor_access(pkey, actor="esp32") if meta else "N"
         if meta and esp_access in {"N", "R"}:

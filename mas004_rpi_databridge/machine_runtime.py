@@ -32,6 +32,7 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager, sanitize_production_label
+from mas004_rpi_databridge.process_test_controller import TemporaryProcessCommandController
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
 
 
@@ -72,6 +73,7 @@ SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
 PURGE_EXTERNAL_CLEAR_GRACE_S = 3.0
 _SAFETY_RESET_LOCK = threading.Lock()
+_SETUP_WICKLER_LOCK = threading.Lock()
 
 
 def mark_external_purge_clear(db: DB, *, source: str = "microtom"):
@@ -316,6 +318,33 @@ class MachineRuntime:
                 safety_info = {"latched": False, "phase": "idle", "last_reasons": []}
             safety_info["mas0002_reset_seen"] = reset_command_active
             safety_info["mas0002_reset_seen_ts"] = reset_command_ts if reset_command_active else 0.0
+
+        setup_info = dict(info.get("setup") or {})
+        setup_command_active = requested_command == 3
+        setup_command_ts = self._param_updated_ts("MAS0002") if setup_command_active else 0.0
+        setup_seen_ts = float(setup_info.get("mas0002_setup_seen_ts") or 0.0)
+        setup_is_current_state = int(snapshot["current_state"] or 0) in (2, 3)
+        # On software start/deploy while MAS0002 is already 3, do not start a
+        # motion workflow implicitly. The next fresh Einrichten command still
+        # has a newer param timestamp and will run the calibration sequence.
+        if setup_command_active and setup_seen_ts == 0.0 and setup_is_current_state:
+            setup_seen_ts = setup_command_ts
+            setup_info["mas0002_setup_seen_ts"] = setup_seen_ts
+        setup_rising = setup_command_active and setup_command_ts > setup_seen_ts
+        if setup_rising:
+            setup_info["mas0002_setup_seen_ts"] = setup_command_ts
+            setup_info["last_request_ts"] = now_ts()
+            if forced_state is not None or safety_latched or critical_active or _truthy(param_map.get("MAS0028", "0")):
+                setup_info["last_result"] = {
+                    "ok": False,
+                    "skipped": True,
+                    "reason": "safety_or_purge_active",
+                    "ts": now_ts(),
+                }
+                self.logs.log("machine", "warning", "Einrichten-Wicklerworkflow wegen Safety/Purge nicht gestartet")
+            else:
+                setup_info["last_result"] = self._perform_setup_wickler_calibration()
+        info["setup"] = setup_info
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])
         if pause_active and int(snapshot["current_state"] or 0) in (4, 5, 6):
@@ -752,6 +781,53 @@ class MachineRuntime:
             return float(row[0] or 0.0) if row else 0.0
         except Exception:
             return 0.0
+
+    def _perform_setup_wickler_calibration(self) -> dict[str, Any]:
+        started_ts = now_ts()
+        if not _SETUP_WICKLER_LOCK.acquire(blocking=False):
+            return {"ok": False, "skipped": True, "reason": "already_running", "started_ts": started_ts}
+        try:
+            self.logs.log("machine", "info", "Einrichten: Wickler einmessen und Messfahrt gestartet")
+            self._record_event(
+                "setup_wickler_calibration",
+                "info",
+                "Einrichten gestartet: beide Wickler einmessen, Messfahrt ausfuehren und Durchmesser uebernehmen",
+                {},
+            )
+            controller = TemporaryProcessCommandController(self.cfg, self.params, self.logs)
+            response = controller.execute("1")
+            ok = response == "ACK_MAC0001=1"
+            result = {
+                "ok": ok,
+                "response": response,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+            }
+            self._record_event(
+                "setup_wickler_calibration",
+                "info" if ok else "error",
+                "Einrichten-Wicklerworkflow abgeschlossen" if ok else f"Einrichten-Wicklerworkflow fehlgeschlagen: {response}",
+                result,
+            )
+            return result
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "response": "MAC0001=NAK_DeviceComm",
+                "error": str(exc),
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+            }
+            self.logs.log("machine", "error", f"Einrichten-Wicklerworkflow fehlgeschlagen: {repr(exc)}")
+            self._record_event(
+                "setup_wickler_calibration",
+                "error",
+                f"Einrichten-Wicklerworkflow fehlgeschlagen: {exc}",
+                result,
+            )
+            return result
+        finally:
+            _SETUP_WICKLER_LOCK.release()
 
     def _active_param_keys(self, ptype: str) -> list[str]:
         with self.db._conn() as c:

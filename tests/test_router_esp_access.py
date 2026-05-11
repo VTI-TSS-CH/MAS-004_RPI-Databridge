@@ -111,6 +111,25 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertEqual("ACK_MAS0026=21", resp)
             self.assertEqual([("MAS0026", "write", "21", "microtom")], calls)
 
+    def test_machine_state_read_is_answered_from_raspi_not_stale_esp_mirror(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0001", "MAS", "0001", "3", "R", "W", "uint8")
+            router.params.apply_device_value("MAS0001", "3", promote_default=True)
+
+            def _unexpected_live(*_args, **_kwargs):
+                raise AssertionError("MAS0001 read must not use the ESP live path")
+
+            mirrored = []
+            router.device_bridge._esp_live = _unexpected_live
+            router.device_bridge.mirror_to_esp = lambda pkey, value: mirrored.append((pkey, value)) or (True, "ACK")
+
+            resp = router.handle_microtom_line("MAS0001=?", correlation="corr-state")
+
+            self.assertEqual("MAS0001=3", resp)
+            self.assertEqual([("MAS0001", "3")], mirrored)
+
     def test_ma_param_with_esp_read_access_is_stored_locally_and_mirrored(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

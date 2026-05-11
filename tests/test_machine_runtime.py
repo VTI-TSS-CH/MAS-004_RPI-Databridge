@@ -171,10 +171,15 @@ class MachineRuntimeTests(unittest.TestCase):
         ok, msg = self.params.set_value("MAS0002", "3", actor="microtom")
         self.assertTrue(ok, msg)
 
-        first = runtime.refresh()
+        with patch("mas004_rpi_databridge.machine_runtime.TemporaryProcessCommandController") as controller_cls:
+            controller = controller_cls.return_value
+            controller.execute.return_value = "ACK_MAC0001=1"
+            first = runtime.refresh()
+            controller.execute.assert_called_once_with("1")
         self.assertEqual(2, first["current_state"])
         self.assertEqual(3, first["requested_state"])
         self.assertEqual(3, first["info"]["requested_command"])
+        self.assertEqual(True, first["info"]["setup"]["last_result"]["ok"])
 
         second = runtime.refresh()
         self.assertEqual(3, second["current_state"])
