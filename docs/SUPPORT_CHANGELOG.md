@@ -1,5 +1,13 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Production Microtom Peer Topology)
+- Documented and staged the current production peer topology:
+  - primary Microtom/DIClient peer: `https://10.141.94.202:5000`
+  - optional engineering laptop Microtom simulator/testtool: `https://10.141.94.212:9090`
+  - watchdog host: `10.141.94.202`
+- Updated the 10.141.94 commissioning topology/config patch so future production applies do not accidentally promote the engineering laptop testtool to the primary peer.
+- Operational note: the secondary peer is diagnostic-only and may be offline without blocking the primary Microtom callback lane.
+
 ## 2026-05-11 (MOXA/Statusleuchte entkoppelt)
 - MOXA-Modbus/TCP-Zugriffe werden pro Endpoint `host:port` serialisiert, damit IO-Refresh und Statuslampen-Schreibzugriffe nicht mehr parallel auf dasselbe ioLogik-Modul laufen.
 - Unveraenderte Ausgangswerte werden nicht mehr erneut auf die Hardware geschrieben, solange der letzte Wert bereits live/simuliert bekannt ist.

@@ -20,7 +20,8 @@
 - This section prepares the former TEST machine as the next production/commissioning stand.
 - Production commissioning addresses:
   - Raspi: `10.141.94.213/24`, gateway `10.141.94.1`
-  - Laptop / Microtom testtool: `10.141.94.212`
+  - Microtom primary peer: `https://10.141.94.202:5000`
+  - Laptop / Microtom testtool secondary peer: `https://10.141.94.212:9090`
   - TTO VJ6530: `10.141.94.214:3002`
   - Laser VJ3350: `10.141.94.215:20000`
   - Abwickler: `10.141.94.216:3011`
@@ -47,7 +48,9 @@
 - Important cutover note:
   - `ApplyRaspiNetwork` intentionally changes the OS network and can drop the current SSH session.
   - Do not run it until the laptop can be moved to `10.141.94.212/24`.
-  - The commissioning config uses `peer_base_url = https://10.141.94.212:9090` while the laptop Microtom simulator/testtool is the active peer; replace this with the final Microtom endpoint before handover if Microtom uses another host.
+  - The production config uses `peer_base_url = https://10.141.94.202:5000` for Microtom/DIClient.
+  - The optional engineering callback lane uses `peer_base_url_secondary = https://10.141.94.212:9090` for the laptop Microtom simulator/testtool.
+  - The secondary peer is diagnostic-only; it may be offline without filling or blocking the primary Microtom outbox lane.
 - Internal device inbox note:
   - Browser/UI/API stay on HTTPS `https://10.141.94.213:8080`.
   - ESP32/W5500 devices that cannot speak HTTPS post machine events to `http://10.141.94.213:8081/api/inbox`.

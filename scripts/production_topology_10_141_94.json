@@ -8,12 +8,13 @@
     "note": "The former temporary address is retired and must no longer be used."
   },
   "eth0": {
-    "role": "Main machine network for Raspi, Microtom test laptop, printers and smart winders",
+    "role": "Main machine network for Raspi, Microtom production peer, engineering laptop, printers and smart winders",
     "raspi_ip": "10.141.94.213",
     "subnet_mask": "255.255.255.0",
     "prefix": 24,
     "gateway": "10.141.94.1",
     "dns": "",
+    "microtom_primary_ip": "10.141.94.202",
     "laptop_microtom_testtool_ip": "10.141.94.212",
     "devices": {
       "vj6530_tto": {
@@ -56,10 +57,11 @@
       }
     }
   },
-  "commissioning_peer": {
-    "peer_base_url": "https://10.141.94.212:9090",
-    "peer_watchdog_host": "10.141.94.212",
-    "note": "Use this while the engineering laptop runs the Microtom simulator/testtool. Replace with the real Microtom endpoint before final handover if different."
+  "microtom_peers": {
+    "peer_base_url": "https://10.141.94.202:5000",
+    "peer_base_url_secondary": "https://10.141.94.212:9090",
+    "peer_watchdog_host": "10.141.94.202",
+    "note": "Primary is the productive Microtom/DIClient peer. Secondary is only the engineering laptop Microtom simulator/testtool and may be unavailable without blocking primary operation."
   },
   "policy": {
     "ports_stay_unchanged": true,
