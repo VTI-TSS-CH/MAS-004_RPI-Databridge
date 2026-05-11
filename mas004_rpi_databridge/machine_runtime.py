@@ -261,8 +261,11 @@ class MachineRuntime:
             else:
                 try:
                     reset_result = self._perform_safety_reset(safety_status, ts)
+                    io_map = self._io_values()
+                    param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+                    critical_active, critical_reasons = self._critical_state(io_map, param_map)
                     safety_info = {
-                        "latched": not bool(reset_result.get("ok")),
+                        "latched": bool(critical_active or _truthy(param_map.get("MAS0028", "0"))),
                         "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
                         "last_reasons": list(safety_status.get("reasons") or []),
                         "last_reset": reset_result,
@@ -271,12 +274,6 @@ class MachineRuntime:
                     }
                     if reset_result.get("ok"):
                         safety_latched = False
-                        io_map = self._io_values()
-                        clear_result = self._clear_resettable_safety_errors(io_map=io_map)
-                        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
-                        critical_active, critical_reasons = self._critical_state(io_map, param_map)
-                        reset_result["cleared_errors"] = clear_result.get("cleared", [])
-                        reset_result["kept_errors"] = clear_result.get("kept", [])
                         if critical_active:
                             safety_latched = True
                             safety_info["latched"] = True
@@ -288,7 +285,7 @@ class MachineRuntime:
                             forced_state = 9
                             forced_source = "safety_reset_ready"
                     else:
-                        safety_latched = True
+                        safety_latched = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
                         forced_state = 21
                         forced_source = "safety_reset_failed"
                 finally:
@@ -333,7 +330,7 @@ class MachineRuntime:
             new_state = forced_state
             state_source = str(forced_source or "safety")
             requested_state = forced_state
-            purge_active = forced_state == 21
+            purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
         else:
             new_state, state_source = settle_machine_state(
                 requested_state,
@@ -855,6 +852,20 @@ class MachineRuntime:
         if not process_reset.get("ok"):
             result["error"] = process_reset.get("error") or "ESP process reset failed"
             return result
+
+        # Clear the soft Purge latch as soon as the safety inputs and ESP process
+        # latches are quiet. Motion recovery can still fail afterwards, but that
+        # must not keep an old MAS0028=1 alive without a real critical reason.
+        clear_result = self._clear_resettable_safety_errors(io_map=self._io_values())
+        result["steps"].append(
+            {
+                "step": "clear_resettable_safety_errors",
+                "ok": not bool(clear_result.get("kept")),
+                **clear_result,
+            }
+        )
+        result["cleared_errors"] = clear_result.get("cleared", [])
+        result["kept_errors"] = clear_result.get("kept", [])
 
         motion_result = self._reset_motion_devices()
         result["steps"].append({"step": "reset_motion_devices", **motion_result})

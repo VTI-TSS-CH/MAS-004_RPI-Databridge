@@ -132,6 +132,7 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAE0009", "MAE", "0009", "0", "R", "W", "bool"),
             ("MAE0025", "MAE", "0025", "0", "R", "W", "bool"),
             ("MAE0026", "MAE", "0026", "0", "R", "W", "bool"),
+            ("MAE0027", "MAE", "0027", "0", "R", "W", "bool"),
             ("MAS0001", "MAS", "0001", "1", "R", "W", "uint8"),
             ("MAS0002", "MAS", "0002", "0", "W", "W", "uint8"),
             ("MAS0003", "MAS", "0003", "0", "R", "W", "uint32"),
@@ -357,6 +358,35 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("1", self.params.get_effective_value("MAS0028"))
         self.assertEqual("1", self.params.get_effective_value("MAE0008"))
         self.assertIn("bahnriss_einlauf", snapshot["info"]["critical_reasons"])
+
+    def test_reset_clears_purge_latch_even_if_motion_recovery_fails_without_critical_input(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        self.params.apply_device_value("MAE0027", "1", promote_default=True)
+
+        with patch.object(
+            runtime,
+            "_reset_motion_devices",
+            return_value={"ok": False, "error": "simulated motion recovery failure", "details": {}},
+        ):
+            result = runtime.press_virtual_button("start_pause")
+
+        snapshot = result["snapshot"]
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        self.assertEqual("0", self.params.get_effective_value("MAE0027"))
+        self.assertEqual("failed", snapshot["info"]["safety"]["phase"])
 
     def test_motion_reset_leaves_wicklers_in_safe_stop(self):
         runtime = self.build_runtime()

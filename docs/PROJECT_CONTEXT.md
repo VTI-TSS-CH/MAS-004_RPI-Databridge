@@ -364,10 +364,11 @@
   - Raspi pulses `ESP Q0.2` as `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
   - ESP safety inputs must be LOW before motion devices are recovered
   - Raspi sends `PROCESS RESET` to the ESP32-PLC to clear process-latched `MAE0027` / `MAS0028` before motor/Wickler recovery
+  - `MAS0028` and resettable Safety/Purge latches are cleared before motor/Wickler recovery; if a drive recovery fault remains but no real critical reason is active, the machine may stay in `MAS0001=21` while `MAS0028=0`
   - ESP motors `1..9` receive ETO recovery / alarm reset
-  - both Smart Wicklers receive `stop`, `resetAlarm`, `etoRecovery`, and `ready`
+  - both Smart Wicklers receive `stop`, `resetAlarm`, `etoRecovery`, and `stop`
   - `MAS0001=8` while recovery is running, then `MAS0001=9` when reset is complete
-- Smart Wicklers are reset-ready only when both the AZD drive and the Wickler logic are fault-free; `Stoerung / Wippe unten` remains a reset blocker even if `drive.ready=true`.
+- Smart Wicklers are reset-ready when the AZD drive is online/ready/alarmfrei and the Wickler is in safe stop; a Wippe unten/oben is accepted as safe mechanical stop during reset.
 - The latched Etikettenfuehrung errors `MAE0008` and `MAE0009` are cleared by the reset only if the corresponding ESP inputs `I0.4` and `I0.11` are LOW after the reset verification. If an input is still active, the error remains active and the purge remains latched.
 - Raspi button LED override during safety:
   - `MAS0001=21`: `Q0.0` and `Q0.2` alternate every second

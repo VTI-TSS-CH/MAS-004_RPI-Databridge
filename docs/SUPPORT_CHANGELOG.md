@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Reset loescht Purge-Latch frueher)
+- Safety-/Purge-Reset loescht `MAS0028` und resettable Safety-Fehler jetzt direkt nach quieten Safety-Eingaengen und erfolgreichem ESP `PROCESS RESET`.
+- Eine nachfolgend fehlgeschlagene Motor-/Wickler-Recovery haelt damit keinen alten `MAS0028=1` Purge-Latch mehr fest, solange kein echter kritischer Grund mehr aktiv ist.
+- Bleiben echte kritische Gruende aktiv, zum Beispiel Bahnriss-Eingaenge oder nicht ruecksetzbare MAE-Fehler, wird `MAS0028=1` weiterhin korrekt reasserted.
+- Regressionstest ergaenzt: Reset mit geloeschtem kritischem Grund, aber simulierter Motion-Recovery-Stoerung, muss `MAS0028=0` setzen.
+
 ## 2026-05-11 (Produktions-Raspi Microtom-Outbox HTTP/HTTPS bereinigt)
 - Aktuelle neue Primary-Sends an Microtom funktionieren ueber `http://10.141.94.202:5000/api/inbox` mit HTTP 200.
 - Ursache fuer die haengende Outbox waren 38 alte Queue-Eintraege mit Ziel `https://10.141.94.202:5000/api/inbox`; Microtom spricht auf Port 5000 HTTP, daher scheiterten diese Eintraege mit `SSL: WRONG_VERSION_NUMBER`.
