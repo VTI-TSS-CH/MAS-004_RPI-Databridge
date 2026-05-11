@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (MOXA/Statusleuchte entkoppelt)
+- MOXA-Modbus/TCP-Zugriffe werden pro Endpoint `host:port` serialisiert, damit IO-Refresh und Statuslampen-Schreibzugriffe nicht mehr parallel auf dasselbe ioLogik-Modul laufen.
+- Unveraenderte Ausgangswerte werden nicht mehr erneut auf die Hardware geschrieben, solange der letzte Wert bereits live/simuliert bekannt ist.
+- Die Maschinen-Statusleuchte nutzt jetzt einen best-effort-Schreibpfad mit kurzem Fehler-Cooldown. Ein temporaerer MOXA-Timeout blockiert dadurch nicht mehr den Maschinenruntime-Zyklus und kann die ESP32-PLC/Motor-Kommunikation nicht mehr indirekt ausbremsen.
+- Produktionsbefund vor dem Fix: MOXA #1 und #2 waren per Ping und TCP/502 erreichbar, direkte Modbus-Reads/Writes funktionierten, aber parallele Runtime-Zugriffe konnten in Timeouts laufen.
+- Regressionstests fuer unveraenderte Ausgangswerte und best-effort MOXA-Schreibfehler ergaenzt.
+
 ## 2026-05-11 (Safety Reset / MAE0008-MAE0009 Clear)
 - Machine Control zeigt den kombinierten Start/Pause-Taster im Safety-/Purge-Kontext jetzt eindeutig als `Reset`; nach erfolgreichem Reset faellt er wieder auf `Start` bzw. `Pause` zurueck.
 - Der Resetpfad bewertet nach erfolgreicher ESP-Resetsequenz und Motor-/Wickler-Ready-Verifikation den aktuellen IO-/Fehlerzustand neu.

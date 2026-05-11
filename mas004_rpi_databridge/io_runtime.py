@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_clients import EspPlcClient
@@ -12,6 +14,10 @@ from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client
 _RPIPLC_MODULE = None
 _RPIPLC_MODEL = ""
 _RPIPLC_ERROR = ""
+_MOXA_ENDPOINT_LOCKS: dict[tuple[str, int], threading.Lock] = {}
+_MOXA_ENDPOINT_LOCKS_GUARD = threading.Lock()
+_MOXA_COOLDOWN_UNTIL: dict[tuple[str, int], float] = {}
+_MOXA_COOLDOWN_ERROR: dict[tuple[str, int], str] = {}
 
 
 def _to_int01(value: Any) -> int:
@@ -85,6 +91,7 @@ class IoRuntime:
         *,
         force: bool = False,
         source: str = "runtime",
+        best_effort: bool = False,
     ) -> Dict[str, Any]:
         point = self.store.get_point(io_key)
         if not point:
@@ -98,6 +105,14 @@ class IoRuntime:
                 "overridden": True,
                 "requested_value": 1 if enabled else 0,
                 "value": override_value,
+                "source": source,
+            }
+        requested_value = 1 if enabled else 0
+        if self._is_unchanged_live_output(point, requested_value, force=force):
+            return {
+                "ok": True,
+                "skipped_unchanged": True,
+                "value": requested_value,
                 "source": source,
             }
 
@@ -125,10 +140,25 @@ class IoRuntime:
             if simulation or not host or int(port or 0) <= 0:
                 self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", device_code)
                 return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
-            client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
-            client.write_output(int(point["channel_no"] or 0), enabled)
-            self.store.upsert_value(io_key, 1 if enabled else 0, "live", device_code)
-            return {"ok": True, "simulation": False, "value": 1 if enabled else 0}
+            try:
+                def _write():
+                    client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
+                    return client.write_output(int(point["channel_no"] or 0), enabled)
+
+                self._moxa_call(device_code, _write)
+                self.store.upsert_value(io_key, 1 if enabled else 0, "live", device_code)
+                return {"ok": True, "simulation": False, "value": 1 if enabled else 0}
+            except Exception as exc:
+                self.store.upsert_value(io_key, point.get("value", "0"), "offline", device_code)
+                if best_effort:
+                    return {
+                        "ok": False,
+                        "simulation": False,
+                        "value": _to_int01(point.get("value", "0")),
+                        "error": str(exc),
+                        "best_effort": True,
+                    }
+                raise
 
         if device_code == "raspi_plc21":
             if bool(getattr(self.cfg, "raspi_io_simulation", True)):
@@ -237,8 +267,11 @@ class IoRuntime:
         if not host or int(port or 0) <= 0:
             return self._apply_static_quality(device_code, device_points, "offline", device_code, "MOXA endpoint missing")
         try:
-            client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
-            snapshot = client.read_outputs()
+            def _read():
+                client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
+                return client.read_outputs()
+
+            snapshot = self._moxa_call(device_code, _read)
             changed = 0
             for point in device_points:
                 value = _to_int01(snapshot.get(point["pin_label"], point.get("value", "0")))
@@ -328,3 +361,47 @@ class IoRuntime:
         # than external HTTP peer timeouts so unreachable I/O modules cannot
         # stall the machine runtime or ESP motor command path for many seconds.
         return max(0.3, min(self.cfg.get_float("moxa_timeout_s", 1.5), 2.0))
+
+    def _moxa_error_cooldown_s(self) -> float:
+        # After a timeout, do not hammer the MOXA every machine-runtime tick.
+        # A later IO poll or state change will retry after this short window.
+        return max(1.0, min(self.cfg.get_float("moxa_error_cooldown_s", 5.0), 30.0))
+
+    def _moxa_lock(self, host: str, port: int) -> threading.Lock:
+        key = (str(host or ""), int(port or 0))
+        with _MOXA_ENDPOINT_LOCKS_GUARD:
+            lock = _MOXA_ENDPOINT_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _MOXA_ENDPOINT_LOCKS[key] = lock
+            return lock
+
+    def _moxa_call(self, device_code: str, operation: Callable[[], Any]) -> Any:
+        host, port, _simulation = self._moxa_target(device_code)
+        key = (str(host or ""), int(port or 0))
+        now = time.monotonic()
+        until = float(_MOXA_COOLDOWN_UNTIL.get(key, 0.0) or 0.0)
+        if until > now:
+            reason = _MOXA_COOLDOWN_ERROR.get(key, "previous MOXA error")
+            raise RuntimeError(f"MOXA cooldown active for {host}:{port} after {reason}")
+        lock = self._moxa_lock(host, port)
+        with lock:
+            try:
+                result = operation()
+                _MOXA_COOLDOWN_UNTIL.pop(key, None)
+                _MOXA_COOLDOWN_ERROR.pop(key, None)
+                return result
+            except Exception as exc:
+                _MOXA_COOLDOWN_UNTIL[key] = time.monotonic() + self._moxa_error_cooldown_s()
+                _MOXA_COOLDOWN_ERROR[key] = str(exc)
+                raise
+
+    def _is_unchanged_live_output(self, point: Dict[str, Any], requested_value: int, *, force: bool) -> bool:
+        if force:
+            return False
+        if point.get("io_dir") not in {"output", "gpio"}:
+            return False
+        quality = str(point.get("quality") or "").lower()
+        if quality not in {"live", "simulation", "override"}:
+            return False
+        return _to_int01(point.get("value", "0")) == int(requested_value)

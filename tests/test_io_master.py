@@ -123,6 +123,59 @@ class IoMasterImportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "pulse-only"):
                 runtime.override_output("esp32_plc58__GPIO0", True, source="test-ui")
 
+    def test_unchanged_live_output_is_not_written_again(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            store.upsert_value("moxa_e1211_2__DO4", "1", "live", "test")
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    moxa2_host="127.0.0.1",
+                    moxa2_port=1,
+                    moxa2_simulation=False,
+                ),
+                store,
+            )
+
+            result = runtime.write_output("moxa_e1211_2__DO4", True)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["skipped_unchanged"])
+
+    def test_moxa_best_effort_write_failure_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    moxa2_host="127.0.0.1",
+                    moxa2_port=1,
+                    moxa2_simulation=False,
+                    moxa_timeout_s=0.3,
+                ),
+                store,
+            )
+
+            result = runtime.write_output("moxa_e1211_2__DO4", True, best_effort=True)
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["best_effort"])
+            self.assertEqual("offline", store.get_point("moxa_e1211_2__DO4")["quality"])
+
 
 if __name__ == "__main__":
     unittest.main()

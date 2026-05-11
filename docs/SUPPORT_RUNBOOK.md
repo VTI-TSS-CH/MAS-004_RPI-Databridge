@@ -370,6 +370,9 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `ESP32-PLC58` stays on the realtime side and should only receive the IO snapshot/control traffic it actually needs
   - the two `Moxa ioLogik E1211` modules are handled as slow field IO on the Raspi side
   - Moxa simulation should stay enabled by default on live/test until the networked hardware is intentionally validated
+  - on validated production hardware, both Moxa modules can use port `502` because they are addressed through different IPs (`192.168.2.102` and `192.168.2.103`)
+  - Moxa Modbus/TCP access is serialized per endpoint; unchanged output values are not rewritten
+  - status-lamp writes are best-effort and use a short cooldown after timeouts so they cannot block the machine runtime or ESP motor communication path
   - Raspberry PLC21 IOs require either the official Industrial Shields `rpiplc_lib` Python module or the project-local `rpiplc_compat` fallback against `/usr/lib/librpiplc.so`
   - if the UI shows `rpiplc unavailable`, verify that `/usr/lib/librpiplc.so` is present and that the deployed Databridge includes `mas004_rpi_databridge/rpiplc_compat.py`
   - `raspi_io_simulation` is the only switch that decides whether PLC21 IOs are polled live or held in simulation

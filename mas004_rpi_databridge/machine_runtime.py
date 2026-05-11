@@ -1112,7 +1112,7 @@ class MachineRuntime:
             if not point:
                 continue
             try:
-                io_runtime.write_output(point["io_key"], bool(enabled))
+                io_runtime.write_output(point["io_key"], bool(enabled), source="status-lamp", best_effort=True)
             except Exception as exc:
                 self.logs.log("machine", "info", f"status-lamp write skipped for {point['io_key']}: {exc}")
 

@@ -282,6 +282,7 @@
   - verbose per-request serial logging is disabled
   - outbound ESP->Raspi draining waits for a quiet inbound window
 - MOXA Modbus/TCP on eth1 must use local, short timeouts (`moxa_timeout_s`, default 1.5 s). It must not inherit the Microtom/HTTP peer timeout, otherwise a slow I/O module can stall machine-runtime LED/status writes and indirectly add load to ESP motor communication.
+- MOXA access is serialized per `host:port`, unchanged output writes are suppressed, and status-lamp writes are best-effort with a short error cooldown. This keeps transient ioLogik timeouts from blocking the machine runtime or indirectly disturbing ESP motor communication.
 - Current field stress proof with Databridge active:
   - `1500/1500` serial safe commands acknowledged
   - `1600/1600` commands acknowledged with 8 contending stress workers

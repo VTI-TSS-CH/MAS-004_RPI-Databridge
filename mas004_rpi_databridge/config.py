@@ -81,6 +81,7 @@ class Settings:
     moxa2_simulation: bool = True
     moxa_poll_interval_s: float = 1.0
     moxa_timeout_s: float = 1.5
+    moxa_error_cooldown_s: float = 5.0
 
     # Printers / Wickler on ETH0
     vj3350_host: str = "192.168.210.21"
