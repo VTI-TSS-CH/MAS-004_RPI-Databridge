@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Motor Setup Fehlerbehandlung)
+- Fixed recurring `500 Internal Server Error` responses on `/ui/machine-setup/motors` when the ESP32-PLC motor endpoint temporarily refused a connection during `MOTOR <id> REFRESH` or another motor command.
+- Motor setup endpoints now convert ESP/TCP communication failures into structured `502 Bad Gateway` API responses with a readable detail message instead of leaking an uncaught Python traceback.
+- The UI can therefore keep the motor page alive and show the motor communication error in the card/status area while the ESP endpoint recovers.
+- Added a regression test that verifies a refused ESP motor refresh returns `502` and not `500`.
+
 ## 2026-05-09 (Machine Control / Audit Log)
 - Reworked protected `/ui/machine-setup/process` into a Machine Control / Audit page.
 - Added virtual buttons for Start/Pause, Stop, Einrichten, Synchronisieren, Leerfahren and Zurueckspulen. They use the same `MAS0002`, state and `MAP0065` permission logic as the physical Raspi PLC buttons.
