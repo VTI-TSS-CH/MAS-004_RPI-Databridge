@@ -422,10 +422,11 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - Raspi sets `MAS0001=8`
     - Raspi pulses ESP `Q0.2`: `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
     - Raspi verifies `ESP I0.7=0` and `ESP I0.8=0`
+    - Raspi sends `PROCESS RESET` to the ESP32-PLC to clear process latches and sensor/runtime purge states such as `MAE0027` / `MAS0028`
     - Raspi runs `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, then `MOTOR <id> RESET_ALARM` for `1..9`
     - Raspi posts `stop`, `resetAlarm`, `etoRecovery`, `ready` to both Wicklers if they are live
     - Raspi verifies all ESP motors `1..9` with live `ready=true`, `alarm=false`
-    - Raspi verifies both Wicklers with live `drive.ready=true`, `drive.alarm=false`
+    - Raspi verifies both Wicklers with live `drive.ready=true`, `drive.alarm=false`, and no Wickler logic fault such as `Stoerung / Wippe unten`
     - Raspi clears resettable Safety/Purge errors and sets `MAS0001=9`
   - `MAE0008` and `MAE0009` are conditional resettable latches:
     - `MAE0008` is cleared only when ESP `I0.4` is LOW after reset.

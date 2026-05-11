@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.io_master import IoStore
@@ -69,6 +71,7 @@ SAFETY_PHASE_RESETTING = "resetting"
 SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
 PURGE_EXTERNAL_CLEAR_GRACE_S = 3.0
+_SAFETY_RESET_LOCK = threading.Lock()
 
 
 def mark_external_purge_clear(db: DB, *, source: str = "microtom"):
@@ -234,37 +237,62 @@ class MachineRuntime:
         forced_source: str | None = None
 
         if safety_reset_requested:
-            reset_result = self._perform_safety_reset(safety_status, ts)
-            safety_info = {
-                "latched": not bool(reset_result.get("ok")),
-                "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
-                "last_reasons": list(safety_status.get("reasons") or []),
-                "last_reset": reset_result,
-                "mas0002_reset_seen": reset_command_active,
-                "mas0002_reset_seen_ts": reset_command_ts if reset_command_active else 0.0,
-            }
-            if reset_result.get("ok"):
-                safety_latched = False
-                io_map = self._io_values()
-                clear_result = self._clear_resettable_safety_errors(io_map=io_map)
-                param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
-                critical_active, critical_reasons = self._critical_state(io_map, param_map)
-                reset_result["cleared_errors"] = clear_result.get("cleared", [])
-                reset_result["kept_errors"] = clear_result.get("kept", [])
-                if critical_active:
-                    safety_latched = True
-                    safety_info["latched"] = True
-                    safety_info["phase"] = SAFETY_PHASE_LATCHED
-                    safety_info["post_reset_critical_reasons"] = list(critical_reasons)
-                    forced_state = 21
-                    forced_source = "safety_reset_critical_active"
-                else:
-                    forced_state = 9
-                    forced_source = "safety_reset_ready"
-            else:
+            if not _SAFETY_RESET_LOCK.acquire(blocking=False):
                 safety_latched = True
                 forced_state = 21
-                forced_source = "safety_reset_failed"
+                forced_source = "safety_reset_in_progress"
+                safety_info = {
+                    **safety_info,
+                    "latched": True,
+                    "phase": SAFETY_PHASE_RESETTING,
+                    "last_reasons": list(safety_status.get("reasons") or safety_info.get("last_reasons") or []),
+                    "last_reset": {
+                        "ok": False,
+                        "in_progress": True,
+                        "started_ts": (
+                            safety_info.get("last_reset", {}).get("started_ts")
+                            if isinstance(safety_info.get("last_reset"), dict)
+                            else None
+                        ),
+                    },
+                    "mas0002_reset_seen": reset_command_active,
+                    "mas0002_reset_seen_ts": reset_command_seen_ts if reset_command_active else 0.0,
+                }
+            else:
+                try:
+                    reset_result = self._perform_safety_reset(safety_status, ts)
+                    safety_info = {
+                        "latched": not bool(reset_result.get("ok")),
+                        "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
+                        "last_reasons": list(safety_status.get("reasons") or []),
+                        "last_reset": reset_result,
+                        "mas0002_reset_seen": reset_command_active,
+                        "mas0002_reset_seen_ts": reset_command_ts if reset_command_active else 0.0,
+                    }
+                    if reset_result.get("ok"):
+                        safety_latched = False
+                        io_map = self._io_values()
+                        clear_result = self._clear_resettable_safety_errors(io_map=io_map)
+                        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+                        critical_active, critical_reasons = self._critical_state(io_map, param_map)
+                        reset_result["cleared_errors"] = clear_result.get("cleared", [])
+                        reset_result["kept_errors"] = clear_result.get("kept", [])
+                        if critical_active:
+                            safety_latched = True
+                            safety_info["latched"] = True
+                            safety_info["phase"] = SAFETY_PHASE_LATCHED
+                            safety_info["post_reset_critical_reasons"] = list(critical_reasons)
+                            forced_state = 21
+                            forced_source = "safety_reset_critical_active"
+                        else:
+                            forced_state = 9
+                            forced_source = "safety_reset_ready"
+                    else:
+                        safety_latched = True
+                        forced_state = 21
+                        forced_source = "safety_reset_failed"
+                finally:
+                    _SAFETY_RESET_LOCK.release()
         elif safety_latched:
             safety_info = {
                 **safety_info,
@@ -822,6 +850,12 @@ class MachineRuntime:
             return result
         result["steps"].append({"step": "verify_safety_inputs_low", "ok": True})
 
+        process_reset = self._reset_esp_process_runtime()
+        result["steps"].append({"step": "esp_process_reset", **process_reset})
+        if not process_reset.get("ok"):
+            result["error"] = process_reset.get("error") or "ESP process reset failed"
+            return result
+
         motion_result = self._reset_motion_devices()
         result["steps"].append({"step": "reset_motion_devices", **motion_result})
         if not motion_result.get("ok"):
@@ -886,6 +920,28 @@ class MachineRuntime:
             return {"ok": True, "device": device_result}
         except Exception as exc:
             self.logs.log("machine", "warning", f"single IO refresh failed for {device_code}: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _reset_esp_process_runtime(self) -> dict[str, Any]:
+        if bool(getattr(self.cfg, "esp_simulation", True)):
+            return {"ok": True, "skipped": True, "reason": "esp_simulation"}
+        if not getattr(self.cfg, "esp_host", "") or int(getattr(self.cfg, "esp_port", 0) or 0) <= 0:
+            return {"ok": True, "skipped": True, "reason": "esp_endpoint_missing"}
+        try:
+            client = EspPlcClient(
+                str(self.cfg.esp_host),
+                int(self.cfg.esp_port),
+                float(getattr(self.cfg, "esp_connect_timeout_s", 1.5) or 1.5),
+            )
+            reply = client.exchange_line(
+                "PROCESS RESET",
+                read_timeout_s=float(getattr(self.cfg, "esp_command_timeout_s", 8.0) or 8.0),
+            )
+            ok = str(reply or "").strip().upper().startswith("ACK_PROCESS_RESET")
+            if not ok:
+                return {"ok": False, "reply": reply, "error": f"unexpected ESP reply: {reply}"}
+            return {"ok": True, "reply": reply}
+        except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
     def _reset_motion_devices(self) -> dict[str, Any]:
@@ -979,15 +1035,26 @@ class MachineRuntime:
                 telemetry = state.get("telemetry") if isinstance(state, dict) else {}
                 drive = drive if isinstance(drive, dict) else {}
                 telemetry = telemetry if isinstance(telemetry, dict) else {}
+                mode_label = str(telemetry.get("modeLabel") or "")
+                fault_reason = str(telemetry.get("faultReason") or "")
+                fault_clear = fault_reason.strip().lower() in ("", "-", "none", "keine", "ok")
+                mode_clear = mode_label.strip().lower() not in ("stoerung", "störung", "alarm", "fault")
                 verify = {
                     "step": "verify_ready",
-                    "ok": bool(state.get("ok") and drive.get("online") and drive.get("ready") and not drive.get("alarm")),
+                    "ok": bool(
+                        state.get("ok")
+                        and drive.get("online")
+                        and drive.get("ready")
+                        and not drive.get("alarm")
+                        and mode_clear
+                        and fault_clear
+                    ),
                     "online": bool(drive.get("online")),
                     "ready": bool(drive.get("ready")),
                     "alarm": bool(drive.get("alarm")),
                     "alarm_code": drive.get("alarmCode"),
-                    "mode": telemetry.get("modeLabel"),
-                    "fault_reason": telemetry.get("faultReason"),
+                    "mode": mode_label,
+                    "fault_reason": fault_reason,
                     "raw_output": drive.get("rawOutput"),
                 }
                 role_detail["steps"].append(verify)

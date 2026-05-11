@@ -928,6 +928,12 @@
 - Motor `3` remains a transport axis with neutral default `0`; its live distance counter is intentionally not stored as a workbook default.
 - Production Raspi parameter import result: `758` rows updated.
 
+## 2026-05-11 (Safety Reset ESP Process Latch)
+- Hardened the Raspi safety reset path after production diagnosis showed that ESP process latches could reassert `MAE0027=1` / `MAS0028=1` immediately after an otherwise successful motor reset.
+- Reset now sends `PROCESS RESET` to the ESP32-PLC after the ESP safety inputs are verified LOW and before recovering motors/Wicklers.
+- Added an in-process reset lock so a UI-triggered reset and the background runtime loop cannot run the safety reset sequence concurrently.
+- Smart Wicklers are no longer considered reset-ready solely because the AZD drive is electrically ready; the Raspi now also checks the Wickler logic state and reports faults such as `Stoerung / Wippe unten` as real reset blockers.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture
