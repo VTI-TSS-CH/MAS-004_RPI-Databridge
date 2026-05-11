@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS param_values (
   FOREIGN KEY(pkey) REFERENCES params(pkey) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS format_profiles (
+  name TEXT PRIMARY KEY,
+  note TEXT NOT NULL DEFAULT '',
+  values_json TEXT NOT NULL,
+  created_ts REAL NOT NULL,
+  updated_ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_format_profiles_updated ON format_profiles(updated_ts);
+
 CREATE TABLE IF NOT EXISTS param_device_map (
   pkey TEXT PRIMARY KEY,
   esp_key TEXT,

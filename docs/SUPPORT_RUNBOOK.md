@@ -438,6 +438,13 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `Istposition setzen [mm]` captures the current live motor position as the entered absolute position and saves the resulting offset persistently.
   - `Absolut fahren nach [mm]` commands the axis to an entered absolute millimeter position via `MOVE_ABS_MM`.
   - These persisted values are the values used later by the ESP32-PLC motor program flow.
+- For production format setup:
+  - open `/ui/machine-setup/production` after logging into Machine-Setup.
+  - Use `Istwerte laden` before creating a new profile if the current machine state should be the starting point.
+  - `Speichern` stores the named format profile only on the Raspi; it does not send anything to the machine.
+  - `Format an Maschine senden` sends only Microtom-writable format parameters through the same router path used by `/api/inbox` and the Microtom testtool.
+  - If a value is not marked `Format relevant` in the workbook/imported parameter DB, the backend refuses it with `NAK_NotFormatRelevant`.
+  - Read-only values are kept for visibility in profiles but are skipped during send, because they are production/status feedback, not format writes.
 - For Smart Wickler integration:
   - `Abwickler` and `Aufwickler` endpoints are configured in `/ui/settings`
   - expected defaults are `192.168.210.23:3011` and `192.168.210.24:3012`

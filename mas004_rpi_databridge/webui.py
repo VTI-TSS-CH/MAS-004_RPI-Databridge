@@ -38,16 +38,19 @@ from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.machine_runtime import MachineRuntime
 from mas004_rpi_databridge.machine_control_ui import build_machine_control_ui_html
+from mas004_rpi_databridge.production_setup_ui import build_production_setup_ui_html
 from mas004_rpi_databridge.commissioning import CommissioningStore
 from mas004_rpi_databridge.commissioning_ui import build_commissioning_ui_html
 from mas004_rpi_databridge.machine_backups import MachineBackupManager
 from mas004_rpi_databridge.backup_ui import build_backup_ui_html
+from mas004_rpi_databridge.format_profiles import FormatProfileStore, normalize_profile_name
 from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager
+from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient, normalize_winder_role
 from mas004_rpi_databridge.smart_wickler_ui import build_winder_ui_html
 from mas004_rpi_databridge.timeutil import format_local_timestamp, local_from_timestamp
@@ -371,6 +374,17 @@ class MachineAuditRetentionReq(BaseModel):
     keep_hours: int
 
 
+class FormatProfileReq(BaseModel):
+    name: str
+    values: Dict[str, Any]
+    note: str = ""
+
+
+class FormatSendReq(BaseModel):
+    name: str = ""
+    values: Dict[str, Any]
+
+
 class CommissioningStartReq(BaseModel):
     mode: str = "full"
 
@@ -402,6 +416,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     io_store = IoStore(db)
     logs = LogStore(db)
     production_logs = ProductionLogManager(db, cfg=cfg, outbox=outbox)
+    format_profiles = FormatProfileStore(db)
     if not os.path.exists(cfg.master_params_xlsx_path) and os.path.exists(REPO_MASTER_PARAMS_XLSX):
         os.makedirs(os.path.dirname(cfg.master_params_xlsx_path), exist_ok=True)
         shutil.copyfile(REPO_MASTER_PARAMS_XLSX, cfg.master_params_xlsx_path)
@@ -748,6 +763,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         items = [
             ("commissioning", "/ui/machine-setup/commissioning", "Commissioning"),
             ("backups", "/ui/machine-setup/backups", "Backups"),
+            ("production", "/ui/machine-setup/production", "Produktion"),
             ("process", "/ui/machine-setup/process", "Control / Audit"),
             ("io", "/ui/machine-setup/io", "I/O"),
             ("motors", "/ui/machine-setup/motors", "Motors"),
@@ -1055,6 +1071,97 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
         return runtime.snapshot()
+
+    def is_format_relevant(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        return text not in ("", "0", "false", "no", "nein", "n", "none", "null", "-")
+
+    def production_status_keys() -> list[str]:
+        return [
+            "MAS0001",
+            "MAS0002",
+            "MAS0003",
+            "MAS0008",
+            "MAS0009",
+            "MAS0026",
+            "MAS0027",
+            "MAS0028",
+            "MAS0029",
+            "MAS0030",
+        ]
+
+    def get_production_setup_payload() -> dict[str, Any]:
+        rows = params.list_params(limit=100000, offset=0)
+        format_rows = []
+        for row in rows:
+            meta = params.get_meta(str(row.get("pkey") or ""))
+            if not meta or not is_format_relevant(meta.get("format_relevant")):
+                continue
+            item = {
+                **row,
+                "format_relevant": meta.get("format_relevant"),
+                "value": row.get("effective_v"),
+                "can_write_microtom": params.can_actor_write(str(row.get("pkey") or ""), actor="microtom"),
+                "can_read_microtom": params.can_actor_read(str(row.get("pkey") or ""), actor="microtom"),
+            }
+            format_rows.append(item)
+
+        status = []
+        for pkey in production_status_keys():
+            meta = params.get_meta(pkey)
+            if not meta:
+                continue
+            status.append(
+                {
+                    "pkey": pkey,
+                    "value": params.get_effective_value(pkey),
+                    "name": meta.get("name") or "",
+                    "message": meta.get("message") or "",
+                    "unit": meta.get("unit") or "",
+                }
+            )
+        return {
+            "ok": True,
+            "parameters": format_rows,
+            "production_status": status,
+            "machine": get_machine_overview(),
+        }
+
+    def send_format_values(values: dict[str, Any], name: str = "") -> dict[str, Any]:
+        cfg2 = Settings.load(cfg_path)
+        router = Router(cfg2, inbox, outbox, params, logs)
+        clean_values = FormatProfileStore._clean_values(values)
+        allowed_items = {item["pkey"]: item for item in get_production_setup_payload()["parameters"]}
+        results = []
+        for pkey in sorted(clean_values):
+            item = allowed_items.get(pkey)
+            if not item:
+                results.append({"line": f"{pkey}={clean_values[pkey]}", "ok": False, "error": "NAK_NotFormatRelevant"})
+                continue
+            if not bool(item.get("can_write_microtom")):
+                results.append(
+                    {
+                        "line": f"{pkey}={clean_values[pkey]}",
+                        "ok": True,
+                        "skipped": True,
+                        "error": "SKIP_ReadOnly",
+                    }
+                )
+                continue
+            value = clean_values[pkey]
+            line = f"{pkey}={value}"
+            try:
+                response = router.handle_microtom_line(line, correlation=f"machine-setup-format:{name or 'unsaved'}:{pkey}")
+                ok = bool(response) and "NAK" not in str(response).upper()
+                results.append({"line": line, "response": response, "ok": ok})
+            except Exception as exc:
+                results.append({"line": line, "ok": False, "error": str(exc)})
+        return {
+            "ok": all(bool(item.get("ok")) for item in results) if results else True,
+            "name": name or "",
+            "count": len(results),
+            "results": results,
+        }
 
     @app.get("/ui", response_class=HTMLResponse)
     def ui():
@@ -2130,6 +2237,70 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="mas004_machine_audit_{stamp}.log"'},
         )
 
+    @app.get("/api/production-setup/parameters")
+    def api_production_setup_parameters(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_production_setup_payload()
+
+    @app.get("/api/production-setup/status")
+    def api_production_setup_status(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        payload = get_production_setup_payload()
+        return {
+            "ok": True,
+            "production_status": payload.get("production_status", []),
+            "machine": payload.get("machine", {}),
+        }
+
+    @app.get("/api/production-setup/profiles")
+    def api_production_setup_profiles(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return {"ok": True, "profiles": format_profiles.list_profiles()}
+
+    @app.get("/api/production-setup/profiles/{name}")
+    def api_production_setup_profile(request: Request, name: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            profile = format_profiles.get_profile(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not profile:
+            raise HTTPException(status_code=404, detail="Formatprofil nicht gefunden")
+        return {"ok": True, "profile": profile}
+
+    @app.post("/api/production-setup/profiles")
+    def api_production_setup_profile_save(request: Request, body: FormatProfileReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            profile = format_profiles.save_profile(body.name, body.values, note=body.note)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "profile": profile, "profiles": format_profiles.list_profiles()}
+
+    @app.delete("/api/production-setup/profiles/{name}")
+    def api_production_setup_profile_delete(request: Request, name: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return format_profiles.delete_profile(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/production-setup/send")
+    def api_production_setup_send(request: Request, body: FormatSendReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            name = normalize_profile_name(body.name) if (body.name or "").strip() else ""
+        except ValueError:
+            name = str(body.name or "").strip()[:80]
+        return send_format_values(body.values, name=name)
+
     @app.get("/api/commissioning/overview")
     def api_commissioning_overview(request: Request):
         cfg2 = Settings.load(cfg_path)
@@ -2290,6 +2461,15 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
         nav = nav_html("machine_setup") + machine_setup_nav_html("backups")
         return build_backup_ui_html(nav)
+
+    @app.get("/ui/machine-setup/production", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_production(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/production"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("production")
+        return build_production_setup_ui_html(nav)
 
     @app.get("/ui/machine-setup/login", response_class=HTMLResponse, include_in_schema=False)
     def ui_machine_setup_login(request: Request, next: str = Query(default="/ui/machine-setup/motors")):

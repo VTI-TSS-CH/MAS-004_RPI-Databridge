@@ -340,6 +340,14 @@
   - it maps to `MOTOR POLL=1/0` on the ESP32-PLC
   - firmware-side polling is intentionally paced as one motor per step, `100 ms` between motor polls, cycling `1..9`
 
+## Machine-Setup Production Format Contract
+- `/ui/machine-setup/production` is the protected commissioning view for format setup.
+- The page uses imported workbook metadata and shows every parameter marked `Format relevant`.
+- Format profiles are named local Raspi records in the Databridge database table `format_profiles`; they are snapshots of entered format values and optional notes.
+- Sending a format deliberately runs through the same `Router.handle_microtom_line()` path as Microtom/Testtool traffic.
+- This means workbook permissions, Microtom `R/W`, device mapping and ACK/NAK behavior remain the source of truth.
+- Read-only/status values can remain visible in saved profiles, but the send action skips them instead of writing them to the machine.
+
 ## Machine Safety / Reset Contract
 - The ESP32-PLC safety inputs are active-high:
   - `ESP32-PLC58 I0.7 = 1` means hard Notaus present.

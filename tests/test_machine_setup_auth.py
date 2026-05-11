@@ -60,6 +60,10 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(303, backups_page.status_code)
         self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/backups", backups_page.headers.get("location"))
 
+        production_page = client.get("/ui/machine-setup/production", follow_redirects=False)
+        self.assertEqual(303, production_page.status_code)
+        self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/production", production_page.headers.get("location"))
+
         api = client.get("/api/motors/overview")
         self.assertEqual(401, api.status_code)
         self.assertEqual("Machine-Setup login required", api.json()["detail"])
@@ -75,6 +79,10 @@ class MachineSetupAuthTests(unittest.TestCase):
         backups_api = client.get("/api/backups/overview")
         self.assertEqual(401, backups_api.status_code)
         self.assertEqual("Machine-Setup login required", backups_api.json()["detail"])
+
+        production_api = client.get("/api/production-setup/parameters")
+        self.assertEqual(401, production_api.status_code)
+        self.assertEqual("Machine-Setup login required", production_api.json()["detail"])
 
         audit_api = client.get("/api/machine/audit")
         self.assertEqual(401, audit_api.status_code)
@@ -122,6 +130,12 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertIn("Machine Backups", backups_page.text)
         self.assertIn(">Backups<", backups_page.text)
 
+        production_page = client.get("/ui/machine-setup/production")
+        self.assertEqual(200, production_page.status_code)
+        self.assertIn("Produktion", production_page.text)
+        self.assertIn("Formatprofile", production_page.text)
+        self.assertIn(">Produktion<", production_page.text)
+
         api = client.get("/api/motors/overview")
         self.assertEqual(200, api.status_code)
         payload = api.json()
@@ -147,6 +161,22 @@ class MachineSetupAuthTests(unittest.TestCase):
         audit_download = client.get("/api/machine/audit/download?hours=1&limit=50")
         self.assertEqual(200, audit_download.status_code)
         self.assertIn("MAS-004 Machine Audit Log", audit_download.text)
+
+        production_api = client.get("/api/production-setup/parameters")
+        self.assertEqual(200, production_api.status_code)
+        self.assertIn("parameters", production_api.json())
+        self.assertIn("production_status", production_api.json())
+
+        save_profile = client.post(
+            "/api/production-setup/profiles",
+            json={"name": "Auth Test Format", "note": "smoke", "values": {"MAP0014": "100"}},
+        )
+        self.assertEqual(200, save_profile.status_code)
+        self.assertEqual("Auth Test Format", save_profile.json()["profile"]["name"])
+
+        load_profile = client.get("/api/production-setup/profiles/Auth%20Test%20Format")
+        self.assertEqual(200, load_profile.status_code)
+        self.assertEqual("100", load_profile.json()["profile"]["values"]["MAP0014"])
 
         commissioning_api = client.get("/api/commissioning/overview")
         self.assertEqual(200, commissioning_api.status_code)

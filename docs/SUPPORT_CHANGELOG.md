@@ -897,6 +897,13 @@
 - Refreshed KI entries in the shifted `KI-Anweisungen` column using the current project logic.
 - Transient production runtime values such as live `MAS`/`MAE` states were not promoted to workbook defaults; they remain runtime state in `param_values`.
 
+## 2026-05-11 (Machine-Setup Produktion)
+- Added the protected Machine-Setup page `/ui/machine-setup/production`.
+- The page lists all workbook/imported parameters marked as `Format relevant`, shows production status values such as machine state, product name, logfile flag and Wickler status, and lets commissioning users save named local format profiles.
+- Saved profiles are persisted on the Raspi in the Databridge SQLite database table `format_profiles`.
+- Sending a format uses the same Databridge Router path as Microtom/Testtool input instead of a separate shortcut, so existing parameter permissions, mappings, ACK/NAK behavior and downstream device fanout stay authoritative.
+- Read-only/status values may be saved in a profile snapshot for visibility, but they are skipped when sending the profile to the machine.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture
