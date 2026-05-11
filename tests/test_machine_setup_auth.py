@@ -13,31 +13,29 @@ from mas004_rpi_databridge.webui import MULTIPART_AVAILABLE, build_app
 
 
 class MachineSetupAuthTests(unittest.TestCase):
-    def build_client(self) -> TestClient:
+    def build_client(self, *, config_overrides=None, raise_server_exceptions: bool = True) -> TestClient:
         self._tmp = tempfile.TemporaryDirectory()
         root = Path(self._tmp.name)
         cfg_path = root / "config.json"
-        cfg_path.write_text(
-            json.dumps(
-                {
-                    "db_path": str(root / "databridge.db"),
-                    "master_params_xlsx_path": str(root / "master" / "Parameterliste_master.xlsx"),
-                    "master_ios_xlsx_path": str(root / "master" / "SAR41-MAS-004_SPS_I-Os.xlsx"),
-                    "backup_root_path": str(root / "backups"),
-                    "ui_token": "",
-                    "shared_secret": "",
-                    "esp_simulation": True,
-                    "moxa1_simulation": True,
-                    "moxa2_simulation": True,
-                    "vj6530_simulation": True,
-                    "vj3350_simulation": True,
-                    "smart_unwinder_simulation": True,
-                    "smart_rewinder_simulation": True,
-                }
-            ),
-            encoding="utf-8",
-        )
-        return TestClient(build_app(str(cfg_path)))
+        cfg = {
+            "db_path": str(root / "databridge.db"),
+            "master_params_xlsx_path": str(root / "master" / "Parameterliste_master.xlsx"),
+            "master_ios_xlsx_path": str(root / "master" / "SAR41-MAS-004_SPS_I-Os.xlsx"),
+            "backup_root_path": str(root / "backups"),
+            "ui_token": "",
+            "shared_secret": "",
+            "esp_simulation": True,
+            "moxa1_simulation": True,
+            "moxa2_simulation": True,
+            "vj6530_simulation": True,
+            "vj3350_simulation": True,
+            "smart_unwinder_simulation": True,
+            "smart_rewinder_simulation": True,
+        }
+        if config_overrides:
+            cfg.update(config_overrides)
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        return TestClient(build_app(str(cfg_path)), raise_server_exceptions=raise_server_exceptions)
 
     def tearDown(self):
         tmp = getattr(self, "_tmp", None)
@@ -185,6 +183,25 @@ class MachineSetupAuthTests(unittest.TestCase):
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)
         self.assertEqual("/ui/machine-setup/motors", legacy.headers.get("location"))
+
+    def test_motor_refresh_esp_connection_failure_is_bad_gateway_not_500(self):
+        client = self.build_client(
+            config_overrides={"esp_simulation": False, "esp_host": "127.0.0.1", "esp_port": 1},
+            raise_server_exceptions=False,
+        )
+        login = client.post(
+            "/ui/machine-setup/login",
+            json={
+                "username": "Admin",
+                "password": "VideojetMAS004!",
+                "next": "/ui/machine-setup/motors",
+            },
+        )
+        self.assertEqual(200, login.status_code)
+
+        refresh = client.post("/api/motors/1/refresh", json={})
+        self.assertEqual(502, refresh.status_code)
+        self.assertIn("ESP motor communication failed during REFRESH", refresh.json()["detail"])
 
 
 if __name__ == "__main__":

@@ -560,6 +560,17 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             detail = result.get("reply") or result.get("error") or f"ESP rejected {action}"
             raise HTTPException(status_code=502, detail=str(detail))
 
+    def motor_client_call(action: str, fn):
+        try:
+            return fn()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"ESP motor communication failed during {action}: {exc}",
+            ) from exc
+
     def refresh_motor_snapshot(client: EspMotorClient, motor_id: int) -> dict[str, Any]:
         payload = client.refresh(motor_id)
         raw_motor = payload.get("motor") if isinstance(payload, dict) else None
@@ -1791,7 +1802,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"Unknown motor id {motor_id}")
         client = get_motor_client()
         if client.available():
-            payload = client.status(motor_id)
+            payload = motor_client_call("STATUS", lambda: client.status(motor_id))
             bindings = get_motor_bindings().get(int(motor_id))
             payload["bindings"] = bindings
             return payload
@@ -1815,13 +1826,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         client = EspMotorClient(cfg2)
         mode = (body.mode or "").strip().lower()
         if mode == "relative_steps":
-            result = client.move_relative_steps(motor_id, int(round(body.value)))
+            result = motor_client_call(
+                "MOVE_REL_STEPS",
+                lambda: client.move_relative_steps(motor_id, int(round(body.value))),
+            )
             return motor_action_response(client, motor_id, "MOVE_REL_STEPS", result)
         if mode == "relative_mm":
-            result = client.move_relative_mm(motor_id, float(body.value))
+            result = motor_client_call("MOVE_REL_MM", lambda: client.move_relative_mm(motor_id, float(body.value)))
             return motor_action_response(client, motor_id, "MOVE_REL_MM", result)
         if mode == "absolute_mm":
-            result = client.move_absolute_mm(motor_id, float(body.value))
+            result = motor_client_call("MOVE_ABS_MM", lambda: client.move_absolute_mm(motor_id, float(body.value)))
             return motor_action_response(client, motor_id, "MOVE_ABS_MM", result)
         raise HTTPException(status_code=400, detail="Unsupported motor move mode")
 
@@ -1837,9 +1851,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.set_current_position_mm(motor_id, float(body.value))
+        result = motor_client_call(
+            "SET_POSITION_MM",
+            lambda: client.set_current_position_mm(motor_id, float(body.value)),
+        )
         require_motor_ack(result, "SET_POSITION_MM")
-        save_result = client.save(motor_id)
+        save_result = motor_client_call("SAVE", lambda: client.save(motor_id))
         require_motor_ack(save_result, "SAVE")
         combined = {
             "ok": True,
@@ -1860,7 +1877,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         payload = body.model_dump(exclude_none=True)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.set_config(motor_id, payload)
+        result = motor_client_call("SET_CONFIG", lambda: client.set_config(motor_id, payload))
         return motor_action_response(client, motor_id, "SET_CONFIG", result)
 
     @app.post("/api/motors/{motor_id}/save")
@@ -1874,7 +1891,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.save(motor_id)
+        result = motor_client_call("SAVE", lambda: client.save(motor_id))
         return motor_action_response(client, motor_id, "SAVE", result)
 
     @app.post("/api/motors/{motor_id}/zero")
@@ -1888,7 +1905,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.zero(motor_id)
+        result = motor_client_call("ZERO", lambda: client.zero(motor_id))
         return motor_action_response(client, motor_id, "ZERO", result)
 
     @app.post("/api/motors/{motor_id}/min")
@@ -1902,7 +1919,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.set_min(motor_id)
+        result = motor_client_call("SET_MIN", lambda: client.set_min(motor_id))
         return motor_action_response(client, motor_id, "SET_MIN", result)
 
     @app.post("/api/motors/{motor_id}/max")
@@ -1916,7 +1933,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.set_max(motor_id)
+        result = motor_client_call("SET_MAX", lambda: client.set_max(motor_id))
         return motor_action_response(client, motor_id, "SET_MAX", result)
 
     @app.post("/api/motors/{motor_id}/reset-alarm")
@@ -1930,7 +1947,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = client.reset_alarm(motor_id)
+        result = motor_client_call("RESET_ALARM", lambda: client.reset_alarm(motor_id))
         return motor_action_response(client, motor_id, "RESET_ALARM", result)
 
     @app.post("/api/motors/{motor_id}/refresh")
@@ -1943,7 +1960,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         require_live_motor_or_raise(motor_id, cfg2)
-        return refresh_motor_snapshot(EspMotorClient(cfg2), motor_id)
+        client = EspMotorClient(cfg2)
+        return motor_client_call("REFRESH", lambda: refresh_motor_snapshot(client, motor_id))
 
     @app.post("/api/motors/{motor_id}/simulation")
     def api_motor_simulation(
