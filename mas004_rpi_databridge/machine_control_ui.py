@@ -231,8 +231,11 @@ function renderMachine(machine){{
   const info = machine.info || {{}};
   const safety = info.safety || {{}};
   const lamp = info.status_lamp || {{}};
-  document.getElementById("health_pill").className = machine.purge_active ? "pill bad" : (machine.warning_active ? "pill warn" : "pill ok");
-  document.getElementById("health_pill").textContent = machine.purge_active ? "Stoerung/Purge" : (machine.warning_active ? "Warnung" : "bereit");
+  const safetyLatched = !!safety.latched || Number(machine.current_state || 0) === 21;
+  document.getElementById("health_pill").className = (machine.purge_active || safetyLatched) ? "pill bad" : (machine.warning_active ? "pill warn" : "pill ok");
+  document.getElementById("health_pill").textContent = machine.purge_active
+    ? "Purge"
+    : (safetyLatched ? "Safety/Reset" : (machine.warning_active ? "Warnung" : "bereit"));
   kv("state_kv", [
     ["Ist", `<span class="pill">${{esc(machine.current_state)}} - ${{esc(machine.current_state_label)}}</span>`],
     ["Soll", `<span class="pill">${{esc(machine.requested_state)}} - ${{esc(machine.requested_state_label)}}</span>`],

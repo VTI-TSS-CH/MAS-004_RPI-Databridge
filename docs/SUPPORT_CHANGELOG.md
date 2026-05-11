@@ -1,5 +1,9 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Machine Control Purge/Safety Anzeige getrennt)
+- Machine Control unterscheidet die rote Kopfstatus-Anzeige jetzt zwischen echtem `Purge` (`MAS0028`/`purge_active`) und `Safety/Reset` (Safety-Latch oder Maschinenstatus `21`).
+- Hintergrund Produktionsbefund: `MAS0028=0` und `critical_reasons=[]`, aber ein fehlgeschlagener Motor-Ready-Reset hielt `Safety-Latch=true`. Das ist kein aktiver Purge, sondern ein noch nicht abgeschlossener Reset-/Motion-Recovery-Zustand.
+
 ## 2026-05-11 (Reset setzt Motoren wieder Ready)
 - Safety-/Purge-Reset fuehrt fuer die neun ESP32-PLC Oriental-Achsen jetzt nach der ESP-Resetsequenz immer `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, pro Achse `RESET_ALARM` und pro Achse `RECOVER_ETO` aus.
 - Die finale Reset-Entscheidung basiert nicht mehr auf einem einzelnen transienten Recover-ACK, sondern auf einer mehrfachen `MOTOR <id> REFRESH`-Verifikation: Link OK, Drive ready und kein Alarm.
