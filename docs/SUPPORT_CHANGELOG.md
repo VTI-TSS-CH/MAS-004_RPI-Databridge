@@ -904,6 +904,15 @@
 - Sending a format uses the same Databridge Router path as Microtom/Testtool input instead of a separate shortcut, so existing parameter permissions, mappings, ACK/NAK behavior and downstream device fanout stay authoritative.
 - Read-only/status values may be saved in a profile snapshot for visibility, but they are skipped when sending the profile to the machine.
 
+## 2026-05-11 (Master Parameter Defaults From Production Motors)
+- Imported the current edited master workbook as the active production parameter baseline.
+- Synchronized the production motor commissioning values for Oriental motors `1..9` back into the repo master workbook where the workbook has a direct motor-related parameter:
+  - `MAP0056..MAP0064` setpoint/default rows now use the production motor target defaults and configured software limits.
+  - `MAS0011..MAS0017`, `MAS0031`, `MAS0032` actual-position rows now mirror the same commissioned ranges/defaults.
+  - `MAE0004..MAE0010`, `MAE0046`, `MAE0047` remain default `0` with range `0..1`; current latched faults are runtime state and are not promoted to workbook defaults.
+- Motor `3` remains a transport axis with neutral default `0`; its live distance counter is intentionally not stored as a workbook default.
+- Production Raspi parameter import result: `758` rows updated.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture
