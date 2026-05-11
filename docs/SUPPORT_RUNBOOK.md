@@ -414,6 +414,7 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `I0.8=1` is Lichtgitter; the ESP firmware must release Wickler run-levels and stop AZD-CD motors `1`, `2`, `3` before the delayed ETO relay removes torque.
   - Raspi runtime should latch `MAS0001=21` and `MAS0028=1` on either input.
   - Reset may be started with `MAS0002=2` or the Raspi reset button `I0.7`.
+  - In Machine Control the physical/virtual `Start/Pause` channel is shown as `Reset` while Safety/Purge is active. After the reset clears the Safety/Purge context, the same channel returns to normal `Start`/`Pause` behavior.
   - Expected reset sequence:
     - Raspi sets `MAS0001=8`
     - Raspi pulses ESP `Q0.2`: `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
@@ -423,6 +424,10 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - Raspi verifies all ESP motors `1..9` with live `ready=true`, `alarm=false`
     - Raspi verifies both Wicklers with live `drive.ready=true`, `drive.alarm=false`
     - Raspi clears resettable Safety/Purge errors and sets `MAS0001=9`
+  - `MAE0008` and `MAE0009` are conditional resettable latches:
+    - `MAE0008` is cleared only when ESP `I0.4` is LOW after reset.
+    - `MAE0009` is cleared only when ESP `I0.11` is LOW after reset.
+    - If either input remains active, the related MAE remains active and `MAS0028` is reasserted.
   - If any AZD-CD still reports `HWTO/STO active` or `ready=false`, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop.
   - Button LEDs:
     - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second

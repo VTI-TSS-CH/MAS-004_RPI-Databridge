@@ -57,6 +57,12 @@ RESETTABLE_SAFETY_ERROR_KEYS = {
     "MAE0030",  # Abwickler Taenzerarm zu tief
     "MAE0034",  # Aufwickler Taenzerarm zu tief
 }
+CONDITIONAL_RESETTABLE_SAFETY_ERRORS = {
+    # These are latched machine errors. Clear them only if the matching live
+    # inputs are quiet after the reset, otherwise the purge must stay active.
+    "MAE0008": ("esp32_plc58", "I0.4"),
+    "MAE0009": ("esp32_plc58", "I0.11"),
+}
 SAFETY_RESET_BUTTON = "start_pause"
 SAFETY_PHASE_LATCHED = "latched"
 SAFETY_PHASE_RESETTING = "resetting"
@@ -239,9 +245,22 @@ class MachineRuntime:
             }
             if reset_result.get("ok"):
                 safety_latched = False
-                forced_state = 9
-                forced_source = "safety_reset_ready"
-                self._clear_resettable_safety_errors()
+                io_map = self._io_values()
+                clear_result = self._clear_resettable_safety_errors(io_map=io_map)
+                param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+                critical_active, critical_reasons = self._critical_state(io_map, param_map)
+                reset_result["cleared_errors"] = clear_result.get("cleared", [])
+                reset_result["kept_errors"] = clear_result.get("kept", [])
+                if critical_active:
+                    safety_latched = True
+                    safety_info["latched"] = True
+                    safety_info["phase"] = SAFETY_PHASE_LATCHED
+                    safety_info["post_reset_critical_reasons"] = list(critical_reasons)
+                    forced_state = 21
+                    forced_source = "safety_reset_critical_active"
+                else:
+                    forced_state = 9
+                    forced_source = "safety_reset_ready"
             else:
                 safety_latched = True
                 forced_state = 21
@@ -823,12 +842,23 @@ class MachineRuntime:
         result["finished_ts"] = now_ts()
         return result
 
-    def _clear_resettable_safety_errors(self):
+    def _clear_resettable_safety_errors(
+        self, *, io_map: dict[tuple[str, str], str] | None = None
+    ) -> dict[str, list[str]]:
         cleared = ["MAS0028", *sorted(RESETTABLE_SAFETY_ERROR_KEYS)]
+        kept: list[str] = []
+        for pkey, (device_code, pin_label) in sorted(CONDITIONAL_RESETTABLE_SAFETY_ERRORS.items()):
+            if io_map is not None and self._bool_io(io_map, device_code, pin_label, default=False):
+                kept.append(pkey)
+                continue
+            cleared.append(pkey)
         for pkey in cleared:
             self.params.apply_device_value(pkey, "0", promote_default=True)
             self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
         self.logs.log("machine", "info", "resettable safety errors cleared: " + ",".join(cleared))
+        if kept:
+            self.logs.log("machine", "warning", "resettable safety errors kept active: " + ",".join(kept))
+        return {"cleared": cleared, "kept": kept}
 
     def _pulse_esp_reset_output(self):
         io_runtime = IoRuntime(self.cfg, self.io_store)

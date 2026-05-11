@@ -358,11 +358,13 @@
   - Lichtgitter additionally commands AZD-CD motors `1`, `2`, and `3` to stop before the external delayed ETO relay removes torque.
 - Reset is a coordinated Raspi-led sequence:
   - requested by Microtom/Raspi value `MAS0002=2` or by the Raspi reset button on `raspi_plc21 I0.7`
+  - the same physical/virtual Start/Pause channel is displayed as `Reset` while Safety/Purge is active, and returns to normal Start/Pause behavior once the reset context is gone
   - Raspi pulses `ESP Q0.2` as `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
   - ESP safety inputs must be LOW before motion devices are recovered
   - ESP motors `1..9` receive ETO recovery / alarm reset
   - both Smart Wicklers receive `stop`, `resetAlarm`, `etoRecovery`, and `ready`
   - `MAS0001=8` while recovery is running, then `MAS0001=9` when reset is complete
+- The latched Etikettenfuehrung errors `MAE0008` and `MAE0009` are cleared by the reset only if the corresponding ESP inputs `I0.4` and `I0.11` are LOW after the reset verification. If an input is still active, the error remains active and the purge remains latched.
 - Raspi button LED override during safety:
   - `MAS0001=21`: `Q0.0` and `Q0.2` alternate every second
   - `MAS0001=8`: `Q0.2` blinks blue

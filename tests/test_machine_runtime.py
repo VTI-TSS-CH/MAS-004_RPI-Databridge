@@ -127,6 +127,8 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0040", "MAP", "0040", "5", "W", "R", "uint8"),
             ("MAP0065", "MAP", "0065", "1111111", "W", "R", "uint8"),
             ("MAP0066", "MAP", "0066", "8000", "W", "R", "uint16"),
+            ("MAE0008", "MAE", "0008", "0", "R", "W", "bool"),
+            ("MAE0009", "MAE", "0009", "0", "R", "W", "bool"),
             ("MAE0025", "MAE", "0025", "0", "R", "W", "bool"),
             ("MAE0026", "MAE", "0026", "0", "R", "W", "bool"),
             ("MAS0001", "MAS", "0001", "1", "R", "W", "uint8"),
@@ -151,6 +153,7 @@ class MachineRuntimeTests(unittest.TestCase):
             _insert_io_point(self.db, "raspi_plc21", "Raspberry PLC 21", pin, "output", "0")
         for pin, value in (("I0.4", "0"), ("I0.7", "0"), ("I0.8", "0"), ("I0.11", "0")):
             _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", pin, "input", value)
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.2", "output", "0")
         for pin in ("DO4", "DO5", "DO6"):
             _insert_io_point(self.db, "moxa_e1211_2", "Moxa ioLogik E1211 #2", pin, "output", "0")
 
@@ -303,6 +306,56 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertFalse(snapshot["purge_active"])
         self.assertTrue(recent_external_purge_clear(self.db))
         self.assertEqual("microtom", snapshot["info"]["purge"]["external_clear_source"])
+
+    def test_reset_clears_latched_etikettenfuehrung_errors_when_inputs_are_clear(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        self.params.apply_device_value("MAE0008", "1", promote_default=True)
+        self.params.apply_device_value("MAE0009", "1", promote_default=True)
+
+        result = runtime.press_virtual_button("start_pause")
+
+        snapshot = result["snapshot"]
+        self.assertEqual(9, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        self.assertEqual("0", self.params.get_effective_value("MAE0008"))
+        self.assertEqual("0", self.params.get_effective_value("MAE0009"))
+
+    def test_reset_keeps_etikettenfuehrung_error_when_input_is_still_active(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_4", "1", "simulation", "test")
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        self.params.apply_device_value("MAE0008", "1", promote_default=True)
+
+        result = runtime.press_virtual_button("start_pause")
+
+        snapshot = result["snapshot"]
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertTrue(snapshot["purge_active"])
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+        self.assertEqual("1", self.params.get_effective_value("MAE0008"))
+        self.assertIn("bahnriss_einlauf", snapshot["info"]["critical_reasons"])
 
 
 if __name__ == "__main__":

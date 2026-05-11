@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Safety Reset / MAE0008-MAE0009 Clear)
+- Machine Control zeigt den kombinierten Start/Pause-Taster im Safety-/Purge-Kontext jetzt eindeutig als `Reset`; nach erfolgreichem Reset faellt er wieder auf `Start` bzw. `Pause` zurueck.
+- Der Resetpfad bewertet nach erfolgreicher ESP-Resetsequenz und Motor-/Wickler-Ready-Verifikation den aktuellen IO-/Fehlerzustand neu.
+- Die gelatchten Etikettenfuehrungsfehler `MAE0008` und `MAE0009` werden nur dann automatisch auf `0` gesetzt, wenn die zugeordneten ESP-Eingaenge `I0.4` bzw. `I0.11` nach dem Reset ruhig sind.
+- Bleibt einer dieser Eingaenge aktiv, bleibt auch der Fehler aktiv und die Maschine bleibt korrekt in `MAS0001=21` / `MAS0028=1`.
+- Regressionstests fuer beide Resetfaelle ergaenzt.
+
 ## 2026-05-11 (Machine Control Lesbarkeit Purge-Gruende)
 - Die Machine-Control-Seite stellt `Kritische Gruende` jetzt als umbrechende, lesbare Chips mit Klartext und Code dar, statt die Liste in einer einzelnen Monospace-Zeile abzuschneiden.
 - `MAP0065` wird mit erzwungenem Word-Wrap angezeigt, damit lange JSON-Freigabemasken die Karte nicht mehr ueberlaufen lassen.

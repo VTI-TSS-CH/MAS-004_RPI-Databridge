@@ -192,7 +192,7 @@ function actionForButton(button, state, resetContext){{
 }}
 function buttonLabel(button, state, resetContext){{
   if(button === "start_pause") {{
-    if(resetContext) return "Reset / Stop";
+    if(resetContext) return "Reset";
     return Number(state) === 5 ? "Pause" : "Start";
   }}
   return buttons.find(x=>x[0]===button)?.[1] || button;
