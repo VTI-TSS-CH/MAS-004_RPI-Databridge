@@ -327,7 +327,14 @@ class MachineRuntime:
         # On software start/deploy while MAS0002 is already 3, do not start a
         # motion workflow implicitly. The next fresh Einrichten command still
         # has a newer param timestamp and will run the calibration sequence.
-        if setup_command_active and setup_seen_ts == 0.0 and setup_is_current_state:
+        stale_setup_command = (
+            setup_command_active
+            and setup_seen_ts == 0.0
+            and setup_is_current_state
+            and setup_command_ts > 0.0
+            and (ts - setup_command_ts) > 5.0
+        )
+        if stale_setup_command:
             setup_seen_ts = setup_command_ts
             setup_info["mas0002_setup_seen_ts"] = setup_seen_ts
         setup_rising = setup_command_active and setup_command_ts > setup_seen_ts

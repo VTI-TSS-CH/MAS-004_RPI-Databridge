@@ -207,6 +207,30 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(5, result["target_state"])
         self.assertEqual("1", self.params.get_effective_value("MAS0002"))
 
+    def test_virtual_setup_runs_wickler_workflow_even_when_already_in_setup(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=3,
+            requested_state=3,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+
+        with patch("mas004_rpi_databridge.machine_runtime.TemporaryProcessCommandController") as controller_cls:
+            controller = controller_cls.return_value
+            controller.execute.return_value = "ACK_MAC0001=1"
+            result = runtime.press_virtual_button("setup")
+            controller.execute.assert_called_once_with("1")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("setup", result["button"])
+        self.assertEqual(3, result["command"])
+        self.assertEqual(True, result["snapshot"]["info"]["setup"]["last_result"]["ok"])
+
     def test_virtual_start_pause_resets_from_purge_context(self):
         runtime = self.build_runtime()
         runtime._write_state(
