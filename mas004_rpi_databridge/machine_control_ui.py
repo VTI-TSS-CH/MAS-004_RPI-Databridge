@@ -33,6 +33,12 @@ def build_machine_control_ui_html(nav_html: str) -> str:
     .control.reset.enabled{{background:var(--soft-red);border-color:#efaaa4;color:#8a1c15}}
     .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}
     .kv{{display:grid;grid-template-columns:150px 1fr;gap:7px 12px;align-items:start}}
+    .kv>div{{min-width:0}}
+    .code-wrap{{white-space:normal;overflow-wrap:anywhere;word-break:break-word}}
+    .reason-list{{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start}}
+    .reason-chip{{display:inline-flex;flex-direction:column;gap:2px;max-width:100%;border:1px solid #efaaa4;border-radius:10px;background:var(--soft-red);color:#711912;padding:6px 8px;font-size:12px;font-weight:700;line-height:1.15}}
+    .reason-chip .code{{font-family:Consolas,Menlo,monospace;font-size:11px;color:#9b1c14}}
+    .reason-empty{{color:var(--muted)}}
     .audit-shell{{display:grid;grid-template-columns:330px 1fr;gap:14px;margin-top:14px}}
     .audit-view{{height:64vh;min-height:520px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fbfdff}}
     .entry{{display:grid;grid-template-columns:168px 112px 1fr;gap:10px;padding:10px 12px;border-bottom:1px solid #e7edf6;align-items:start}}
@@ -150,6 +156,32 @@ function kv(id, pairs){{
   document.getElementById(id).innerHTML = pairs.map(([k,v])=>`<div class="muted">${{esc(k)}}</div><div>${{v}}</div>`).join("");
 }}
 function flag(v){{return v ? '<span class="pill bad">aktiv</span>' : '<span class="pill ok">ok</span>';}}
+const reasonLabels = {{
+  "notaus": "Not-Aus aktiv",
+  "lichtgitter": "Lichtgitter unterbrochen",
+  "usv_not_ok": "USV nicht OK",
+  "bahnriss_einlauf": "Bahnriss Einlauf",
+  "bahnriss_auswurf": "Bahnriss Auswurf",
+  "MAE0008": "Etikettenfuehrung Einlauf gestoert",
+  "MAE0009": "Etikettenfuehrung Auslauf gestoert",
+  "MAE0025": "Label zu kurz",
+  "MAE0026": "Label zu lang",
+  "MAE0028": "Abwicklung Taenzerarm blockiert",
+  "MAE0029": "Abwicklung Taenzerarm zu hoch",
+  "MAE0030": "Abwicklung Taenzerarm zu tief",
+  "MAE0032": "Aufwicklung Taenzerarm blockiert",
+  "MAE0033": "Aufwicklung Taenzerarm zu hoch",
+  "MAE0034": "Aufwicklung Taenzerarm zu tief"
+}};
+function reasonHtml(reasons){{
+  const items = Array.isArray(reasons) ? reasons : [];
+  if(!items.length) return '<span class="reason-empty">-</span>';
+  return `<div class="reason-list">${{items.map(r => {{
+    const code = String(r || "");
+    const label = reasonLabels[code] || code;
+    return `<span class="reason-chip"><span>${{esc(label)}}</span><span class="code">${{esc(code)}}</span></span>`;
+  }}).join("")}}</div>`;
+}}
 function formatTs(ts){{try{{return new Date(Number(ts||0)*1000).toLocaleString();}}catch(e){{return "-";}}}}
 function actionForButton(button, state, resetContext){{
   if(button === "start_pause") {{
@@ -212,8 +244,8 @@ function renderMachine(machine){{
     ["Warnung", flag(!!machine.warning_active)],
     ["Purge", flag(!!machine.purge_active)],
     ["Safety-Latch", flag(!!safety.latched)],
-    ["Kritische Gruende", `<span class="mono">${{esc((info.critical_reasons || []).join(", ") || "-")}}</span>`],
-    ["MAP0065", `<span class="mono">${{esc(JSON.stringify(info.button_mask || {{}}))}}</span>`]
+    ["Kritische Gruende", reasonHtml(info.critical_reasons || [])],
+    ["MAP0065", `<span class="mono code-wrap">${{esc(JSON.stringify(info.button_mask || {{}}))}}</span>`]
   ]);
   const rows = (machine.events || []).map(it => `<div class="event-row"><div class="small muted">${{esc(formatTs(it.ts))}} - ${{esc(it.event_type || "")}}</div><div>${{esc(it.message || "")}}</div></div>`);
   document.getElementById("events").innerHTML = rows.join("") || '<div class="event-row muted">Keine Ereignisse.</div>';

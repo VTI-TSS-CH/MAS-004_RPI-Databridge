@@ -1,5 +1,10 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Machine Control Lesbarkeit Purge-Gruende)
+- Die Machine-Control-Seite stellt `Kritische Gruende` jetzt als umbrechende, lesbare Chips mit Klartext und Code dar, statt die Liste in einer einzelnen Monospace-Zeile abzuschneiden.
+- `MAP0065` wird mit erzwungenem Word-Wrap angezeigt, damit lange JSON-Freigabemasken die Karte nicht mehr ueberlaufen lassen.
+- Produktionsdiagnose: Der aktuell aktive Purge kommt nicht von Not-Aus oder Lichtgitter, sondern von aktiven Bahnriss-Eingaengen `ESP I0.4` und `ESP I0.11` sowie gespeicherten Fehlerbits `MAE0008=1` und `MAE0009=1`.
+
 ## 2026-05-11 (ESP/Motor-Kommunikation gehaertet)
 - Ursache fuer die wiederkehrenden Motor-Kommunikationsaussetzer eingegrenzt: Der ESP32-PLC/W5500-Endpunkt ist ein kurzlebiger Single-Client-Socket, waehrend der Raspi-Client den Socket bisher bis zu 40 Requests halb-persistent hielt.
 - `EspPlcClient` schliesst den ESP-Kommandosocket jetzt nach jeder Antwort bewusst sauber. Damit passt der Raspi wieder zum Firmware-Vertrag und vermeidet stale/halb-offene TCP-Fenster bei Modbus-RTU-Refreshes und ESP-Push-Bursts.
