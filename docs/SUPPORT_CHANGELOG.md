@@ -5,6 +5,7 @@
 - Der Resetpfad bewertet nach erfolgreicher ESP-Resetsequenz und Motor-/Wickler-Ready-Verifikation den aktuellen IO-/Fehlerzustand neu.
 - Die gelatchten Etikettenfuehrungsfehler `MAE0008` und `MAE0009` werden nur dann automatisch auf `0` gesetzt, wenn die zugeordneten ESP-Eingaenge `I0.4` bzw. `I0.11` nach dem Reset ruhig sind.
 - Bleibt einer dieser Eingaenge aktiv, bleibt auch der Fehler aktiv und die Maschine bleibt korrekt in `MAS0001=21` / `MAS0028=1`.
+- Produktionsdiagnose nach Deploy: `ESP I0.4`, `I0.7`, `I0.8` und `I0.11` waren live LOW; die alten Latches `MAE0008=1` und `MAE0009=1` waren noch aktiv und werden erst durch einen neuen Resetlauf bewertet/geloescht.
 - Regressionstests fuer beide Resetfaelle ergaenzt.
 
 ## 2026-05-11 (Machine Control Lesbarkeit Purge-Gruende)
