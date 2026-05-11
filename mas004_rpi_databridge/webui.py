@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 
@@ -61,6 +62,8 @@ MACHINE_SETUP_USER = "Admin"
 MACHINE_SETUP_PASSWORD = "VideojetMAS004!"
 MACHINE_SETUP_COOKIE = "mas004_machine_setup"
 MACHINE_SETUP_SESSION_MAX_AGE_S = 12 * 60 * 60
+MOTOR_REFRESH_CACHE_TTL_S = 0.75
+MOTOR_REFRESH_BUSY_WAIT_S = 0.6
 
 
 def resolve_videojet_logo_path() -> Optional[str]:
@@ -413,12 +416,42 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     catalog_ids = [int(item["id"]) for item in motor_catalog()]
     motor_state_store = MotorStateStore(cfg)
     motor_bindings_cache: dict[str, Any] = {"ts": 0.0, "value": {}, "loaded": False}
+    motor_refresh_guard = threading.Lock()
+    motor_refresh_locks: dict[int, threading.Lock] = {}
+    motor_refresh_cache: dict[int, tuple[float, dict[str, Any]]] = {}
 
     def get_motor_client() -> EspMotorClient:
         return EspMotorClient(Settings.load(cfg_path))
 
     def get_motor_state_store() -> MotorStateStore:
         return motor_state_store
+
+    def get_motor_refresh_lock(motor_id: int) -> threading.Lock:
+        mid = int(motor_id)
+        with motor_refresh_guard:
+            lock = motor_refresh_locks.get(mid)
+            if lock is None:
+                lock = threading.Lock()
+                motor_refresh_locks[mid] = lock
+            return lock
+
+    def get_cached_motor_refresh(motor_id: int, max_age_s: float) -> Optional[dict[str, Any]]:
+        now = time.monotonic()
+        with motor_refresh_guard:
+            cached = motor_refresh_cache.get(int(motor_id))
+            if not cached:
+                return None
+            ts, payload = cached
+            if (now - ts) > max_age_s:
+                return None
+            out = json.loads(json.dumps(payload))
+        if isinstance(out, dict):
+            out["cached"] = True
+        return out
+
+    def remember_motor_refresh(motor_id: int, payload: dict[str, Any]) -> None:
+        with motor_refresh_guard:
+            motor_refresh_cache[int(motor_id)] = (time.monotonic(), json.loads(json.dumps(payload)))
 
     def get_commissioning_store(cfg2: Optional[Settings] = None) -> CommissioningStore:
         return CommissioningStore(db, cfg2 or Settings.load(cfg_path), cfg_path)
@@ -571,12 +604,51 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 detail=f"ESP motor communication failed during {action}: {exc}",
             ) from exc
 
-    def refresh_motor_snapshot(client: EspMotorClient, motor_id: int) -> dict[str, Any]:
-        payload = client.refresh(motor_id)
-        raw_motor = payload.get("motor") if isinstance(payload, dict) else None
-        if isinstance(raw_motor, dict):
-            get_motor_state_store().remember_motors([raw_motor])
-        return payload
+    def refresh_motor_snapshot(
+        client: EspMotorClient,
+        motor_id: int,
+        *,
+        allow_recent_cache: bool = True,
+    ) -> dict[str, Any]:
+        if allow_recent_cache:
+            cached = get_cached_motor_refresh(motor_id, MOTOR_REFRESH_CACHE_TTL_S)
+            if cached is not None:
+                return cached
+
+        lock = get_motor_refresh_lock(motor_id)
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            # Another browser tab/action is already doing the expensive Modbus
+            # read for this motor. Wait briefly for that result instead of
+            # queueing a second REFRESH against the single ESP TCP endpoint.
+            acquired = lock.acquire(timeout=MOTOR_REFRESH_BUSY_WAIT_S)
+            if not acquired:
+                cached = get_cached_motor_refresh(motor_id, 10.0)
+                if cached is not None:
+                    cached["refresh_in_progress"] = True
+                    return cached
+                raise RuntimeError(f"Motor {int(motor_id)} refresh already running")
+            if allow_recent_cache:
+                cached = get_cached_motor_refresh(motor_id, MOTOR_REFRESH_CACHE_TTL_S)
+                if cached is not None:
+                    lock.release()
+                    return cached
+
+        try:
+            if allow_recent_cache:
+                cached = get_cached_motor_refresh(motor_id, MOTOR_REFRESH_CACHE_TTL_S)
+                if cached is not None:
+                    return cached
+            payload = client.refresh(motor_id)
+            raw_motor = payload.get("motor") if isinstance(payload, dict) else None
+            if isinstance(raw_motor, dict):
+                get_motor_state_store().remember_motors([raw_motor])
+            if isinstance(payload, dict):
+                remember_motor_refresh(motor_id, payload)
+            return payload
+        finally:
+            if acquired:
+                lock.release()
 
     def motor_action_response(
         client: EspMotorClient,
@@ -594,7 +666,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         }
         if refresh:
             try:
-                refresh_payload = refresh_motor_snapshot(client, motor_id)
+                refresh_payload = refresh_motor_snapshot(client, motor_id, allow_recent_cache=False)
                 response["refresh"] = refresh_payload
                 raw_motor = refresh_payload.get("motor") if isinstance(refresh_payload, dict) else None
                 if isinstance(raw_motor, dict):

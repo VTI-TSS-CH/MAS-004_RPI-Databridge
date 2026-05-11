@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (ESP/Motor-Kommunikation gehaertet)
+- Ursache fuer die wiederkehrenden Motor-Kommunikationsaussetzer eingegrenzt: Der ESP32-PLC/W5500-Endpunkt ist ein kurzlebiger Single-Client-Socket, waehrend der Raspi-Client den Socket bisher bis zu 40 Requests halb-persistent hielt.
+- `EspPlcClient` schliesst den ESP-Kommandosocket jetzt nach jeder Antwort bewusst sauber. Damit passt der Raspi wieder zum Firmware-Vertrag und vermeidet stale/halb-offene TCP-Fenster bei Modbus-RTU-Refreshes und ESP-Push-Bursts.
+- Der per-Motor-Refresh auf `/ui/machine-setup/motors` ist jetzt serverseitig entprellt: parallele oder sehr schnelle Refreshes desselben Motors werden aus einem kurzen Cache bedient, statt mehrere teure `MOTOR <id> REFRESH`-Modbus-Lesezyklen auf den ESP zu stapeln.
+- Diagnosebefund am Produktionssystem: ICMP zu `192.168.2.101` war stabil, aber `eth1` hatte TX-Errors und direkte Raw-Socket-Tests zeigten sporadisch Timeout/Connection-Refused-Fenster. Produktionszugriffe muessen weiterhin ueber den Raspi-Client laufen, nicht ueber parallele Raw-Socket-Stresstests.
+- Regressionstest ergaenzt, der sicherstellt, dass `EspPlcClient` kurzlebige Verbindungen verwendet.
+
 ## 2026-05-11 (Motor Setup Fehlerbehandlung)
 - Fixed recurring `500 Internal Server Error` responses on `/ui/machine-setup/motors` when the ESP32-PLC motor endpoint temporarily refused a connection during `MOTOR <id> REFRESH` or another motor command.
 - Motor setup endpoints now convert ESP/TCP communication failures into structured `502 Bad Gateway` API responses with a readable detail message instead of leaking an uncaught Python traceback.

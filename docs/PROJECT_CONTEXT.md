@@ -272,7 +272,7 @@
 - The Raspi is the only production orchestrator for this TCP path.
 - Use `EspPlcClient` for all runtime traffic:
   - one per-endpoint lock serializes access
-  - semi-persistent sockets are recycled after bounded request batches
+  - sockets are intentionally short-lived and closed after every response, matching the ESP32/W5500 single-client firmware contract
   - a small inter-command pace avoids W5500 burst overload
   - transient socket windows are retried inside the same command call
 - The ESP firmware is hardened for this contract:

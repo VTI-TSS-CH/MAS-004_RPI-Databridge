@@ -111,13 +111,13 @@ class EspPlcClient:
                     reply = _recv_line(state.sock, limit=read_limit).strip()
                     if not reply:
                         raise RuntimeError("ESP endpoint empty reply")
-                    state.exchange_count += 1
-                    if state.exchange_count >= 40:
-                        state.close_socket()
-                        state.next_allowed_at = time.monotonic() + 0.15
                     state.fail_count = 0
-                    if state.exchange_count != 0:
-                        state.next_allowed_at = time.monotonic() + 0.005
+                    # The ESP32/W5500 command endpoint is a short-lived,
+                    # single-client socket. Closing after every response keeps
+                    # Raspi and firmware on the same contract and avoids stale
+                    # half-open sockets during Modbus/ESP-push bursts.
+                    state.close_socket()
+                    state.next_allowed_at = time.monotonic() + 0.01
                     return reply
                 except Exception as exc:
                     last_error = exc
