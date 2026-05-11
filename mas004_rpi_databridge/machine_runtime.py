@@ -1020,7 +1020,7 @@ class MachineRuntime:
                 role_detail["steps"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
                 details["wicklers"].append(role_detail)
                 continue
-            for mode in ("stop", "resetAlarm", "etoRecovery", "ready"):
+            for mode in ("stop", "resetAlarm", "etoRecovery", "stop"):
                 try:
                     reply = client.post_mode(mode, timeout_s=8.0)
                     role_detail["steps"].append({"step": mode, "ok": bool(reply.get("ok", True)), "reply": reply})
@@ -1037,17 +1037,25 @@ class MachineRuntime:
                 telemetry = telemetry if isinstance(telemetry, dict) else {}
                 mode_label = str(telemetry.get("modeLabel") or "")
                 fault_reason = str(telemetry.get("faultReason") or "")
-                fault_clear = fault_reason.strip().lower() in ("", "-", "none", "keine", "ok")
-                mode_clear = mode_label.strip().lower() not in ("stoerung", "störung", "alarm", "fault")
+                normalized_fault = fault_reason.strip().lower()
+                safe_stop_fault = normalized_fault in (
+                    "",
+                    "-",
+                    "none",
+                    "keine",
+                    "ok",
+                    "wippe unten",
+                    "wippe oben",
+                    "externer wickler-stop aktiv",
+                )
                 verify = {
-                    "step": "verify_ready",
+                    "step": "verify_safe_stop",
                     "ok": bool(
                         state.get("ok")
                         and drive.get("online")
                         and drive.get("ready")
                         and not drive.get("alarm")
-                        and mode_clear
-                        and fault_clear
+                        and safe_stop_fault
                     ),
                     "online": bool(drive.get("online")),
                     "ready": bool(drive.get("ready")),
@@ -1060,7 +1068,7 @@ class MachineRuntime:
                 role_detail["steps"].append(verify)
                 if not verify["ok"]:
                     hard_failures.append(
-                        f"{role} not ready "
+                        f"{role} not in safe stop "
                         f"(online={verify['online']}, ready={verify['ready']}, alarm={verify['alarm']}, "
                         f"alarm_code={verify['alarm_code']}, mode={verify['mode']}, "
                         f"fault={verify['fault_reason']}, raw_output={verify['raw_output']})"

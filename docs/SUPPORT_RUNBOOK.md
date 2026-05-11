@@ -134,7 +134,8 @@
 - `MAC0001=1`: calibrate both Smart Wicklers, run the 1000-mm diameter measurement forward/back, and write the learned diameters to the Wicklers.
   - This command is accepted only in setup context: `MAS0002=3`, `MAS0001=2/3`, or requested state `2/3`.
   - During active Purge/Not-Stop it returns `MAC0001=NAK_PurgeActive`; outside setup it returns `MAC0001=NAK_SetupRequired`.
-  - Reset/Purge recovery must only recover drives (`stop/resetAlarm/etoRecovery/ready`) and must not start Wickler calibration or measuring motion.
+  - Reset/Purge recovery must only recover drives (`stop/resetAlarm/etoRecovery/stop`) and must not start Wickler calibration or measuring motion.
+  - Current production reset behavior is intentionally passive for Wicklers: `stop/resetAlarm/etoRecovery/stop`. A standing Wippe at the lower/upper end is accepted as safe stop, not as a reason to start regulation.
 - `MAC0001=2`: start indexed/takt test on the ESP32-PLC.
 - `MAC0001=3`: continuous forward feed through Motor 3.
 - `MAC0001=4`: continuous reverse feed through Motor 3.

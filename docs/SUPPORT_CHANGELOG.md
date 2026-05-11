@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Wickler-Reset bleibt bewegungsarm)
+- Sicherheits-/Purge-Reset sendet an Abwickler und Aufwickler nur noch `stop`, `resetAlarm`, `etoRecovery`, `stop`.
+- Der Reset setzt die Wickler damit hardwareseitig frei, startet aber keinen `ready`-Regelmodus mehr.
+- Die Reset-Pruefung akzeptiert eine unten/oben stehende Wippe als sicheren Stop-Zustand, solange AZD online, ready und alarmfrei ist.
+- Einmessen und 1000-mm-Messfahrt bleiben ausschliesslich Einrichtkontext (`Einrichten`/`MAS0002=3` bzw. `MAC0001=1` nur im Setup).
+
 ## 2026-05-11 (Wickler-Einmessen nur im Einrichtkontext)
 - `MAC0001=1` ist weiterhin ein temporaerer IBN-Helfer, startet Wickler-Einmessen plus 1000-mm-Messfahrt aber nicht mehr frei aus jedem Maschinenzustand.
 - Bei aktivem Purge/Not-Stop wird `MAC0001=1` mit `MAC0001=NAK_PurgeActive` abgewiesen.

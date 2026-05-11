@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.modules.setdefault("ping3", SimpleNamespace(ping=lambda *_args, **_kwargs: 1.0))
 
@@ -356,6 +357,44 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("1", self.params.get_effective_value("MAS0028"))
         self.assertEqual("1", self.params.get_effective_value("MAE0008"))
         self.assertIn("bahnriss_einlauf", snapshot["info"]["critical_reasons"])
+
+    def test_motion_reset_leaves_wicklers_in_safe_stop(self):
+        runtime = self.build_runtime()
+        calls: dict[str, list[str]] = {"unwinder": [], "rewinder": []}
+
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                pass
+
+            def available(self):
+                return False
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+
+            def available(self):
+                return True
+
+            def post_mode(self, mode, timeout_s=None):
+                calls[self.role].append(mode)
+                return {"ok": True}
+
+            def fetch_state(self):
+                return {
+                    "ok": True,
+                    "drive": {"online": True, "ready": True, "alarm": False, "alarmCode": 0, "rawOutput": 32},
+                    "telemetry": {"modeLabel": "Stop", "faultReason": "Wippe unten"},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", FakeEspMotorClient), patch(
+            "mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient
+        ):
+            result = runtime._reset_motion_devices()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(["stop", "resetAlarm", "etoRecovery", "stop"], calls["unwinder"])
+        self.assertEqual(["stop", "resetAlarm", "etoRecovery", "stop"], calls["rewinder"])
 
 
 if __name__ == "__main__":
