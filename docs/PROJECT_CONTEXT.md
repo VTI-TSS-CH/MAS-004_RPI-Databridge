@@ -69,6 +69,10 @@
   - ESP timeouts are separated from normal HTTP timeouts: connect, short read and longer command paths are tuned independently.
   - Writes are not blindly retried; only safe read-style commands may be retried once with a short backoff.
   - ESP-originated `MA*` readbacks on the push listener are answered locally from the Raspi parameter store to avoid reentrant calls back into the ESP while the ESP is waiting for a reply.
+- Safety-/Purge-Reset owns motion recovery:
+  - the Raspi first clears the ESP process latch via `PROCESS RESET`
+  - then it applies and triggers AZD ETO recovery on the ESP32-PLC motor bus and verifies motors `1..9`
+  - final readiness uses the ESP firmware's AZD monitor-aware status, especially monitor `0179` ready state, so missing READY R-OUT mapping alone does not block reset
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
   - `/ui/machine-setup/commissioning`

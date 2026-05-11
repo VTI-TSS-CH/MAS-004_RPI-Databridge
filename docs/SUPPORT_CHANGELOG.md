@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Reset setzt Motoren wieder Ready)
+- Safety-/Purge-Reset fuehrt fuer die neun ESP32-PLC Oriental-Achsen jetzt nach der ESP-Resetsequenz immer `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, pro Achse `RESET_ALARM` und pro Achse `RECOVER_ETO` aus.
+- Die finale Reset-Entscheidung basiert nicht mehr auf einem einzelnen transienten Recover-ACK, sondern auf einer mehrfachen `MOTOR <id> REFRESH`-Verifikation: Link OK, Drive ready und kein Alarm.
+- Die Verifikation wertet zusaetzlich die neuen AZD-Monitorfelder `0179`, `017B`, `017D` aus. Damit kann ein Drive als ready erkannt werden, auch wenn der physische R-OUT READY-Ausgang nicht auf dem bisher verwendeten Bit liegt.
+- Fehlerdetails im Reset enthalten nun `input_raw`, `output_raw`, `monitor0179`, `monitor017B`, `mps`, `mbc` und `hwto`, damit HWTO-/Brake-/Safety-Zustaende direkt diagnostizierbar sind.
+
 ## 2026-05-11 (Reset loescht Purge-Latch frueher)
 - Safety-/Purge-Reset loescht `MAS0028` und resettable Safety-Fehler jetzt direkt nach quieten Safety-Eingaengen und erfolgreichem ESP `PROCESS RESET`.
 - Eine nachfolgend fehlgeschlagene Motor-/Wickler-Recovery haelt damit keinen alten `MAS0028=1` Purge-Latch mehr fest, solange kein echter kritischer Grund mehr aktiv ist.

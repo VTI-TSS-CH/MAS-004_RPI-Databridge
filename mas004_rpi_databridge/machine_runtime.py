@@ -968,59 +968,96 @@ class MachineRuntime:
                 try:
                     reply = action()
                     details["esp_motors"].append({"step": label, **reply})
-                    if not reply.get("ok"):
-                        hard_failures.append(f"ESP motor {label}: {reply.get('reply')}")
                 except Exception as exc:
                     details["esp_motors"].append({"step": label, "ok": False, "error": str(exc)})
-                    hard_failures.append(f"ESP motor {label}: {exc}")
             for motor_id in range(1, 10):
                 try:
                     reply = esp.reset_alarm(motor_id)
                     details["esp_motors"].append({"step": "reset_alarm", "motor_id": motor_id, **reply})
-                    if not reply.get("ok"):
-                        hard_failures.append(f"Motor {motor_id} reset_alarm: {reply.get('reply')}")
                 except Exception as exc:
                     details["esp_motors"].append(
                         {"step": "reset_alarm", "motor_id": motor_id, "ok": False, "error": str(exc)}
                     )
-                    hard_failures.append(f"Motor {motor_id} reset_alarm: {exc}")
-            time.sleep(0.2)
-            for motor_id in range(1, 10):
                 try:
-                    status = esp.refresh(motor_id)
-                    motor = status.get("motor") if isinstance(status, dict) else {}
-                    state = motor.get("state") if isinstance(motor, dict) else {}
-                    state = state if isinstance(state, dict) else {}
-                    verify = {
-                        "step": "verify_ready",
-                        "motor_id": motor_id,
-                        "ok": bool(
-                            status.get("ok")
-                            and state.get("link_ok")
-                            and state.get("ready")
-                            and not state.get("alarm")
-                        ),
-                        "ready": bool(state.get("ready")),
-                        "link_ok": bool(state.get("link_ok")),
-                        "alarm": bool(state.get("alarm")),
-                        "alarm_code": state.get("alarm_code"),
-                        "input_raw_hex": state.get("input_raw_hex"),
-                        "output_raw_hex": state.get("output_raw_hex"),
-                    }
-                    details["esp_motors"].append(verify)
-                    if not verify["ok"]:
-                        hard_failures.append(
-                            "Motor "
-                            f"{motor_id} not ready "
-                            f"(link={verify['link_ok']}, ready={verify['ready']}, "
-                            f"alarm={verify['alarm']}, alarm_code={verify['alarm_code']}, "
-                            f"in={verify['input_raw_hex']}, out={verify['output_raw_hex']})"
-                        )
+                    reply = esp.recover_eto_motor(motor_id)
+                    details["esp_motors"].append({"step": "recover_eto", "motor_id": motor_id, **reply})
                 except Exception as exc:
                     details["esp_motors"].append(
-                        {"step": "verify_ready", "motor_id": motor_id, "ok": False, "error": str(exc)}
+                        {"step": "recover_eto", "motor_id": motor_id, "ok": False, "error": str(exc)}
                     )
-                    hard_failures.append(f"Motor {motor_id} verify_ready: {exc}")
+            time.sleep(0.4)
+            for motor_id in range(1, 10):
+                verify: dict[str, Any] | None = None
+                for attempt in range(1, 5):
+                    try:
+                        status = esp.refresh(motor_id)
+                        motor = status.get("motor") if isinstance(status, dict) else {}
+                        state = motor.get("state") if isinstance(motor, dict) else {}
+                        state = state if isinstance(state, dict) else {}
+                        verify = {
+                            "step": "verify_ready",
+                            "motor_id": motor_id,
+                            "attempt": attempt,
+                            "ok": bool(
+                                status.get("ok")
+                                and state.get("link_ok")
+                                and state.get("ready")
+                                and not state.get("alarm")
+                            ),
+                            "ready": bool(state.get("ready")),
+                            "link_ok": bool(state.get("link_ok")),
+                            "alarm": bool(state.get("alarm")),
+                            "alarm_code": state.get("alarm_code"),
+                            "input_raw_hex": state.get("input_raw_hex"),
+                            "output_raw_hex": state.get("output_raw_hex"),
+                            "monitor0179_hex": state.get("monitor0179_hex"),
+                            "monitor017b_hex": state.get("monitor017b_hex"),
+                            "monitor017d_hex": state.get("monitor017d_hex"),
+                            "mps": state.get("mps"),
+                            "mbc": state.get("mbc"),
+                            "hwto": state.get("hwto"),
+                        }
+                        details["esp_motors"].append(verify)
+                        if verify["ok"]:
+                            break
+                        if verify["alarm"]:
+                            reply = esp.reset_alarm(motor_id)
+                            details["esp_motors"].append(
+                                {"step": "retry_reset_alarm", "motor_id": motor_id, "attempt": attempt, **reply}
+                            )
+                        reply = esp.recover_eto_motor(motor_id)
+                        details["esp_motors"].append(
+                            {"step": "retry_recover_eto", "motor_id": motor_id, "attempt": attempt, **reply}
+                        )
+                        time.sleep(0.25)
+                    except Exception as exc:
+                        details["esp_motors"].append(
+                            {
+                                "step": "verify_ready",
+                                "motor_id": motor_id,
+                                "attempt": attempt,
+                                "ok": False,
+                                "error": str(exc),
+                            }
+                        )
+                        verify = {"ok": False, "error": str(exc)}
+                        time.sleep(0.25)
+                if not verify or not verify.get("ok"):
+                    hard_failures.append(
+                        "Motor "
+                        f"{motor_id} not ready "
+                        f"(link={bool((verify or {}).get('link_ok'))}, "
+                        f"ready={bool((verify or {}).get('ready'))}, "
+                        f"alarm={bool((verify or {}).get('alarm'))}, "
+                        f"alarm_code={(verify or {}).get('alarm_code')}, "
+                        f"in={(verify or {}).get('input_raw_hex')}, "
+                        f"out={(verify or {}).get('output_raw_hex')}, "
+                        f"m0179={(verify or {}).get('monitor0179_hex')}, "
+                        f"m017b={(verify or {}).get('monitor017b_hex')}, "
+                        f"mps={(verify or {}).get('mps')}, "
+                        f"mbc={(verify or {}).get('mbc')}, "
+                        f"hwto={(verify or {}).get('hwto')})"
+                    )
         else:
             details["esp_motors"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
 

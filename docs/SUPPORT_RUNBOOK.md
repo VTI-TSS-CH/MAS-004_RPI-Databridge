@@ -118,6 +118,12 @@
   - quick manual check from the Raspi:
     - `PING`
     - `MOTOR POLL?`
+  - Safety-/Purge-Reset must also recover the Oriental drives:
+    - `PROCESS RESET` first clears ESP process latches
+    - `MOTOR APPLY_ETO_RECOVERY` / `MOTOR RECOVER_ETO` ensure the AZD ETO-return behavior is active
+    - each motor `1..9` then receives `RESET_ALARM`, `RECOVER_ETO` and repeated `REFRESH`
+    - reset may only finish successfully when all live motors report link OK, ready and no alarm
+    - diagnostics now include AZD monitors `0179`, `017B`, `017D`; `monitor0179` ready bit is accepted even if the physical READY R-OUT bit is not mapped
     - `MOTOR 3 STATUS?`
     - `MOTOR 3 REFRESH`
 - ESP eth1 communication hygiene:
