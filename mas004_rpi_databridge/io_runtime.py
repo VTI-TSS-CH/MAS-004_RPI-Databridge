@@ -125,7 +125,7 @@ class IoRuntime:
             if simulation or not host or int(port or 0) <= 0:
                 self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", device_code)
                 return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
-            client = MoxaE1211Client(host, int(port), timeout_s=self.cfg.http_timeout_s)
+            client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
             client.write_output(int(point["channel_no"] or 0), enabled)
             self.store.upsert_value(io_key, 1 if enabled else 0, "live", device_code)
             return {"ok": True, "simulation": False, "value": 1 if enabled else 0}
@@ -237,7 +237,7 @@ class IoRuntime:
         if not host or int(port or 0) <= 0:
             return self._apply_static_quality(device_code, device_points, "offline", device_code, "MOXA endpoint missing")
         try:
-            client = MoxaE1211Client(host, int(port), timeout_s=self.cfg.http_timeout_s)
+            client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
             snapshot = client.read_outputs()
             changed = 0
             for point in device_points:
@@ -322,3 +322,9 @@ class IoRuntime:
             int(getattr(self.cfg, "moxa2_port", 0) or 0),
             bool(getattr(self.cfg, "moxa2_simulation", True)),
         )
+
+    def _moxa_timeout_s(self) -> float:
+        # MOXA lives on the local eth1 machine subnet. Keep this much shorter
+        # than external HTTP peer timeouts so unreachable I/O modules cannot
+        # stall the machine runtime or ESP motor command path for many seconds.
+        return max(0.3, min(self.cfg.get_float("moxa_timeout_s", 1.5), 2.0))

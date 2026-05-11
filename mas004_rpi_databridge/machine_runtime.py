@@ -1035,7 +1035,7 @@ class MachineRuntime:
                     continue
                 try:
                     io_runtime.write_output(point["io_key"], bool(led_plan.get(pin, False)))
-                except RuntimeError as exc:
+                except Exception as exc:
                     self.logs.log("machine", "info", f"button-led write skipped for {point['io_key']}: {exc}")
 
     def _safety_led_override_active(self, state: int, safety_info: dict[str, Any]) -> bool:
@@ -1070,7 +1070,7 @@ class MachineRuntime:
                 continue
             try:
                 io_runtime.write_output(point["io_key"], bool(plan.get(pin, False)), force=True, source="safety-led")
-            except RuntimeError as exc:
+            except Exception as exc:
                 self.logs.log("machine", "info", f"safety-led write skipped for {point['io_key']}: {exc}")
 
     def _apply_status_lamp(self, state: int, *, warning_active: bool, ts: float):
@@ -1083,7 +1083,7 @@ class MachineRuntime:
                 continue
             try:
                 io_runtime.write_output(point["io_key"], bool(enabled))
-            except RuntimeError as exc:
+            except Exception as exc:
                 self.logs.log("machine", "info", f"status-lamp write skipped for {point['io_key']}: {exc}")
 
     def _current_production_label(self) -> str:

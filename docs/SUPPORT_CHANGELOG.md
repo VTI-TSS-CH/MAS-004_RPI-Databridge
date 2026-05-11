@@ -4,6 +4,8 @@
 - Ursache fuer die wiederkehrenden Motor-Kommunikationsaussetzer eingegrenzt: Der ESP32-PLC/W5500-Endpunkt ist ein kurzlebiger Single-Client-Socket, waehrend der Raspi-Client den Socket bisher bis zu 40 Requests halb-persistent hielt.
 - `EspPlcClient` schliesst den ESP-Kommandosocket jetzt nach jeder Antwort bewusst sauber. Damit passt der Raspi wieder zum Firmware-Vertrag und vermeidet stale/halb-offene TCP-Fenster bei Modbus-RTU-Refreshes und ESP-Push-Bursts.
 - Der per-Motor-Refresh auf `/ui/machine-setup/motors` ist jetzt serverseitig entprellt: parallele oder sehr schnelle Refreshes desselben Motors werden aus einem kurzen Cache bedient, statt mehrere teure `MOTOR <id> REFRESH`-Modbus-Lesezyklen auf den ESP zu stapeln.
+- MOXA-Modbus/TCP nutzt nun einen eigenen kurzen lokalen Timeout (`moxa_timeout_s`, Default 1.5 s) statt des allgemeinen 10-s-HTTP-Timeouts. Dadurch koennen traege oder kurz nicht erreichbare MOXA-Module den Maschinenloop nicht mehr mehrere Sekunden blockieren.
+- LED-/Statuslampen-Schreibfehler werden im Maschinenloop abgefangen und protokolliert, ohne den restlichen Runtime-Zyklus abzubrechen.
 - Diagnosebefund am Produktionssystem: ICMP zu `192.168.2.101` war stabil, aber `eth1` hatte TX-Errors und direkte Raw-Socket-Tests zeigten sporadisch Timeout/Connection-Refused-Fenster. Produktionszugriffe muessen weiterhin ueber den Raspi-Client laufen, nicht ueber parallele Raw-Socket-Stresstests.
 - Regressionstest ergaenzt, der sicherstellt, dass `EspPlcClient` kurzlebige Verbindungen verwendet.
 
