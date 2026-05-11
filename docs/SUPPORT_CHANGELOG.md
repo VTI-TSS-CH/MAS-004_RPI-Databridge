@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-11 (Produktions-Raspi Microtom-Outbox HTTP/HTTPS bereinigt)
+- Aktuelle neue Primary-Sends an Microtom funktionieren ueber `http://10.141.94.202:5000/api/inbox` mit HTTP 200.
+- Ursache fuer die haengende Outbox waren 38 alte Queue-Eintraege mit Ziel `https://10.141.94.202:5000/api/inbox`; Microtom spricht auf Port 5000 HTTP, daher scheiterten diese Eintraege mit `SSL: WRONG_VERSION_NUMBER`.
+- Vor der Runtime-Korrektur wurde auf dem Produktions-Raspi die Sicherung `/var/lib/mas004_rpi_databridge/databridge.db.bak_peerfix_20260511_144136` erstellt.
+- Die betroffenen Alt-Eintraege wurden auf `http://10.141.94.202:5000/api/inbox` umgeschrieben und erneut eingeplant; danach wurden alle erfolgreich quittiert und die Outbox war leer.
+
 ## 2026-05-11 (Wickler-Reset bleibt bewegungsarm)
 - Sicherheits-/Purge-Reset sendet an Abwickler und Aufwickler nur noch `stop`, `resetAlarm`, `etoRecovery`, `stop`.
 - Der Reset setzt die Wickler damit hardwareseitig frei, startet aber keinen `ready`-Regelmodus mehr.
@@ -14,7 +20,7 @@
 
 ## 2026-05-11 (Production Microtom Peer Topology)
 - Documented and staged the current production peer topology:
-  - primary Microtom/DIClient peer: `https://10.141.94.202:5000`
+  - primary Microtom/DIClient peer: `http://10.141.94.202:5000`
   - optional engineering laptop Microtom simulator/testtool: `https://10.141.94.212:9090`
   - watchdog host: `10.141.94.202`
 - Updated the 10.141.94 commissioning topology/config patch so future production applies do not accidentally promote the engineering laptop testtool to the primary peer.

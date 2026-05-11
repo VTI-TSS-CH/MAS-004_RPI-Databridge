@@ -8,7 +8,7 @@
   "eth1_subnet": "24",
   "eth1_gateway": "",
   "eth1_dns": "",
-  "peer_base_url": "https://10.141.94.202:5000",
+  "peer_base_url": "http://10.141.94.202:5000",
   "peer_base_url_secondary": "https://10.141.94.212:9090",
   "peer_watchdog_host": "10.141.94.202",
   "vj6530_host": "10.141.94.214",

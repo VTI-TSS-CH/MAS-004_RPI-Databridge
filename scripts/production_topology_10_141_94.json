@@ -58,7 +58,7 @@
     }
   },
   "microtom_peers": {
-    "peer_base_url": "https://10.141.94.202:5000",
+    "peer_base_url": "http://10.141.94.202:5000",
     "peer_base_url_secondary": "https://10.141.94.212:9090",
     "peer_watchdog_host": "10.141.94.202",
     "note": "Primary is the productive Microtom/DIClient peer. Secondary is only the engineering laptop Microtom simulator/testtool and may be unavailable without blocking primary operation."

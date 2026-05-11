@@ -40,7 +40,7 @@
 - The former local TEST machine is now the production/commissioning stand:
   - current/final Raspi access: `pi@10.141.94.213`, UI/API `https://10.141.94.213:8080`
   - `eth0`: Raspi `10.141.94.213/24`, gateway `10.141.94.1`
-  - Microtom primary peer: `https://10.141.94.202:5000`
+  - Microtom primary peer: `http://10.141.94.202:5000`
   - engineering laptop / Microtom testtool secondary peer: `https://10.141.94.212:9090`
   - TTO VJ6530: `10.141.94.214:3002`
   - Laser VJ3350: `10.141.94.215:20000`
