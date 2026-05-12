@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import tempfile
 import unittest
@@ -123,6 +125,7 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0004", "MAP", "0004", "100", "W", "R", "uint16"),
             ("MAP0005", "MAP", "0005", "0", "W", "W", "int8"),
             ("MAP0006", "MAP", "0006", "0", "W", "W", "int8"),
+            ("MAP0014", "MAP", "0014", "100", "W", "R", "uint16"),
             ("MAP0016", "MAP", "0016", "0", "W", "R", "bool"),
             ("MAP0019", "MAP", "0019", "11000", "W", "R", "uint16"),
             ("MAP0040", "MAP", "0040", "5", "W", "R", "uint8"),
@@ -176,21 +179,22 @@ class MachineRuntimeTests(unittest.TestCase):
             controller.execute.return_value = "ACK_MAC0001=1"
             first = runtime.refresh()
             controller.execute.assert_called_once_with("1")
-        self.assertEqual(2, first["current_state"])
-        self.assertEqual(3, first["requested_state"])
-        self.assertEqual(3, first["info"]["requested_command"])
+        self.assertEqual(6, first["current_state"])
+        self.assertEqual(7, first["requested_state"])
+        self.assertEqual(7, first["info"]["requested_command"])
         self.assertEqual(True, first["info"]["setup"]["last_result"]["ok"])
+        self.assertEqual(True, first["info"]["setup"]["parameters_ready"])
 
         second = runtime.refresh()
-        self.assertEqual(3, second["current_state"])
-        self.assertEqual(3, second["requested_state"])
+        self.assertEqual(7, second["current_state"])
+        self.assertEqual(7, second["requested_state"])
         self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
 
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=3,
-            requested_state=3,
+            current_state=7,
+            requested_state=7,
             state_source="test",
             warning_active=False,
             purge_active=False,
@@ -206,6 +210,43 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(1, result["command"])
         self.assertEqual(5, result["target_state"])
         self.assertEqual("1", self.params.get_effective_value("MAS0002"))
+
+    def test_virtual_start_pause_is_blocked_while_setup_is_not_completed(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=3,
+            requested_state=3,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"setup": {"last_result": {"ok": False}}},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "not allowed"):
+            runtime.press_virtual_button("start_pause")
+
+        self.assertNotEqual("1", self.params.get_effective_value("MAS0002"))
+
+    def test_direct_start_command_is_ignored_during_setup(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=3,
+            requested_state=3,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"setup": {"last_result": {"ok": False}}},
+        )
+        self.params.set_value("MAS0002", "1", actor="microtom")
+
+        snapshot = runtime.refresh()
+
+        self.assertEqual(3, snapshot["current_state"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0002"))
 
     def test_virtual_setup_runs_wickler_workflow_even_when_already_in_setup(self):
         runtime = self.build_runtime()

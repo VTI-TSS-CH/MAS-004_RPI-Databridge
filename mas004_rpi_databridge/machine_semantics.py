@@ -145,19 +145,22 @@ def state_actions(state: int | str | None) -> dict[str, bool]:
     except Exception:
         code = 0
     actions = {name: False for name in BUTTON_ORDER}
-    if code in (3, 7, 9, 19):
+    if code == 7:
         actions["start"] = True
+        actions["sync"] = True
+        actions["empty"] = True
+        actions["rewind"] = True
+    if code == 3:
+        actions["stop"] = True
     if code == 5:
         actions["pause"] = True
         actions["stop"] = True
         actions["empty"] = True
-    if code in (3, 5, 7, 9, 11, 13, 15, 17, 19):
+    if code == 6:
+        actions["pause"] = True
+    if code in (1, 3, 5, 7, 9, 11, 13, 15, 17, 19):
         actions["setup"] = True
-    if code in (3, 7, 9, 11, 13, 15, 19):
-        actions["sync"] = True
     if code in (9, 11, 13, 19):
-        actions["empty"] = True
-    if code in (7, 9, 11, 13, 19):
         actions["rewind"] = True
     if code in (20, 21):
         return {name: False for name in BUTTON_ORDER}
@@ -173,7 +176,7 @@ def target_state_for_button(button: str, current_state: int | str | None) -> int
     if btn == "start_pause":
         if code == 5:
             return 7
-        if code in (3, 7, 9, 19):
+        if code == 7:
             return 5
         return None
     if btn == "stop":

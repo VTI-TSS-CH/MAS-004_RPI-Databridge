@@ -77,6 +77,24 @@ _SAFETY_RESET_LOCK = threading.Lock()
 _SETUP_WICKLER_LOCK = threading.Lock()
 
 
+def _command_action_name(command: int, current_state: int) -> str | None:
+    if int(command or 0) == 1:
+        return "start"
+    if int(command or 0) == 2:
+        return "stop"
+    if int(command or 0) == 3:
+        return "setup"
+    if int(command or 0) == 4:
+        return "sync"
+    if int(command or 0) == 5:
+        return "empty"
+    if int(command or 0) == 6:
+        return "rewind"
+    if int(command or 0) == 7:
+        return "pause"
+    return None
+
+
 def mark_external_purge_clear(db: DB, *, source: str = "microtom"):
     state = _machine_state_row_from_db(db)
     info = dict(state.get("info") or {})
@@ -320,6 +338,27 @@ class MachineRuntime:
             safety_info["mas0002_reset_seen"] = reset_command_active
             safety_info["mas0002_reset_seen_ts"] = reset_command_ts if reset_command_active else 0.0
 
+        if forced_state is None and not safety_latched and requested_command not in (0, 2):
+            command_action = _command_action_name(requested_command, int(snapshot["current_state"] or 0))
+            if command_action:
+                allowed_actions = state_actions(snapshot["current_state"])
+                if not allowed_actions.get(command_action, False):
+                    self.logs.log(
+                        "machine",
+                        "warning",
+                        f"MAS0002={requested_command} ignored in state {snapshot['current_state']} ({command_action} not allowed)",
+                    )
+                    self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                    requested_command = 0
+                elif not button_mask.get(command_action, False):
+                    self.logs.log(
+                        "machine",
+                        "info",
+                        f"MAS0002={requested_command} ignored by MAP0065 ({command_action})",
+                    )
+                    self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                    requested_command = 0
+
         setup_info = dict(info.get("setup") or {})
         setup_command_active = requested_command == 3
         setup_command_ts = self._param_updated_ts("MAS0002") if setup_command_active else 0.0
@@ -352,6 +391,27 @@ class MachineRuntime:
                 self.logs.log("machine", "warning", "Einrichten-Wicklerworkflow wegen Safety/Purge nicht gestartet")
             else:
                 setup_info["last_result"] = self._perform_setup_wickler_calibration()
+                if bool((setup_info.get("last_result") or {}).get("ok")):
+                    format_ready, missing_format = self._format_ready_for_pause(param_map)
+                    setup_info["parameters_ready"] = format_ready
+                    setup_info["missing_parameters"] = missing_format
+                    if format_ready:
+                        self.params.apply_device_value("MAS0002", "7", promote_default=True)
+                        requested_command = 7
+                        setup_info["completed_ts"] = now_ts()
+                        self._record_event(
+                            "setup_complete",
+                            "info",
+                            "Einrichten abgeschlossen: Formatparameter gueltig, Wechsel zu Pause freigegeben",
+                            {"target_state": 7},
+                        )
+                    else:
+                        self.logs.log(
+                            "machine",
+                            "warning",
+                            "Einrichten abgeschlossen, aber Formatparameter noch nicht vollstaendig: "
+                            + ",".join(missing_format),
+                        )
         info["setup"] = setup_info
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])
@@ -791,6 +851,21 @@ class MachineRuntime:
             return float(row[0] or 0.0) if row else 0.0
         except Exception:
             return 0.0
+
+    def _format_ready_for_pause(self, param_map: dict[str, str]) -> tuple[bool, list[str]]:
+        plan = build_format_plan(param_map)
+        missing: list[str] = []
+        if _safe_int(param_map.get("MAP0001"), 0) <= 0:
+            missing.append("MAP0001")
+        if _safe_int(param_map.get("MAP0002"), 0) <= 0:
+            missing.append("MAP0002")
+        if _safe_int(param_map.get("MAP0014"), 0) <= 0:
+            missing.append("MAP0014")
+        if _safe_int((plan.get("printer") or {}).get("stop_distance_tenths_mm"), 0) <= 0:
+            missing.append(str((plan.get("printer") or {}).get("distance_param") or "MAP0018/MAP0019"))
+        if not sanitize_production_label(param_map.get("MAS0029", "")):
+            missing.append("MAS0029")
+        return len(missing) == 0, missing
 
     def _perform_setup_wickler_calibration(self) -> dict[str, Any]:
         started_ts = now_ts()
