@@ -60,6 +60,7 @@ RESETTABLE_SAFETY_ERROR_KEYS = {
     "MAE0030",  # Abwickler Taenzerarm zu tief
     "MAE0034",  # Aufwickler Taenzerarm zu tief
 }
+PROCESS_SENSOR_FAULT_STATES = {2, 3, 4, 5, 10, 11, 12, 13, 16, 17}
 CONDITIONAL_RESETTABLE_SAFETY_ERRORS = {
     # These are latched machine errors. Clear them only if the matching live
     # inputs are quiet after the reset, otherwise the purge must stay active.
@@ -888,6 +889,8 @@ class MachineRuntime:
             reasons.append("bahnriss_auswurf")
         for pkey, value in param_map.items():
             if pkey in PAUSE_ERROR_KEYS:
+                continue
+            if pkey == "MAE0027" and _safe_int(param_map.get("MAS0001"), 1) not in PROCESS_SENSOR_FAULT_STATES:
                 continue
             if pkey.startswith("MAE") and _truthy(value):
                 reasons.append(pkey)

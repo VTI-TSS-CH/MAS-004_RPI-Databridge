@@ -435,6 +435,26 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("0", self.params.get_effective_value("MAE0027"))
         self.assertEqual("failed", snapshot["info"]["safety"]["phase"])
 
+    def test_mae0027_is_only_critical_in_process_states(self):
+        runtime = self.build_runtime()
+        self.params.apply_device_value("MAE0027", "1", promote_default=True)
+
+        self.params.apply_device_value("MAS0001", "21", promote_default=True)
+        inactive_critical, inactive_reasons = runtime._critical_state(
+            runtime._io_values(),
+            runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW")),
+        )
+        self.assertFalse(inactive_critical)
+        self.assertNotIn("MAE0027", inactive_reasons)
+
+        self.params.apply_device_value("MAS0001", "5", promote_default=True)
+        active_critical, active_reasons = runtime._critical_state(
+            runtime._io_values(),
+            runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW")),
+        )
+        self.assertTrue(active_critical)
+        self.assertIn("MAE0027", active_reasons)
+
     def test_motion_reset_leaves_wicklers_in_safe_stop(self):
         runtime = self.build_runtime()
         calls: dict[str, list[str]] = {"unwinder": [], "rewinder": []}

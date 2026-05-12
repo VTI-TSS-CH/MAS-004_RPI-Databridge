@@ -9,7 +9,12 @@ from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
-from mas004_rpi_databridge.machine_runtime import MachineRuntime, parse_machine_event_line, recent_external_purge_clear
+from mas004_rpi_databridge.machine_runtime import (
+    MachineRuntime,
+    PROCESS_SENSOR_FAULT_STATES,
+    parse_machine_event_line,
+    recent_external_purge_clear,
+)
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -46,6 +51,18 @@ def _channel_for_ptype(ptype: str) -> str:
     if ptype.startswith("MA"):
         return "esp-plc"
     return "raspi"
+
+
+def _truthy_value(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text not in ("", "0", "false", "off", "no", "none", "null")
+
+
+def _current_machine_state(params: ParamStore) -> int:
+    try:
+        return int(float(str(params.get_effective_value("MAS0001") or "1").strip()))
+    except Exception:
+        return 1
 
 
 class EspPushListener:
@@ -194,6 +211,13 @@ class EspPushListener:
                 logs.log("raspi", "info", "ignored stale ESP MAS0028=1 immediately after external clear")
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")
                 return resp
+
+        if pkey == "MAE0027" and _truthy_value(value) and _current_machine_state(params) not in PROCESS_SENSOR_FAULT_STATES:
+            params.apply_device_value("MAE0027", "0")
+            resp = "ACK_MAE0027=0"
+            logs.log("raspi", "info", "ignored ESP MAE0027=1 outside process sensor states")
+            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            return resp
 
         if ptype.startswith("MA"):
             ok, msg = params.apply_device_value(pkey, value)

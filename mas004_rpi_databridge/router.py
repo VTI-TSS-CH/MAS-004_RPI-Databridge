@@ -4,7 +4,11 @@ from typing import Optional, Tuple
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.inbox import Inbox
-from mas004_rpi_databridge.machine_runtime import mark_external_purge_clear, recent_external_purge_clear
+from mas004_rpi_databridge.machine_runtime import (
+    PROCESS_SENSOR_FAULT_STATES,
+    mark_external_purge_clear,
+    recent_external_purge_clear,
+)
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -97,6 +101,13 @@ def _is_esp_source(source: Optional[str]) -> bool:
 def _truthy_value(value: object) -> bool:
     text = str(value or "").strip().lower()
     return text not in ("", "0", "false", "off", "no", "none", "null")
+
+
+def _current_machine_state(params: ParamStore) -> int:
+    try:
+        return int(float(str(params.get_effective_value("MAS0001") or "1").strip()))
+    except Exception:
+        return 1
 
 
 class Router:
@@ -215,6 +226,15 @@ class Router:
                 f"ignored stale device-origin MAS0028=1 from {device_source} immediately after external clear",
             )
             return f"ACK_{pkey}=1"
+
+        if pkey == "MAE0027" and _truthy_value(value) and _current_machine_state(self.params) not in PROCESS_SENSOR_FAULT_STATES:
+            self.params.apply_device_value("MAE0027", "0", promote_default=False)
+            self.logs.log(
+                "raspi",
+                "info",
+                f"ignored stale device-origin MAE0027=1 from {device_source} outside process sensor states",
+            )
+            return "ACK_MAE0027=0"
 
         ok, detail = self.params.apply_device_value(pkey, str(value), promote_default=False)
         if not ok:

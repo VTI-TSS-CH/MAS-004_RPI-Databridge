@@ -78,6 +78,21 @@ class EspPushListenerTests(unittest.TestCase):
             self.assertEqual("0", ParamStore(db).get_effective_value("MAS0028"))
             self.assertEqual(0, Outbox(db).count())
 
+    def test_esp_mae0027_is_ignored_outside_process_sensor_states(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0001", "MAS", "0001", "21", "R", "W")
+            _insert_param(db, "MAE0027", "MAE", "0027", "0", "R", "W")
+            params = ParamStore(db)
+            params.apply_device_value("MAS0001", "21", promote_default=True)
+            cfg = Settings(db_path=str(db_path), peer_base_url="https://peer-a:9090", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            self.assertEqual("ACK_MAE0027=0", listener._process_line("MAE0027=1"))
+            self.assertEqual("0", params.get_effective_value("MAE0027"))
+            self.assertEqual(0, Outbox(db).count())
+
 
 if __name__ == "__main__":
     unittest.main()
