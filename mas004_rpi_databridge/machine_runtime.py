@@ -495,6 +495,8 @@ class MachineRuntime:
         if button_name == "start_pause" and reset_context:
             command = 2
             action_name = "stop"
+        elif reset_context and button_name not in {"start_pause", "stop"}:
+            raise RuntimeError(f"button {button_name} is blocked during reset/safety context")
         if command is None:
             raise RuntimeError(f"button {button_name} is not valid in state {current_state}")
         if not reset_context and not allowed_actions.get(action_name, False):
@@ -1151,6 +1153,14 @@ class MachineRuntime:
                 role_detail["steps"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
                 details["wicklers"].append(role_detail)
                 continue
+            try:
+                reply = client.post_master({"indexedModeEnabled": "0"}, timeout_s=8.0)
+                role_detail["steps"].append({"step": "disable_indexed_mode", "ok": bool(reply.get("ok", True)), "reply": reply})
+                if reply.get("ok") is False:
+                    hard_failures.append(f"{role} disable_indexed_mode: {reply}")
+            except Exception as exc:
+                role_detail["steps"].append({"step": "disable_indexed_mode", "ok": False, "error": str(exc)})
+                hard_failures.append(f"{role} disable_indexed_mode: {exc}")
             for mode in ("stop", "resetAlarm", "etoRecovery", "stop"):
                 try:
                     reply = client.post_mode(mode, timeout_s=8.0)

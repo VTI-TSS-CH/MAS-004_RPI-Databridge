@@ -251,6 +251,24 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(2, result["command"])
         self.assertEqual("2", self.params.get_effective_value("MAS0002"))
 
+    def test_virtual_setup_is_blocked_during_reset_context(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "blocked during reset"):
+            runtime.press_virtual_button("setup")
+
+        self.assertNotEqual("3", self.params.get_effective_value("MAS0002"))
+
     def test_label_complete_event_updates_register_and_mas0003(self):
         runtime = self.build_runtime()
 
@@ -439,6 +457,10 @@ class MachineRuntimeTests(unittest.TestCase):
                 calls[self.role].append(mode)
                 return {"ok": True}
 
+            def post_master(self, payload, timeout_s=None):
+                calls[self.role].append(f"master:{payload}")
+                return {"ok": True}
+
             def fetch_state(self):
                 return {
                     "ok": True,
@@ -452,8 +474,8 @@ class MachineRuntimeTests(unittest.TestCase):
             result = runtime._reset_motion_devices()
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(["stop", "resetAlarm", "etoRecovery", "stop"], calls["unwinder"])
-        self.assertEqual(["stop", "resetAlarm", "etoRecovery", "stop"], calls["rewinder"])
+        self.assertEqual(["master:{'indexedModeEnabled': '0'}", "stop", "resetAlarm", "etoRecovery", "stop"], calls["unwinder"])
+        self.assertEqual(["master:{'indexedModeEnabled': '0'}", "stop", "resetAlarm", "etoRecovery", "stop"], calls["rewinder"])
 
 
 if __name__ == "__main__":
