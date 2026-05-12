@@ -976,6 +976,13 @@
 - Added an in-process reset lock so a UI-triggered reset and the background runtime loop cannot run the safety reset sequence concurrently.
 - Smart Wicklers are no longer considered reset-ready solely because the AZD drive is electrically ready; the Raspi now also checks the Wickler logic state and reports faults such as `Stoerung / Wippe unten` as real reset blockers.
 
+## 2026-05-12 (Production Raspi USB/NVMe Boot)
+- Migrated only the production Raspi to USB/NVMe boot.
+- Prepared Kingston SPSD 512 GB on `/dev/sda` with `MAS004BOOT` (`55740328-01`) and `MAS004ROOT` (`55740328-02`).
+- Cloned the current production SD boot/root filesystems to the USB/NVMe target and verified the Databridge service after reboot.
+- Updated the Pi 4 EEPROM tooling and configured `BOOT_ORDER=0xf14`, so USB/NVMe is tried before SD while SD remains fallback.
+- Verified production runtime after reboot: `/` from `55740328-02`, `/boot` from `/dev/sda1`, `mas004-rpi-databridge.service` active, UI health OK.
+
 ## Maintenance Rule
 - Add one entry for every change that affects:
   - architecture

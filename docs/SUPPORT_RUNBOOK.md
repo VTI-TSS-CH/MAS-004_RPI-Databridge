@@ -482,6 +482,15 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - machine serial number and machine name should be set before creating qualification-relevant backup bundles
   - after a restore, verify whether the service restart happened cleanly and whether the expected workbook/runtime payload is present again
   - in offline mode, exported bundles and commissioning notes may be prepared locally, but no TEST/LIVE completion should be claimed before the real target has been revalidated
+- Production Raspi USB/NVMe boot state:
+  - This applies only to the production Raspi until explicitly changed; do not assume the same boot layout for LIVE at Microtom or the offline workshop/test system.
+  - The production Raspi boots USB/NVMe first via EEPROM `BOOT_ORDER=0xf14` and keeps the SD card as an unmounted fallback.
+  - Current production USB/NVMe target is `/dev/sda` Kingston SPSD 512 GB.
+  - USB boot partition: label `MAS004BOOT`, PARTUUID `55740328-01`, mounted as `/boot`.
+  - USB root partition: label `MAS004ROOT`, PARTUUID `55740328-02`, mounted as `/`.
+  - After every production reboot or storage service intervention, verify `cat /proc/cmdline` contains `root=PARTUUID=55740328-02`, `findmnt /boot` shows `/dev/sda1`, `df -hT /` shows roughly `469G`, and `mas004-rpi-databridge.service` is active.
+  - Migration marker on the production Raspi: `/opt/mas004_deploy_notes/USB_NVME_BOOT_MIGRATION.txt`.
+  - The original SD card remains bootable fallback; if USB boot fails, the bootloader should fall back to SD because of the `0xf14` order.
 - If the Videojet logo disappears from the Raspi UI again, check `/ui/assets/videojet-logo.jpg` first:
   - the asset should now come either from the installed package data or from the repo fallback path on the Raspberry
 - If `TTS0001=3` ever returns `ACK_TTS0001=0`, treat that as a regression: the ACK must follow the async-observed settled workbook state, not a stale synchronous verify snapshot.
