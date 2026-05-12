@@ -153,20 +153,36 @@ class TemporaryProcessCommandController:
         except Exception:
             return {}
 
+    def _motor3_state_from_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        motor = payload.get("motor") or {}
+        if not isinstance(motor, dict):
+            return {}
+        state = motor.get("state") or {}
+        if isinstance(state, dict):
+            merged = dict(motor)
+            merged.update(state)
+            return merged
+        return motor
+
     def _wait_motor3_idle(self, timeout_s: float = 60.0, min_wait_s: float = 0.0) -> None:
         started = time.time()
         deadline = time.time() + float(timeout_s)
         seen_busy = False
+        last_state: dict[str, Any] = {}
         while time.time() < deadline:
-            payload = self._json_response(self._esp("MOTOR 3 STATUS?", read_timeout_s=5.0))
-            motor = payload.get("motor") or {}
+            # Global motor polling stays disabled during normal operation.
+            # During a measuring run we need one explicit live refresh for
+            # Motor 3, otherwise STATUS? may only return the cached state.
+            payload = self._json_response(self._esp("MOTOR 3 REFRESH", read_timeout_s=5.0))
+            motor = self._motor3_state_from_status(payload)
+            last_state = motor
             busy = bool(motor.get("busy")) or bool(motor.get("move"))
             feedback = motor.get("feedback_tenths_mm")
             target = motor.get("target_tenths_mm")
             try:
                 position_close = abs(int(target) - int(feedback)) <= 2
             except Exception:
-                position_close = True
+                position_close = False
             if busy:
                 seen_busy = True
             elapsed = time.time() - started
@@ -175,7 +191,25 @@ class TemporaryProcessCommandController:
             ):
                 return
             time.sleep(0.25)
-        raise RuntimeError("Motor 3 did not become idle")
+        details = {
+            key: last_state.get(key)
+            for key in (
+                "ready",
+                "busy",
+                "move",
+                "hwto",
+                "alarm",
+                "alarm_code",
+                "feedback_tenths_mm",
+                "command_tenths_mm",
+                "target_tenths_mm",
+                "input_raw_hex",
+                "output_raw_hex",
+                "last_error",
+            )
+            if key in last_state
+        }
+        raise RuntimeError(f"Motor 3 did not reach target during measuring travel: {details}")
 
     def _winder_clients(self) -> list[SmartWicklerClient]:
         return [SmartWicklerClient(self.cfg, "unwinder"), SmartWicklerClient(self.cfg, "rewinder")]

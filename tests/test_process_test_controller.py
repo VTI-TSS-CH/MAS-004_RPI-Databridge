@@ -104,6 +104,18 @@ class ProcessTestControllerTests(unittest.TestCase):
         self.assertEqual("ACK_MAC0001=1", self.controller.execute("1"))
         self.controller._calibrate_wicklers_and_learn.assert_called_once()
 
+    def test_motor3_wait_uses_nested_status_position(self):
+        self.controller._esp = Mock(
+            return_value=(
+                'JSON {"ok":true,"motor":{"state":{"busy":false,"move":false,'
+                '"feedback_tenths_mm":1000,"target_tenths_mm":2000,'
+                '"ready":false,"hwto":false}}}'
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "did not reach target"):
+            self.controller._wait_motor3_idle(timeout_s=0.01, min_wait_s=0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
