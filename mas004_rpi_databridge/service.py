@@ -31,6 +31,7 @@ from mas004_rpi_databridge.watchdog import Watchdog
 from mas004_rpi_databridge.webui import build_app
 from mas004_rpi_databridge.ntp_sync import ntp_loop
 from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
+from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
 from mas004_rpi_databridge.vj6530_async_policy import (
     VJ6530_ASYNC_RECONNECT_MIN_S,
@@ -64,6 +65,16 @@ def resolve_repo_master_ios_xlsx() -> str:
 def require_device_shared_secret(x_shared_secret: Optional[str], cfg: Settings):
     if (cfg.shared_secret or "") and x_shared_secret != cfg.shared_secret:
         raise HTTPException(status_code=401, detail="Unauthorized (shared secret)")
+
+
+def disable_global_esp_motor_polling(cfg: Settings) -> None:
+    try:
+        client = EspMotorClient(cfg)
+        if client.available():
+            result = client.set_poll(False)
+            print(f"[MOTORS] global ESP motor auto-poll disabled: {result.get('reply')}", flush=True)
+    except Exception as exc:
+        print(f"[MOTORS] global ESP motor auto-poll disable skipped: {exc!r}", flush=True)
 
 
 def build_device_inbox_app(cfg_path: str) -> FastAPI:
@@ -375,6 +386,8 @@ def main():
             io_store.import_xlsx(cfg.master_ios_xlsx_path)
     except Exception as e:
         print(f"[IO] startup import skipped: {repr(e)}", flush=True)
+
+    disable_global_esp_motor_polling(cfg)
 
     ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True)
     ntp_t.start()

@@ -539,19 +539,13 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         live_error = ""
         motor_poll: Optional[dict[str, Any]] = None
 
-        if live_target_ids:
-            if not client.available():
-                live_error = "ESP-Motor-Endpoint nicht erreichbar"
-            else:
-                try:
-                    motor_poll = client.poll_state()
-                except Exception:
-                    motor_poll = None
+        if live_target_ids and not client.available():
+            live_error = "ESP-Motor-Endpoint nicht erreichbar"
 
         if live_successes:
             store.remember_motors(live_successes)
             cached_motors = store.cached_motors()
-        live_available = bool(live_successes) or motor_poll is not None
+        live_available = bool(live_successes)
 
         merged = merge_motor_payload(
             {
@@ -570,8 +564,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             merged["message"] = f"{count} Live-Motor{'en' if count != 1 else ''} derzeit nicht erreichbar"
         elif live_error_count:
             merged["message"] = f"{live_error_count} Live-Motor{'en' if live_error_count != 1 else ''} derzeit nicht erreichbar"
-        elif live_target_ids and motor_poll and not bool(motor_poll.get("auto_poll")):
-            merged["message"] = "Motorstatus ist gecached; Live-Werte pro Motor mit Status aktualisieren lesen"
+        elif live_target_ids:
+            merged["message"] = "Motorstatus ist gecached; Live-Werte pro Motor mit Status aktualisieren oder 1s Polling lesen"
         else:
             merged["message"] = ""
         merged["simulated_ids"] = sorted(simulated_ids)
@@ -588,18 +582,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "auto_poll": False,
                 "error": "ESP motor endpoint missing or simulation enabled",
             }
-        try:
-            payload = client.poll_state()
-        except Exception as exc:
-            return {
-                "ok": False,
-                "available": False,
-                "auto_poll": False,
-                "error": str(exc),
-            }
-        payload["ok"] = bool(payload.get("ok", True))
-        payload["available"] = True
-        return payload
+        return {
+            "ok": True,
+            "available": True,
+            "auto_poll": False,
+            "interval_ms": None,
+            "next_motor": None,
+            "message": "Globales ESP-Motor-Round-Robin ist deaktiviert; Livewerte nur explizit pro Motor.",
+        }
 
     def require_motor_ack(result: dict[str, Any], action: str) -> None:
         if not isinstance(result, dict):
@@ -1957,6 +1947,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         client = EspMotorClient(cfg2)
         if not client.available():
             raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
+        if bool(body.enabled):
+            raise HTTPException(
+                status_code=409,
+                detail="Globales ESP-Motorpolling ist deaktiviert. Bitte pro Motor die 1s-Polling-Checkbox im Motors-Setup verwenden.",
+            )
         result = client.set_poll(bool(body.enabled))
         if not bool(result.get("ok")):
             raise HTTPException(status_code=502, detail=result.get("reply") or "ESP rejected MOTOR POLL command")
@@ -2697,10 +2692,7 @@ setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
       <label class="btn" for="io_file">IO Workbook importieren</label>
       <input id="io_file" type="file" accept=".xlsx" style="display:none" onchange="uploadWorkbook(this.files[0])"/>
       <label class="checkline"><input type="checkbox" id="show_reserved" checked onchange="renderRows(window.__io || null)"/>Reserven anzeigen</label>
-      <label class="checkline" title="Aktiviert das ESP32-PLC Oriental-Motorpolling als 1..9 Round-Robin mit 100 ms Pause pro Motor.">
-        <input type="checkbox" id="motor_poll_enabled" onchange="setMotorPoll(this.checked)"/>ESP Motorpolling
-      </label>
-      <span id="motor_poll_status" class="muted">Motorpolling: pruefe...</span>
+      <span class="muted">Motorpolling: aus; Live-Refresh nur im Motors-Setup pro Motor</span>
       <span id="status" class="muted"></span>
     </div>
     <div class="card" style="margin-bottom:12px">
@@ -2811,49 +2803,6 @@ function renderWorkbook(data){
   document.getElementById("wb_meta").textContent = `exists=${wb.exists ? "yes" : "no"} | size=${wb.size_bytes || 0} B | channels=${meta.channel_count || 0}`;
 }
 
-async function refreshMotorPollState(){
-  const checkbox = document.getElementById("motor_poll_enabled");
-  const label = document.getElementById("motor_poll_status");
-  if(!checkbox || !label){ return; }
-  try{
-    const data = await api("/api/motors/poll");
-    checkbox.checked = !!data.auto_poll;
-    checkbox.disabled = !data.available;
-    const interval = data.interval_ms ? `${data.interval_ms} ms` : "100 ms";
-    const nextMotor = data.next_motor ? ` | naechster Motor ${data.next_motor}` : "";
-    label.textContent = data.available
-      ? `Motorpolling: ${data.auto_poll ? "ein" : "aus"} | Round-Robin ${interval}${nextMotor}`
-      : `Motorpolling: nicht verfuegbar (${data.error || "ESP offline/simulation"})`;
-  }catch(err){
-    checkbox.checked = false;
-    checkbox.disabled = true;
-    label.textContent = `Motorpolling: ${err.message}`;
-  }
-}
-
-async function setMotorPoll(enabled){
-  const checkbox = document.getElementById("motor_poll_enabled");
-  const label = document.getElementById("motor_poll_status");
-  checkbox.disabled = true;
-  label.textContent = `Motorpolling wird ${enabled ? "aktiviert" : "deaktiviert"}...`;
-  try{
-    const data = await api("/api/motors/poll", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({enabled: !!enabled})
-    });
-    checkbox.checked = !!data.auto_poll;
-    const interval = data.interval_ms ? `${data.interval_ms} ms` : "100 ms";
-    const nextMotor = data.next_motor ? ` | naechster Motor ${data.next_motor}` : "";
-    label.textContent = `Motorpolling: ${data.auto_poll ? "ein" : "aus"} | Round-Robin ${interval}${nextMotor}`;
-  }catch(err){
-    checkbox.checked = !enabled;
-    label.textContent = `Motorpolling: ${err.message}`;
-  }finally{
-    checkbox.disabled = false;
-  }
-}
-
 function scheduleRefresh(data){
   const anyLive = (data.device_catalog || []).some(item => !item.simulation);
   const desiredMs = anyLive ? 2000 : 5000;
@@ -2872,7 +2821,6 @@ async function reloadAll(silent=false){
   renderWorkbook(data);
   renderDevices(data);
   renderRows(data);
-  await refreshMotorPollState();
   document.getElementById("status").textContent = `${(data.points || []).length} IO-Punkte geladen`;
   scheduleRefresh(data);
 }
@@ -3631,6 +3579,7 @@ function toggleMotorPolling(id, enabled){
   setStatus(`Motor ${id}: 1s Polling ein`);
   refreshOne(id, {silent:true});
   const handle = setInterval(() => {
+    if(document.hidden){ return; }
     refreshOne(id, {silent:true}).catch(err => { console.warn(err); });
   }, 1000);
   motorPollHandles.set(id, handle);
@@ -3657,14 +3606,19 @@ async function reloadAll(opts = {}){
     else { updateCard(motor); }
   }
   const allSimulated = (data.motors || []).length > 0 && (data.motors || []).every(m => !!m.simulation);
-  const pollText = data.motor_poll ? ` | Auto-Poll: ${data.motor_poll.auto_poll ? "ein" : "aus"}` : "";
-  const suffix = (data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "")) + pollText;
+  const suffix = data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "");
   setStatus(`${(data.motors || []).length} Motoren geladen${suffix}`);
   const desiredMs = 0;
   if(currentAutoRefreshMs !== desiredMs){
     scheduleAutoRefresh(desiredMs);
   }
 }
+
+window.addEventListener("beforeunload", () => {
+  for(const id of Array.from(motorPollHandles.keys())){
+    stopMotorPolling(id);
+  }
+});
 
 reloadAll().catch(err => { setStatus(err.message); });
 </script>
