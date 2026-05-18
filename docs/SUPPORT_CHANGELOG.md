@@ -4,6 +4,7 @@
 - Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in einen fahrbaren Zustand. Das AZD-`ready`-Bit wird nur noch diagnostisch verwendet, weil es am Produktionsstand nicht bei allen AZD-Konfigurationen stabil gemappt ist; harte Sperren bleiben Linkfehler, Alarm und HWTO.
 - Erst danach wird die aktuelle physische Position mit `MOTOR 3 SET_POSITION_MM=0.000` als neuer Messfahrt-Nullpunkt uebernommen.
 - Die Stop-Toleranz `+/-0.05 mm` wird nicht am Start der Messfahrt bewertet, sondern nach der 1000-mm-Vorwaertsfahrt und nach der Rueckfahrt auf den neuen Nullpunkt. Pro Stopp bleiben maximal drei Nachkorrekturen erlaubt.
+- Die Stop-Toleranz von Motor 3 wird fuer die Nachkorrektur auf Rohstep-Ebene (`feedback_steps`/`command_steps` plus `steps_per_mm`) bewertet. Die 1/10-mm-Anzeigewerte sind zu grob fuer `+/-0.05 mm`; kleine Restfehler werden deshalb mit `MOTOR 3 MOVE_REL_STEPS=<n>` korrigiert.
 - Abwickler und Aufwickler erhalten `stop`/`resetAlarm`/`etoRecovery`/`calibrate` nun phasenweise parallel, damit das Einmessen beider Wippen zeitgleich startet und keine kuenstliche 2-3-s-Verzoegerung zwischen den Wicklern entsteht.
 
 ## 2026-05-11 (Machine Control Purge/Safety Anzeige getrennt)

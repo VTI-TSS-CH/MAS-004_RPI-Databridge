@@ -179,15 +179,43 @@ class SetupWicklerOrchestrator:
         raise RuntimeError(f"Motor 3 did not reach target during measuring travel: {details}")
 
     def _motor3_position_error_mm(self, motor: dict[str, Any]) -> float:
+        steps = self._motor3_position_error_steps(motor)
+        steps_per_mm = self._motor3_steps_per_mm(motor)
+        if steps is not None and steps_per_mm > 0:
+            return steps / steps_per_mm
         try:
             return (int(motor.get("target_tenths_mm")) - int(motor.get("feedback_tenths_mm"))) / 10.0
         except Exception as exc:
             raise RuntimeError(f"Motor 3 target/feedback unavailable for stop tolerance check: {motor}") from exc
 
+    def _motor3_steps_per_mm(self, motor: dict[str, Any]) -> float:
+        cfg = motor.get("config") if isinstance(motor.get("config"), dict) else {}
+        raw_value = cfg.get("steps_per_mm") or cfg.get("stepsPerMm") or motor.get("steps_per_mm")
+        try:
+            steps_per_mm = float(raw_value)
+        except Exception:
+            return 0.0
+        return steps_per_mm if steps_per_mm > 0 else 0.0
+
+    def _motor3_position_error_steps(self, motor: dict[str, Any]) -> int | None:
+        steps_per_mm = self._motor3_steps_per_mm(motor)
+        command_steps = motor.get("command_steps", motor.get("commandSteps"))
+        feedback_steps = motor.get("feedback_steps", motor.get("feedbackSteps"))
+        if steps_per_mm > 0 and command_steps is not None and feedback_steps is not None:
+            cfg = motor.get("config") if isinstance(motor.get("config"), dict) else {}
+            invert = str(cfg.get("invert_direction", cfg.get("invertDirection", ""))).lower() in {
+                "1",
+                "true",
+                "yes",
+                "ja",
+            }
+            controller_delta = int(command_steps) - int(feedback_steps)
+            return -controller_delta if invert else controller_delta
+        return None
+
     def _motor3_within_stop_tolerance(self, motor: dict[str, Any]) -> bool:
-        # The current ESP status exposes Motor 3 position in 1/10 mm. Enforcing
-        # +/-0.05 mm therefore means target and feedback must land on the same
-        # 1/10-mm value; anything else gets corrected explicitly.
+        # Prefer raw AZD steps here. The 1/10-mm display values are too coarse
+        # for the required +/-0.05 mm print-stop tolerance.
         return abs(self._motor3_position_error_mm(motor)) <= MOTOR3_STOP_TOLERANCE_MM
 
     def _set_motor3_postposition_error(self, active: bool) -> None:
@@ -226,18 +254,23 @@ class SetupWicklerOrchestrator:
         self._hold_wicklers_for_motor3_postpositioning()
         state = dict(motor)
         for attempt in range(1, MOTOR3_POSTPOSITION_MAX_ATTEMPTS + 1):
+            correction_steps = self._motor3_position_error_steps(state)
             correction_mm = self._motor3_position_error_mm(state)
+            step_suffix = f" ({correction_steps} steps)" if correction_steps is not None else ""
             self.logs.log(
                 "raspi",
                 "warning",
                 f"Motor 3 post-positioning attempt {attempt}/{MOTOR3_POSTPOSITION_MAX_ATTEMPTS}: "
-                f"error={correction_mm:.3f}mm tolerance=+/-{MOTOR3_STOP_TOLERANCE_MM:.3f}mm",
+                f"error={correction_mm:.3f}mm{step_suffix} tolerance=+/-{MOTOR3_STOP_TOLERANCE_MM:.3f}mm",
             )
             if abs(correction_mm) <= MOTOR3_STOP_TOLERANCE_MM:
                 self._set_motor3_postposition_error(False)
                 return state
 
-            self._esp(f"MOTOR 3 MOVE_REL_MM_OP={correction_mm:.3f}", read_timeout_s=5.0)
+            if correction_steps is not None:
+                self._esp(f"MOTOR 3 MOVE_REL_STEPS={correction_steps}", read_timeout_s=5.0)
+            else:
+                self._esp(f"MOTOR 3 MOVE_REL_MM_OP={correction_mm:.3f}", read_timeout_s=5.0)
             move_timeout = max(5.0, abs(correction_mm) / max(1.0, self.defaults.learn_speed_mm_s) + 4.0)
             state = self._wait_motor3_idle(timeout_s=move_timeout, min_wait_s=0.1)
             self._hold_wicklers_for_motor3_postpositioning()
