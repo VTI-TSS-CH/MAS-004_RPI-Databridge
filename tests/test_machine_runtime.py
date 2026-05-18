@@ -208,6 +208,41 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("SETUP_WICKLER=NAK_DeviceComm", snapshot["info"]["setup"]["last_result"]["response"])
         self.assertEqual(9, runtime.refresh()["current_state"])
 
+    def test_entering_stop_sends_defined_axis_positions_once(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=8,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        ok, msg = self.params.set_value("MAS0002", "2", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
+            client = client_cls.return_value
+            client.available.return_value = True
+            client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
+
+            snapshot = runtime.refresh()
+
+            self.assertEqual(9, snapshot["current_state"])
+            self.assertEqual(True, snapshot["info"]["stop_positions"]["ok"])
+            self.assertEqual(
+                [(5, 0.0), (6, -20.0), (7, -20.0), (8, 91.0), (9, 91.0)],
+                [call.args for call in client.move_absolute_mm.call_args_list],
+            )
+
+            client.move_absolute_mm.reset_mock()
+            second = runtime.refresh()
+            self.assertEqual(9, second["current_state"])
+            client.move_absolute_mm.assert_not_called()
+
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
         runtime = self.build_runtime()
         runtime._write_state(

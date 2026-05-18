@@ -76,6 +76,14 @@ SAFETY_PHASE_FAILED = "failed"
 PURGE_EXTERNAL_CLEAR_GRACE_S = 3.0
 _SAFETY_RESET_LOCK = threading.Lock()
 _SETUP_WICKLER_LOCK = threading.Lock()
+STOP_MODE_AXIS_TARGETS_MM = {
+    5: 0.0,    # Material-Kontrollkamera TV1
+    6: -20.0,  # Sensor Etikettenerfassung
+    7: -20.0,  # Sensor Auswurfkontrolle
+    8: 91.0,   # Etikettenanschlag links
+    9: 91.0,   # Etikettenanschlag vorne/rechts
+}
+STOP_MODE_POSITION_RETRY_S = 15.0
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -474,6 +482,7 @@ class MachineRuntime:
             self.logs.log("machine", "info", f"state {snapshot['current_state']} -> {new_state} ({state_source})")
 
         actions = state_actions(new_state)
+        self._apply_stop_mode_axis_targets(new_state, info, state_changed=state_changed, ts=ts)
         self._apply_button_leds(new_state, button_mask, ts)
         self._apply_safety_button_leds(new_state, safety_info, ts)
         self._apply_status_lamp(new_state, warning_active=warning_active, ts=ts)
@@ -931,6 +940,87 @@ class MachineRuntime:
             return result
         finally:
             _SETUP_WICKLER_LOCK.release()
+
+    def _stop_mode_target_key(self) -> str:
+        return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()))
+
+    def _apply_stop_mode_axis_targets(
+        self,
+        state: int,
+        info: dict[str, Any],
+        *,
+        state_changed: bool,
+        ts: float,
+    ) -> None:
+        stop_info = dict(info.get("stop_positions") or {})
+        target_key = self._stop_mode_target_key()
+        if int(state or 0) != 9:
+            if stop_info.get("active"):
+                stop_info["active"] = False
+                stop_info["left_stop_ts"] = ts
+                info["stop_positions"] = stop_info
+            return
+
+        last_attempt_ts = float(stop_info.get("last_attempt_ts") or 0.0)
+        retry_due = (ts - last_attempt_ts) >= STOP_MODE_POSITION_RETRY_S
+        should_apply = (
+            bool(state_changed)
+            or stop_info.get("target_key") != target_key
+            or (not bool(stop_info.get("ok")) and retry_due)
+        )
+        if not should_apply:
+            stop_info["active"] = True
+            info["stop_positions"] = stop_info
+            return
+
+        client = EspMotorClient(self.cfg)
+        stop_info = {
+            **stop_info,
+            "active": True,
+            "ok": False,
+            "target_key": target_key,
+            "last_attempt_ts": ts,
+            "targets_mm": dict(STOP_MODE_AXIS_TARGETS_MM),
+            "results": [],
+        }
+        if not client.available():
+            stop_info.update({"skipped": True, "reason": "esp_motor_endpoint_unavailable_or_simulation"})
+            info["stop_positions"] = stop_info
+            return
+
+        errors: list[str] = []
+        for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
+            try:
+                reply = client.move_absolute_mm(motor_id, target_mm)
+                ok = bool(reply.get("ok"))
+                result = {"motor_id": motor_id, "target_mm": target_mm, "ok": ok, "reply": reply.get("reply")}
+                stop_info["results"].append(result)
+                if not ok:
+                    errors.append(f"Motor {motor_id}: {reply.get('reply')}")
+            except Exception as exc:
+                result = {"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)}
+                stop_info["results"].append(result)
+                errors.append(f"Motor {motor_id}: {exc}")
+
+        if errors:
+            stop_info.update({"ok": False, "errors": errors, "finished_ts": now_ts()})
+            self.logs.log("machine", "warning", "Stop-Positionssatz unvollstaendig: " + "; ".join(errors))
+            self._record_event(
+                "stop_mode_axis_targets",
+                "warning",
+                "Stop-Positionssatz konnte nicht vollstaendig gesendet werden",
+                stop_info,
+            )
+        else:
+            stop_info.update({"ok": True, "errors": [], "finished_ts": now_ts()})
+            self.logs.log("machine", "info", "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=91mm")
+            self._record_event(
+                "stop_mode_axis_targets",
+                "info",
+                "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=91mm",
+                stop_info,
+            )
+        info["stop_positions"] = stop_info
 
     def _active_param_keys(self, ptype: str) -> list[str]:
         with self.db._conn() as c:

@@ -1,5 +1,9 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-18 (Stop-Modus Achs-Positionssatz)
+- Beim Eintritt in `MAS0001=9` / Produktions-Stop sendet die Runtime jetzt einen definierten Positionssatz an die ESP-Motorsteuerung: ID5 Materialkamera auf `0 mm`, ID6/ID7 Sensorachsen auf `-20 mm`, ID8/ID9 Etikettenanschlaege auf `91 mm`.
+- Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern mit Cooldown erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.
+
 ## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und AZD-Operable-Gate)
 - Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in einen fahrbaren Zustand. Das AZD-`ready`-Bit wird nur noch diagnostisch verwendet, weil es am Produktionsstand nicht bei allen AZD-Konfigurationen stabil gemappt ist; harte Sperren bleiben Linkfehler, Alarm und HWTO.
 - Erst danach wird die aktuelle physische Position mit `MOTOR 3 SET_POSITION_MM=0.000` als neuer Messfahrt-Nullpunkt uebernommen.
