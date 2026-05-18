@@ -115,6 +115,46 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertEqual("0", self.params.get_effective_value("MAE0048"))
         self.assertIn("MOTOR 3 MOVE_REL_MM_OP=0.300", [call.args[0] for call in self.controller._esp.call_args_list])
 
+    def test_motor3_measurement_preparation_captures_current_position_as_zero(self):
+        self.controller._esp = Mock(
+            side_effect=[
+                "ACK_RESET_ALARM",
+                "ACK_RECOVER_ETO",
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"feedback_tenths_mm":1631838,"target_tenths_mm":1641838}}}',
+                "ACK_SET_POSITION_MM",
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"feedback_tenths_mm":0,"target_tenths_mm":0}}}',
+            ]
+        )
+
+        state = self.controller._prepare_motor3_for_measurement()
+
+        self.assertEqual(0, state["feedback_tenths_mm"])
+        self.assertEqual(0, state["target_tenths_mm"])
+        calls = [call.args[0] for call in self.controller._esp.call_args_list]
+        self.assertEqual("MOTOR 3 RESET_ALARM", calls[0])
+        self.assertEqual("MOTOR 3 RECOVER_ETO", calls[1])
+        self.assertIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
+
+    def test_motor3_measurement_preparation_rejects_not_ready_drive_before_move(self):
+        self.controller._esp = Mock(
+            side_effect=[
+                "ACK_RESET_ALARM",
+                "ACK_RECOVER_ETO",
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"output_raw_hex":"43"}}}',
+            ]
+            + [
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"output_raw_hex":"43"}}}'
+            ]
+            * 30
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "not ready"):
+            self.controller._prepare_motor3_for_measurement()
+
+        calls = [call.args[0] for call in self.controller._esp.call_args_list]
+        self.assertNotIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
+        self.assertFalse(any(call.startswith("MOTOR 3 MOVE_REL_MM_OP") for call in calls))
+
 
 if __name__ == "__main__":
     unittest.main()

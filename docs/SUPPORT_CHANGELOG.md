@@ -1,5 +1,10 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und Ready-Gate)
+- Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in Bereitschaft und wartet auf `ready=true`.
+- Erst danach wird die aktuelle physische Position mit `MOTOR 3 SET_POSITION_MM=0.000` als neuer Messfahrt-Nullpunkt uebernommen.
+- Die Stop-Toleranz `+/-0.05 mm` wird nicht am Start der Messfahrt bewertet, sondern nach der 1000-mm-Vorwaertsfahrt und nach der Rueckfahrt auf den neuen Nullpunkt. Pro Stopp bleiben maximal drei Nachkorrekturen erlaubt.
+
 ## 2026-05-11 (Machine Control Purge/Safety Anzeige getrennt)
 - Machine Control unterscheidet die rote Kopfstatus-Anzeige jetzt zwischen echtem `Purge` (`MAS0028`/`purge_active`) und `Safety/Reset` (Safety-Latch oder Maschinenstatus `21`).
 - Hintergrund Produktionsbefund: `MAS0028=0` und `critical_reasons=[]`, aber ein fehlgeschlagener Motor-Ready-Reset hielt `Safety-Latch=true`. Das ist kein aktiver Purge, sondern ein noch nicht abgeschlossener Reset-/Motion-Recovery-Zustand.

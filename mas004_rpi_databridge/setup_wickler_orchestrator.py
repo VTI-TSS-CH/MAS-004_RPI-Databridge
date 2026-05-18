@@ -61,6 +61,51 @@ class SetupWicklerOrchestrator:
             f"MOTOR 3 SET speed_mm_s={speed:.3f} accel_mm_s2={ramp:.3f} decel_mm_s2={ramp:.3f}"
         )
 
+    def _motor3_ready(self, motor: dict[str, Any]) -> bool:
+        return bool(motor.get("link_ok") or motor.get("linkOk")) and bool(motor.get("ready")) and not bool(motor.get("alarm"))
+
+    def _motor3_status(self) -> dict[str, Any]:
+        return self._motor3_state_from_status(self._json_response(self._esp("MOTOR 3 REFRESH", read_timeout_s=5.0)))
+
+    def _prepare_motor3_for_measurement(self) -> dict[str, Any]:
+        # The measuring run starts from the current physical label position. It
+        # is not a tolerance check yet; the tolerance is evaluated after the
+        # 1000-mm pass and again after returning to this newly captured zero.
+        for command in ("MOTOR 3 RESET_ALARM", "MOTOR 3 RECOVER_ETO"):
+            self._esp(command, read_timeout_s=5.0)
+
+        deadline = time.time() + 8.0
+        last_state: dict[str, Any] = {}
+        while time.time() < deadline:
+            last_state = self._motor3_status()
+            if self._motor3_ready(last_state):
+                self._esp("MOTOR 3 SET_POSITION_MM=0.000", read_timeout_s=5.0)
+                zero_state = self._motor3_status()
+                self._set_motor3_postposition_error(False)
+                return zero_state
+            time.sleep(0.4)
+
+        details = {
+            key: last_state.get(key)
+            for key in (
+                "link_ok",
+                "ready",
+                "move",
+                "alarm",
+                "alarm_code",
+                "hwto",
+                "input_raw_hex",
+                "output_raw_hex",
+                "monitor0179_hex",
+                "monitor017b_hex",
+                "monitor017d_hex",
+                "last_error",
+                "last_reply",
+            )
+            if key in last_state
+        }
+        raise RuntimeError(f"Motor 3 is not ready for measuring travel: {details}")
+
     def _json_response(self, response: str) -> dict[str, Any]:
         text = (response or "").strip()
         if text.upper().startswith("JSON "):
@@ -230,6 +275,7 @@ class SetupWicklerOrchestrator:
             client.post_mode("etoRecovery", timeout_s=5.0)
             client.post_mode("calibrate", timeout_s=5.0)
         self._wait_wicklers_ready()
+        self._prepare_motor3_for_measurement()
 
         forward_candidates = self._learn_diameter_pass(distance, speed)
         reverse_candidates = self._learn_diameter_pass(-distance, speed)
