@@ -370,11 +370,10 @@ class SetupWicklerOrchestrator:
     def _learn_diameter_pass(self, distance_mm: float, speed_mm_s: float) -> dict[str, float]:
         for client in self._winder_clients():
             client.start_diameter_learning(timeout_s=5.0)
-        # Diameter learning is a setup/IBN path, not the deterministic indexed
-        # production trigger path. Use the AZD operation-start command here so
-        # the full forward/reverse measuring distance is executed independently
-        # of the Motor-3 hardware START hold time used later for takt tests.
-        self._esp(f"MOTOR 3 MOVE_REL_MM_OP={distance_mm:.3f}", read_timeout_s=5.0)
+        # Diameter learning must use the ESP Direct-Data path. Operation-Data
+        # commands can be accepted by the AZD after I/O reconfiguration without
+        # causing physical motion, which leaves only the target at 1000 mm.
+        self._esp(f"MOTOR 3 MOVE_REL_MM={distance_mm:.3f}", read_timeout_s=5.0)
         abs_distance = abs(float(distance_mm))
         abs_speed = max(1.0, abs(float(speed_mm_s)))
         ramp = max(1.0, self.defaults.learn_ramp_mm_s2)

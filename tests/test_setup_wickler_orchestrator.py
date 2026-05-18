@@ -2,7 +2,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
@@ -221,6 +221,31 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         calls = [call.args[0] for call in self.controller._esp.call_args_list]
         self.assertNotIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
         self.assertFalse(any(call.startswith("MOTOR 3 MOVE_REL_MM_OP") for call in calls))
+
+    def test_diameter_learning_uses_direct_data_relative_move(self):
+        class FakeWicklerClient:
+            def start_diameter_learning(self, timeout_s: float | None = None):
+                return {"ok": True}
+
+        self.controller._winder_clients = Mock(return_value=[FakeWicklerClient(), FakeWicklerClient()])
+        self.controller._esp = Mock(return_value="ACK")
+        self.controller._wait_motor3_idle = Mock(
+            return_value={"feedback_tenths_mm": 10000, "target_tenths_mm": 10000}
+        )
+        self.controller._ensure_motor3_stop_tolerance = Mock()
+
+        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.SmartWicklerClient") as client_cls:
+            client_cls.return_value.finish_diameter_learning.return_value = {
+                "ok": True,
+                "candidateDiameterMm": 200.0,
+            }
+            with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep"):
+                result = self.controller._learn_diameter_pass(1000.0, 100.0)
+
+        self.assertEqual({"unwinder": 200.0, "rewinder": 200.0}, result)
+        calls = [call.args[0] for call in self.controller._esp.call_args_list]
+        self.assertIn("MOTOR 3 MOVE_REL_MM=1000.000", calls)
+        self.assertFalse(any(call.startswith("MOTOR 3 MOVE_REL_MM_OP=1000") for call in calls))
 
     def test_wickler_calibrate_commands_are_started_in_parallel(self):
         barrier = threading.Barrier(2, timeout=1.0)

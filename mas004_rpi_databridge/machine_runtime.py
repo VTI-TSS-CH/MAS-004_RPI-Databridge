@@ -83,6 +83,7 @@ STOP_MODE_AXIS_TARGETS_MM = {
     8: 91.0,   # Etikettenanschlag links
     9: 91.0,   # Etikettenanschlag vorne/rechts
 }
+STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
 STOP_MODE_POSITION_RETRY_S = 15.0
 
 
@@ -991,6 +992,8 @@ class MachineRuntime:
         errors: list[str] = []
         for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
             try:
+                client.reset_alarm(motor_id)
+                client.recover_eto_motor(motor_id)
                 reply = client.move_absolute_mm(motor_id, target_mm)
                 ok = bool(reply.get("ok"))
                 result = {"motor_id": motor_id, "target_mm": target_mm, "ok": ok, "reply": reply.get("reply")}
@@ -1001,6 +1004,11 @@ class MachineRuntime:
                 result = {"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)}
                 stop_info["results"].append(result)
                 errors.append(f"Motor {motor_id}: {exc}")
+
+        verification = self._verify_stop_mode_axis_targets(client)
+        stop_info["verification"] = verification
+        if not verification.get("ok"):
+            errors.extend(str(item) for item in verification.get("errors") or [])
 
         if errors:
             stop_info.update({"ok": False, "errors": errors, "finished_ts": now_ts()})
@@ -1021,6 +1029,38 @@ class MachineRuntime:
                 stop_info,
             )
         info["stop_positions"] = stop_info
+
+    def _verify_stop_mode_axis_targets(self, client: EspMotorClient) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
+            target_tenths = int(round(float(target_mm) * 10.0))
+            try:
+                payload = client.refresh(motor_id)
+                motor = payload.get("motor") if isinstance(payload, dict) else {}
+                state = (motor or {}).get("state") or motor or {}
+                feedback_tenths = int(state.get("feedback_tenths_mm"))
+                moving = bool(state.get("move")) or bool(state.get("busy"))
+                error_tenths = target_tenths - feedback_tenths
+                at_target = abs(error_tenths) <= STOP_MODE_POSITION_TOLERANCE_TENTHS
+                result = {
+                    "motor_id": motor_id,
+                    "target_tenths_mm": target_tenths,
+                    "feedback_tenths_mm": feedback_tenths,
+                    "error_tenths_mm": error_tenths,
+                    "moving": moving,
+                    "at_target": at_target,
+                }
+                results.append(result)
+                if not at_target and not moving:
+                    errors.append(
+                        f"Motor {motor_id} steht bei {feedback_tenths / 10.0:.1f}mm, "
+                        f"Ziel {target_mm:.1f}mm, keine Bewegung gemeldet"
+                    )
+            except Exception as exc:
+                results.append({"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)})
+                errors.append(f"Motor {motor_id} Refresh: {exc}")
+        return {"ok": not errors, "results": results, "errors": errors}
 
     def _active_param_keys(self, ptype: str) -> list[str]:
         with self.db._conn() as c:

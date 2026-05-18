@@ -228,11 +228,17 @@ class MachineRuntimeTests(unittest.TestCase):
             client = client_cls.return_value
             client.available.return_value = True
             client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
+            def fake_refresh(motor_id):
+                targets = {5: 0, 6: -200, 7: -200, 8: 910, 9: 910}
+                return {"motor": {"state": {"feedback_tenths_mm": targets[int(motor_id)], "move": False, "busy": False}}}
+            client.refresh.side_effect = fake_refresh
 
             snapshot = runtime.refresh()
 
             self.assertEqual(9, snapshot["current_state"])
             self.assertEqual(True, snapshot["info"]["stop_positions"]["ok"])
+            self.assertEqual([5, 6, 7, 8, 9], [call.args[0] for call in client.reset_alarm.call_args_list])
+            self.assertEqual([5, 6, 7, 8, 9], [call.args[0] for call in client.recover_eto_motor.call_args_list])
             self.assertEqual(
                 [(5, 0.0), (6, -20.0), (7, -20.0), (8, 91.0), (9, 91.0)],
                 [call.args for call in client.move_absolute_mm.call_args_list],
@@ -242,6 +248,36 @@ class MachineRuntimeTests(unittest.TestCase):
             second = runtime.refresh()
             self.assertEqual(9, second["current_state"])
             client.move_absolute_mm.assert_not_called()
+
+    def test_stop_axis_positions_are_not_ok_when_drive_accepts_but_does_not_move(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=8,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        ok, msg = self.params.set_value("MAS0002", "2", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
+            client = client_cls.return_value
+            client.available.return_value = True
+            client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
+            client.refresh.side_effect = lambda motor_id: {
+                "motor": {"state": {"feedback_tenths_mm": 300 if int(motor_id) == 6 else 910, "move": False, "busy": False}}
+            }
+
+            snapshot = runtime.refresh()
+
+        self.assertEqual(9, snapshot["current_state"])
+        self.assertEqual(False, snapshot["info"]["stop_positions"]["ok"])
+        self.assertTrue(any("Motor 6 steht" in item for item in snapshot["info"]["stop_positions"]["errors"]))
 
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
         runtime = self.build_runtime()
