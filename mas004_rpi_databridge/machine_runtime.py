@@ -59,6 +59,7 @@ RESETTABLE_SAFETY_ERROR_KEYS = {
     "MAE0027",  # Etikettensensor prellt
     "MAE0030",  # Abwickler Taenzerarm zu tief
     "MAE0034",  # Aufwickler Taenzerarm zu tief
+    "MAE0048",  # Etikettenantrieb Nachpositionierung fehlgeschlagen
 }
 PROCESS_SENSOR_FAULT_STATES = {2, 3, 4, 5, 10, 11, 12, 13, 16, 17}
 CONDITIONAL_RESETTABLE_SAFETY_ERRORS = {

@@ -69,7 +69,7 @@ class ProcessTestControllerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = DB(str(Path(self.tmp.name) / "test.db"))
-        for key, value in (("MAS0001", "9"), ("MAS0002", "0"), ("MAS0028", "0")):
+        for key, value in (("MAS0001", "9"), ("MAS0002", "0"), ("MAS0028", "0"), ("MAE0048", "0")):
             _insert_param(self.db, key, value)
         self.params = ParamStore(self.db)
         self.logs = LogStore(self.db)
@@ -104,35 +104,42 @@ class ProcessTestControllerTests(unittest.TestCase):
         self.assertEqual("ACK_MAC0001=1", self.controller.execute("1"))
         self.controller._calibrate_wicklers_and_learn.assert_called_once()
 
-    def test_motor3_wait_uses_nested_status_position(self):
-        self.controller._esp = Mock(
-            return_value=(
-                'JSON {"ok":true,"motor":{"state":{"busy":false,"move":false,'
-                '"feedback_tenths_mm":1000,"target_tenths_mm":2000,'
-                '"ready":false,"hwto":false}}}'
+    def test_motor3_postposition_rejects_nested_status_position_outside_tolerance(self):
+        self.controller._esp = Mock(return_value="ACK")
+        self.controller._wait_motor3_idle = Mock(
+            return_value={"feedback_tenths_mm": 1000, "target_tenths_mm": 2000, "in_pos": True}
+        )
+        self.controller._hold_wicklers_for_motor3_postpositioning = Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "failed stop tolerance"):
+            self.controller._ensure_motor3_stop_tolerance(
+                {
+                    "feedback_tenths_mm": 1000,
+                    "target_tenths_mm": 2000,
+                    "in_pos": True,
+                }
             )
+
+        self.assertEqual("1", self.params.get_effective_value("MAE0048"))
+
+    def test_motor3_postposition_corrects_inpos_outside_stop_tolerance(self):
+        self.controller._esp = Mock(return_value="ACK")
+        self.controller._wait_motor3_idle = Mock(
+            return_value={"feedback_tenths_mm": 1000, "target_tenths_mm": 1000, "in_pos": True}
+        )
+        self.controller._hold_wicklers_for_motor3_postpositioning = Mock()
+
+        state = self.controller._ensure_motor3_stop_tolerance(
+            {
+                "feedback_tenths_mm": 997,
+                "target_tenths_mm": 1000,
+                "in_pos": True,
+            }
         )
 
-        with self.assertRaisesRegex(RuntimeError, "did not reach target"):
-            self.controller._wait_motor3_idle(timeout_s=0.01, min_wait_s=0.0)
-
-    def test_motor3_wait_accepts_inpos_even_with_small_position_delta(self):
-        self.controller._esp = Mock(
-            side_effect=[
-                (
-                    'JSON {"ok":true,"motor":{"state":{"busy":true,"move":true,'
-                    '"feedback_tenths_mm":997,"target_tenths_mm":1000,'
-                    '"in_pos":false,"ready":false,"hwto":false}}}'
-                ),
-                (
-                    'JSON {"ok":true,"motor":{"state":{"busy":false,"move":false,'
-                    '"feedback_tenths_mm":997,"target_tenths_mm":1000,'
-                    '"in_pos":true,"ready":true,"hwto":false}}}'
-                ),
-            ]
-        )
-
-        self.controller._wait_motor3_idle(timeout_s=1.0, min_wait_s=0.0)
+        self.assertEqual(1000, state["feedback_tenths_mm"])
+        self.assertEqual("0", self.params.get_effective_value("MAE0048"))
+        self.assertIn("MOTOR 3 MOVE_REL_MM_OP=0.300", [call.args[0] for call in self.controller._esp.call_args_list])
 
 
 if __name__ == "__main__":

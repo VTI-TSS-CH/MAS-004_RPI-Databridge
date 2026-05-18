@@ -12,6 +12,11 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
 
 
+MOTOR3_STOP_TOLERANCE_MM = 0.05
+MOTOR3_POSTPOSITION_MAX_ATTEMPTS = 3
+MOTOR3_POSTPOSITION_ERROR_PKEY = "MAE0048"
+
+
 @dataclass(frozen=True)
 class ProcessCommandDefaults:
     label_length_mm: float = 100.0
@@ -164,7 +169,7 @@ class TemporaryProcessCommandController:
             return merged
         return motor
 
-    def _wait_motor3_idle(self, timeout_s: float = 60.0, min_wait_s: float = 0.0) -> None:
+    def _wait_motor3_idle(self, timeout_s: float = 60.0, min_wait_s: float = 0.0) -> dict[str, Any]:
         started = time.time()
         deadline = time.time() + float(timeout_s)
         seen_busy = False
@@ -177,20 +182,13 @@ class TemporaryProcessCommandController:
             motor = self._motor3_state_from_status(payload)
             last_state = motor
             busy = bool(motor.get("busy")) or bool(motor.get("move"))
-            in_pos = bool(motor.get("in_pos"))
-            feedback = motor.get("feedback_tenths_mm")
-            target = motor.get("target_tenths_mm")
-            try:
-                position_close = abs(int(target) - int(feedback)) <= 5
-            except Exception:
-                position_close = False
             if busy:
                 seen_busy = True
             elapsed = time.time() - started
-            if motor and not busy and (in_pos or position_close) and elapsed >= float(min_wait_s) and (
+            if motor and not busy and elapsed >= float(min_wait_s) and (
                 seen_busy or elapsed > 2.0
             ):
-                return
+                return motor
             time.sleep(0.25)
         details = {
             key: last_state.get(key)
@@ -211,6 +209,80 @@ class TemporaryProcessCommandController:
             if key in last_state
         }
         raise RuntimeError(f"Motor 3 did not reach target during measuring travel: {details}")
+
+    def _motor3_position_error_mm(self, motor: dict[str, Any]) -> float:
+        try:
+            return (int(motor.get("target_tenths_mm")) - int(motor.get("feedback_tenths_mm"))) / 10.0
+        except Exception as exc:
+            raise RuntimeError(f"Motor 3 target/feedback unavailable for stop tolerance check: {motor}") from exc
+
+    def _motor3_within_stop_tolerance(self, motor: dict[str, Any]) -> bool:
+        # The current ESP status exposes Motor 3 position in 1/10 mm. Enforcing
+        # +/-0.05 mm therefore means target and feedback must land on the same
+        # 1/10-mm value; anything else gets corrected explicitly.
+        return abs(self._motor3_position_error_mm(motor)) <= MOTOR3_STOP_TOLERANCE_MM
+
+    def _set_motor3_postposition_error(self, active: bool) -> None:
+        ok, msg = self.params.apply_device_value(
+            MOTOR3_POSTPOSITION_ERROR_PKEY,
+            "1" if active else "0",
+            promote_default=True,
+        )
+        if not ok and msg != "NAK_UnknownParam":
+            self.logs.log(
+                "raspi",
+                "warning",
+                f"{MOTOR3_POSTPOSITION_ERROR_PKEY} update failed: {msg}",
+            )
+
+    def _hold_wicklers_for_motor3_postpositioning(self) -> None:
+        try:
+            self._esp("PROCESS WICKLER CANCEL", read_timeout_s=5.0)
+        except Exception as exc:
+            self.logs.log("raspi", "info", f"Motor 3 post-positioning wickler cancel ignored: {repr(exc)}")
+        errors: list[str] = []
+        for client in self._winder_clients():
+            try:
+                client.post_master({"indexedModeEnabled": "0"}, timeout_s=5.0)
+                client.post_mode("stop", timeout_s=5.0)
+            except Exception as exc:
+                errors.append(repr(exc))
+        if errors:
+            raise RuntimeError("Wicklers could not be held during Motor 3 post-positioning: " + "; ".join(errors))
+
+    def _ensure_motor3_stop_tolerance(self, motor: dict[str, Any]) -> dict[str, Any]:
+        if self._motor3_within_stop_tolerance(motor):
+            self._set_motor3_postposition_error(False)
+            return motor
+
+        self._hold_wicklers_for_motor3_postpositioning()
+        state = dict(motor)
+        for attempt in range(1, MOTOR3_POSTPOSITION_MAX_ATTEMPTS + 1):
+            correction_mm = self._motor3_position_error_mm(state)
+            self.logs.log(
+                "raspi",
+                "warning",
+                f"Motor 3 post-positioning attempt {attempt}/{MOTOR3_POSTPOSITION_MAX_ATTEMPTS}: "
+                f"error={correction_mm:.3f}mm tolerance=+/-{MOTOR3_STOP_TOLERANCE_MM:.3f}mm",
+            )
+            if abs(correction_mm) <= MOTOR3_STOP_TOLERANCE_MM:
+                self._set_motor3_postposition_error(False)
+                return state
+
+            self._esp(f"MOTOR 3 MOVE_REL_MM_OP={correction_mm:.3f}", read_timeout_s=5.0)
+            move_timeout = max(5.0, abs(correction_mm) / max(1.0, self.defaults.learn_speed_mm_s) + 4.0)
+            state = self._wait_motor3_idle(timeout_s=move_timeout, min_wait_s=0.1)
+            self._hold_wicklers_for_motor3_postpositioning()
+
+        final_error_mm = self._motor3_position_error_mm(state)
+        if self._motor3_within_stop_tolerance(state):
+            self._set_motor3_postposition_error(False)
+            return state
+        self._set_motor3_postposition_error(True)
+        raise RuntimeError(
+            f"Motor 3 failed stop tolerance after {MOTOR3_POSTPOSITION_MAX_ATTEMPTS} corrections: "
+            f"error={final_error_mm:.3f}mm tolerance=+/-{MOTOR3_STOP_TOLERANCE_MM:.3f}mm"
+        )
 
     def _winder_clients(self) -> list[SmartWicklerClient]:
         return [SmartWicklerClient(self.cfg, "unwinder"), SmartWicklerClient(self.cfg, "rewinder")]
@@ -299,7 +371,7 @@ class TemporaryProcessCommandController:
             expected_move_s = (abs_distance / abs_speed) + (abs_speed / ramp)
         else:
             expected_move_s = 2.0 * ((abs_distance / ramp) ** 0.5)
-        self._wait_motor3_idle(
+        motor_state = self._wait_motor3_idle(
             timeout_s=max(30.0, expected_move_s + 20.0),
             min_wait_s=max(0.0, expected_move_s + 0.5),
         )
@@ -322,6 +394,7 @@ class TemporaryProcessCommandController:
                         "info",
                         f"MAC diameter candidate {role}: {candidate:.1f}mm after {abs_distance:.1f}mm pass",
                     )
+        self._ensure_motor3_stop_tolerance(motor_state)
         return candidates
 
     def _start_indexed_production(self) -> str:

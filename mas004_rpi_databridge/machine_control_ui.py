@@ -171,7 +171,8 @@ const reasonLabels = {{
   "MAE0030": "Abwicklung Taenzerarm zu tief",
   "MAE0032": "Aufwicklung Taenzerarm blockiert",
   "MAE0033": "Aufwicklung Taenzerarm zu hoch",
-  "MAE0034": "Aufwicklung Taenzerarm zu tief"
+  "MAE0034": "Aufwicklung Taenzerarm zu tief",
+  "MAE0048": "Etikettenantrieb Stopptoleranz nicht erreicht"
 }};
 function reasonHtml(reasons){{
   const items = Array.isArray(reasons) ? reasons : [];
