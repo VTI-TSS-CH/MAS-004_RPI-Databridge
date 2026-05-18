@@ -656,6 +656,124 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["master:{'indexedModeEnabled': '0'}", "stop", "resetAlarm", "etoRecovery", "stop"], calls["unwinder"])
         self.assertEqual(["master:{'indexedModeEnabled': '0'}", "stop", "resetAlarm", "etoRecovery", "stop"], calls["rewinder"])
 
+    def test_motion_reset_accepts_motor3_operable_without_ready_bit(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                pass
+
+            def available(self):
+                return True
+
+            def apply_eto_recovery(self):
+                return {"ok": True, "reply": "ACK_MOTOR_APPLY_ETO_RECOVERY"}
+
+            def recover_eto(self):
+                return {"ok": True, "reply": "ACK_MOTOR_RECOVER_ETO"}
+
+            def reset_alarm(self, motor_id):
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RESET_ALARM"}
+
+            def recover_eto_motor(self, motor_id):
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RECOVER_ETO"}
+
+            def refresh(self, motor_id):
+                motor_id = int(motor_id)
+                return {
+                    "ok": True,
+                    "motor": {
+                        "state": {
+                            "link_ok": True,
+                            "ready": motor_id != 3,
+                            "alarm": False,
+                            "alarm_code": 0,
+                            "hwto": False,
+                            "input_raw_hex": "4",
+                            "output_raw_hex": "40",
+                        }
+                    },
+                }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, _role):
+                pass
+
+            def available(self):
+                return False
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", FakeEspMotorClient), patch(
+            "mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient
+        ):
+            result = runtime._reset_motion_devices()
+
+        self.assertTrue(result["ok"], result)
+        motor3_checks = [
+            item
+            for item in result["details"]["esp_motors"]
+            if item.get("step") == "verify_ready" and item.get("motor_id") == 3
+        ]
+        self.assertTrue(motor3_checks, result)
+        self.assertFalse(motor3_checks[-1]["ready"])
+        self.assertFalse(motor3_checks[-1]["ready_required"])
+        self.assertTrue(motor3_checks[-1]["operable"])
+
+    def test_motion_reset_still_rejects_position_axis_without_ready_bit(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                pass
+
+            def available(self):
+                return True
+
+            def apply_eto_recovery(self):
+                return {"ok": True, "reply": "ACK_MOTOR_APPLY_ETO_RECOVERY"}
+
+            def recover_eto(self):
+                return {"ok": True, "reply": "ACK_MOTOR_RECOVER_ETO"}
+
+            def reset_alarm(self, motor_id):
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RESET_ALARM"}
+
+            def recover_eto_motor(self, motor_id):
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RECOVER_ETO"}
+
+            def refresh(self, motor_id):
+                motor_id = int(motor_id)
+                return {
+                    "ok": True,
+                    "motor": {
+                        "state": {
+                            "link_ok": True,
+                            "ready": motor_id != 2,
+                            "alarm": False,
+                            "alarm_code": 0,
+                            "hwto": False,
+                            "input_raw_hex": "4",
+                            "output_raw_hex": "40",
+                        }
+                    },
+                }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, _role):
+                pass
+
+            def available(self):
+                return False
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", FakeEspMotorClient), patch(
+            "mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient
+        ):
+            result = runtime._reset_motion_devices()
+
+        self.assertFalse(result["ok"], result)
+        self.assertIn("Motor 2 not ready/operable", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

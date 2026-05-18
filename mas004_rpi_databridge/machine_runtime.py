@@ -1273,6 +1273,22 @@ class MachineRuntime:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    @staticmethod
+    def _esp_motor_reset_ready(motor_id: int, state: dict[str, Any], status_ok: bool) -> bool:
+        if not (
+            bool(status_ok)
+            and bool(state.get("link_ok") or state.get("linkOk"))
+            and not bool(state.get("alarm"))
+        ):
+            return False
+        if int(motor_id) == 3:
+            # Motor 3 uses the productive hardware START/STOP input path. On
+            # this AZD-CD path the READY diagnostic bit can stay false although
+            # the drive is usable; the measuring/production moves are verified
+            # by exact stop-position feedback instead.
+            return not bool(state.get("hwto"))
+        return bool(state.get("ready"))
+
     def _reset_motion_devices(self) -> dict[str, Any]:
         details: dict[str, Any] = {"esp_motors": [], "wicklers": []}
         hard_failures: list[str] = []
@@ -1312,17 +1328,17 @@ class MachineRuntime:
                         motor = status.get("motor") if isinstance(status, dict) else {}
                         state = motor.get("state") if isinstance(motor, dict) else {}
                         state = state if isinstance(state, dict) else {}
+                        status_ok = bool(status.get("ok"))
+                        verified = self._esp_motor_reset_ready(motor_id, state, status_ok)
                         verify = {
                             "step": "verify_ready",
                             "motor_id": motor_id,
                             "attempt": attempt,
-                            "ok": bool(
-                                status.get("ok")
-                                and state.get("link_ok")
-                                and state.get("ready")
-                                and not state.get("alarm")
-                            ),
+                            "ok": verified,
+                            "status_ok": status_ok,
                             "ready": bool(state.get("ready")),
+                            "ready_required": int(motor_id) != 3,
+                            "operable": verified,
                             "link_ok": bool(state.get("link_ok")),
                             "alarm": bool(state.get("alarm")),
                             "alarm_code": state.get("alarm_code"),
@@ -1363,9 +1379,10 @@ class MachineRuntime:
                 if not verify or not verify.get("ok"):
                     hard_failures.append(
                         "Motor "
-                        f"{motor_id} not ready "
+                        f"{motor_id} not ready/operable "
                         f"(link={bool((verify or {}).get('link_ok'))}, "
                         f"ready={bool((verify or {}).get('ready'))}, "
+                        f"ready_required={bool((verify or {}).get('ready_required'))}, "
                         f"alarm={bool((verify or {}).get('alarm'))}, "
                         f"alarm_code={(verify or {}).get('alarm_code')}, "
                         f"in={(verify or {}).get('input_raw_hex')}, "

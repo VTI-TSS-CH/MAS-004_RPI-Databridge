@@ -73,6 +73,7 @@
   - the Raspi first clears the ESP process latch via `PROCESS RESET`
   - then it applies and triggers AZD ETO recovery on the ESP32-PLC motor bus and verifies motors `1..9`
   - final readiness uses the ESP firmware's AZD monitor-aware status, especially monitor `0179` ready state, so missing READY R-OUT mapping alone does not block reset
+  - motor 3 is verified as operable with `link_ok=true`, `alarm=false` and `hwto=false`; unlike the positioning axes, it does not require the diagnostic `ready` bit because the production path uses hardware START/STOP and stop accuracy is verified by feedback
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
   - `/ui/machine-setup/commissioning`

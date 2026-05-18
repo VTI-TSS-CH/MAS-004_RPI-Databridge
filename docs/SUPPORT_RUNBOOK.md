@@ -429,14 +429,14 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - Raspi clears `MAS0028` and resettable Safety/Purge errors at this point, before motion recovery, so a later drive recovery fault does not keep an old Purge latch alive without a real critical reason
     - Raspi runs `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, then `MOTOR <id> RESET_ALARM` for `1..9`
     - Raspi posts `stop`, `resetAlarm`, `etoRecovery`, `stop` to both Wicklers if they are live
-    - Raspi verifies all ESP motors `1..9` with live `ready=true`, `alarm=false`
+    - Raspi verifies ESP motors `1..9`: ID1/2/4-9 need live `ready=true`, `alarm=false`; ID3 needs `link_ok=true`, `alarm=false`, `hwto=false` because the Etikettenantrieb uses the hardware START/STOP path and the exact stop is verified by position feedback
     - Raspi verifies both Wicklers with live `drive.ready=true`, `drive.alarm=false`; a Wippe at the lower/upper end is accepted as safe stop
     - If no critical reason remains, Raspi sets `MAS0001=9`; if motion recovery still fails, `MAS0001` may remain `21` while `MAS0028` stays `0`
   - `MAE0008` and `MAE0009` are conditional resettable latches:
     - `MAE0008` is cleared only when ESP `I0.4` is LOW after reset.
     - `MAE0009` is cleared only when ESP `I0.11` is LOW after reset.
     - If either input remains active, the related MAE remains active and `MAS0028` is reasserted.
-  - If any AZD-CD still reports `HWTO/STO active` or `ready=false`, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop.
+  - If any AZD-CD still reports `HWTO/STO active`, alarm, or a missing required `ready` bit, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop. Motor 3 is the deliberate exception for the `ready` bit, not for Link/Alarm/HWTO.
   - Button LEDs:
     - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second
     - reset running: `Q0.2` blinks, no red
