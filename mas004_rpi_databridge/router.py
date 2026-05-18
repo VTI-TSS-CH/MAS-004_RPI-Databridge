@@ -15,7 +15,6 @@ from mas004_rpi_databridge.production_logs import ProductionLogManager
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 from mas004_rpi_databridge.peers import peer_urls
-from mas004_rpi_databridge.process_test_controller import TemporaryProcessCommandController
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
@@ -119,7 +118,6 @@ class Router:
         self.logs = logs
         self.device_bridge = DeviceBridge(cfg, params, logs)
         self.production_logs = ProductionLogManager(params.db, cfg=cfg, outbox=outbox)
-        self.process_commands = TemporaryProcessCommandController(cfg, params, logs)
 
     def _enqueue_to_microtom(
         self,
@@ -166,12 +164,6 @@ class Router:
 
         self.logs.log("raspi", "in", f"microtom: {line}")
         self.logs.log(dev, "in", f"raspi-> {dev}: {line}")
-
-        if ptype == "MAC":
-            resp = self._handle_mac_command(pkey, op, value)
-            self.logs.log("raspi", "out", f"to microtom: {resp}")
-            self._enqueue_to_microtom(resp, correlation=correlation)
-            return resp
 
         if pkey == "MAS0002" and op == "write" and str(value).strip() == "1":
             allowed, reason = self.production_logs.can_start_new_production()
@@ -270,29 +262,6 @@ class Router:
                 self.logs.log("raspi", "info", f"skip esp mirror for device value {pkey}: {mirror_detail}")
 
         return response_line
-
-    def _handle_mac_command(self, pkey: str, op: str, value: Optional[str]) -> str:
-        if op == "read":
-            ok, msg = self.params.validate_read(pkey, actor="microtom")
-            if not ok:
-                return f"{pkey}={msg}"
-            return f"{pkey}={self.params.get_effective_value(pkey)}"
-
-        raw_value = str(value or "").strip()
-        ok, msg = self.params.validate_write(pkey, raw_value, actor="microtom")
-        if not ok:
-            return f"{pkey}={msg}"
-
-        if pkey == "MAC0001":
-            response = self.process_commands.execute(raw_value)
-            if response.startswith("ACK_"):
-                self.params.set_value(pkey, raw_value, actor="microtom")
-            return response
-
-        ok, msg = self.params.set_value(pkey, raw_value, actor="microtom")
-        if not ok:
-            return f"{pkey}={msg}"
-        return f"ACK_{pkey}={raw_value}"
 
     def _mirror_success_to_esp(self, pkey: str, response_line: str):
         parsed = parse_param_line(response_line)

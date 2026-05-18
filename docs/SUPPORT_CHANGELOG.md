@@ -26,12 +26,11 @@
 - Sicherheits-/Purge-Reset sendet an Abwickler und Aufwickler nur noch `stop`, `resetAlarm`, `etoRecovery`, `stop`.
 - Der Reset setzt die Wickler damit hardwareseitig frei, startet aber keinen `ready`-Regelmodus mehr.
 - Die Reset-Pruefung akzeptiert eine unten/oben stehende Wippe als sicheren Stop-Zustand, solange AZD online, ready und alarmfrei ist.
-- Einmessen und 1000-mm-Messfahrt bleiben ausschliesslich Einrichtkontext (`Einrichten`/`MAS0002=3` bzw. `MAC0001=1` nur im Setup).
+- Einmessen und 1000-mm-Messfahrt bleiben ausschliesslich Einrichtkontext (`Einrichten`/`MAS0002=3` bzw. der interne Setup-Wicklerworkflow nur im Setup).
 
 ## 2026-05-11 (Wickler-Einmessen nur im Einrichtkontext)
-- `MAC0001=1` ist weiterhin ein temporaerer IBN-Helfer, startet Wickler-Einmessen plus 1000-mm-Messfahrt aber nicht mehr frei aus jedem Maschinenzustand.
-- Bei aktivem Purge/Not-Stop wird `MAC0001=1` mit `MAC0001=NAK_PurgeActive` abgewiesen.
-- Ausserhalb von `MAS0002=3` bzw. Maschinenzustand `2/3` wird `MAC0001=1` mit `MAC0001=NAK_SetupRequired` abgewiesen.
+- Der interne Setup-Wicklerworkflow ist Teil des produktiven Einrichtablaufs und startet Wickler-Einmessen plus 1000-mm-Messfahrt nicht mehr frei aus jedem Maschinenzustand.
+- Bei aktivem Purge/Not-Stop oder ausserhalb von `MAS0002=3` bzw. Maschinenzustand `2/3` wird der interne Setup-Wicklerworkflow abgewiesen und als Einrichtfehler protokolliert.
 - Damit kann ein Reset-/Purge-Ablauf nicht versehentlich Wicklerbewegungen oder Messfahrten ausloesen; Einmessen gehoert zur Einrichten-Taste bzw. zum Einrichtmodus.
 
 ## 2026-05-11 (Production Microtom Peer Topology)
@@ -118,7 +117,7 @@
 - Resettable Safety-Fehler (`MAS0028`, `MAE0001`, `MAE0024`, `MAE0027`, `MAE0030`, `MAE0034`) werden nur nach erfolgreicher Ready-Verifikation geloescht.
 
 ## 2026-04-30 (eth1 ESP32-PLC-Kommunikation robuster)
-- Raspi-seitiger ESP-TCP-Client serialisiert Zugriffe pro `host:port` jetzt ueber einen Endpoint-Lock. Dadurch konkurrieren Motor-UI, IO-Snapshot, MAC-Prozesssteuerung und Parameter-Mirroring nicht mehr gleichzeitig um den Single-Client-W5500-Socket der ESP32-PLC.
+- Raspi-seitiger ESP-TCP-Client serialisiert Zugriffe pro `host:port` jetzt ueber einen Endpoint-Lock. Dadurch konkurrieren Motor-UI, IO-Snapshot, Setup-Orchestrierung und Parameter-Mirroring nicht mehr gleichzeitig um den Single-Client-W5500-Socket der ESP32-PLC.
 - Nach ESP-Verbindungsfehlern gibt es einen kurzen exponentiellen Cooldown statt sofortiger Retry-Stuerme auf `192.168.2.101:3010`.
 - ESP-spezifische Timeouts wurden von `http_timeout_s` getrennt:
   - `esp_connect_timeout_s = 1.5`
@@ -140,14 +139,13 @@
 - Nach Verifikation am echten ESP wurde die Uebersicht weiter entschaerft: Auto-Refresh liest nur noch Cache plus `MOTOR POLL?`; auch kleine 9-fache `STATUS?`-Abfragen waren fuer den ESP/W5500-Single-Socket zu viel.
 - Die Uebersichtsseite zeigt den Auto-Poll-Zustand an; fuer IBN/Service bleibt manuelles Refresh der bevorzugte Weg, solange der ESP parallel Prozess-/Wicklersteuerung macht.
 
-## 2026-04-30 (MAC-Orchestrierung: Wickler-Indexed sauber verlassen)
-- `MAC0001=0` setzt beide Wickler vor dem Stop explizit aus `indexedModeEnabled=1` heraus und sendet danach `/api/mode stop`.
-- `MAC0001=1` schaltet die Wickler vor Reset/ETO/Einmessen ebenfalls aus dem Indexed-Modus, damit keine alte Taktfahrt in die Messfahrt hineinwirkt.
-- `MAC0001=3/4` deaktiviert vor kontinuierlichem Vor-/Ruecklauf den Wickler-Indexed-Modus.
+## 2026-04-30 (Setup-Orchestrierung: Wickler-Indexed sauber verlassen)
+- Der interne Setup-Wicklerworkflow schaltet die Wickler vor Reset/ETO/Einmessen aus dem Indexed-Modus, damit keine alte Taktfahrt in die Messfahrt hineinwirkt.
+- Service-Stop und Einrichtablauf setzen beide Wickler deterministisch auf `indexedModeEnabled=0` und senden danach `/api/mode stop`.
 - Hintergrund: Nach Takt-/Messabbruechen konnte ein Wickler mit alter Indexed-Konfiguration im Drive-MOVE-Zustand haengen bleiben; der Raspi bereitet die Wickler nun vor Service-/Kontinuierlichfahrten deterministisch vor.
 
-## 2026-04-30 (Produktions-Raspi mit MAC-IBN-Stand deployed)
-- Produktions-/IBN-Raspi `10.141.94.213` wurde mit dem aktuellen Raspi-Code fuer die temporaeren `MAC0001..MAC0006`-Kommandos aktualisiert.
+## 2026-04-30 (Produktions-Raspi mit IBN-Stand deployed)
+- Produktions-/IBN-Raspi `10.141.94.213` wurde mit dem damaligen Raspi-IBN-Stand aktualisiert.
 - Runtime-Settings unter `/etc/mas004_rpi_databridge/config.json` wurden nicht ueberschrieben.
 - Masterliste wurde nach `/var/lib/mas004_rpi_databridge/master/Parameterliste_master.xlsx` kopiert und in die SQLite-Parameterdatenbank importiert.
 - Importergebnis auf dem Raspi: `inserted=21`, `updated=735`, `skipped=0`.
@@ -162,17 +160,10 @@
   - `PROCESS INDEXED STATUS?` liefert JSON mit `running=false`, `completed=true`, `last_error="reset"`
 
 
-## 2026-04-30 (Temporaere MAC-IBN-Kommandos fuer produktionsnahe Wickler-/Transporttests)
-- Neue Raspi-seitige `MAC`-Befehlsfamilie in der Master-Excel angelegt und als temporaer dokumentiert.
-- `MAC0001` dispatcht Microtom-Testtool-Kommandos an produktionsnahe Raspi-/ESP32-PLC-/Wickler-Abläufe:
-  - `0` Stop
-  - `1` Wickler einmessen + 1000-mm-Messfahrt + Durchmesseruebernahme
-  - `2` getakteter Testbetrieb
-  - `3` kontinuierlich vorziehen
-  - `4` kontinuierlich zurueckspulen
-- `MAC0002..MAC0006` halten Labellaenge, Geschwindigkeit, Rampe, kontinuierliche Laenge und Taktanzahl.
-- Neuer `process_test_controller.py` orchestriert diese IBN-Kommandos ueber den ESP32-PLC-Endpunkt und die beiden SmartWickler-HTTP-Serviceendpunkte.
-- Alte Laptop-/CSV-Teststeuerung wird dadurch fuer die naechsten Tests nicht mehr als fuehrender Ablauf verwendet.
+## 2026-05-18 (Externe Testbefehle entfernt)
+- Die temporaere externe Testbefehlsfamilie wurde aus Master-Excel, Router, Tests und Dokumentation entfernt.
+- Der produktive Wickler-Einrichtablauf bleibt intern erhalten: Beim Wechsel in den Einrichtbetrieb fuehrt der Raspi die Wickler-Kalibrierung, 1000-mm-Messfahrt und Durchmesseruebernahme selbst aus.
+- Externe Testkommandos fuer getaktete/continuous Bewegungen werden nicht mehr angeboten. Produktionsnahe Tests laufen ueber MAS0002, Format-/MAP-Parameter und die ESP32-PLC-Ablaufsteuerung.
 
 ## 2026-04-30 (Masterdaten: Wickler-Fuellstandswarnungen getrennt)
 - Master-Workbook `Parameterliste SAR41-MAS-004.xlsx` aktualisiert und Repo-Kopie in `master_data/` synchronisiert.
@@ -862,11 +853,11 @@
   - uses `--no-deps --no-build-isolation`
   - avoids dependency downloads during deploy, which is important when the Pi clock is wrong before first NTP sync
 
-## 2026-04-30 (MAC Test Commands + Smart Wickler Device Push)
+## 2026-04-30 (Temporary Test Commands + Smart Wickler Device Push)
 - Added temporary Microtom-test command handling for the process bring-up path:
-  - `MAC0001=1` runs Wickler calibration plus a 1000 mm forward/reverse diameter measurement.
-  - `MAC0001=2/3/4` starts indexed, continuous forward, or continuous reverse test motion via the ESP32-PLC.
-- Hardened the `MAC0001=1` learning run:
+  - der interne Setup-Wicklerworkflow runs Wickler calibration plus a 1000 mm forward/reverse diameter measurement.
+  - die frueheren Bewegungs-Testbefehle starts indexed, continuous forward, or continuous reverse test motion via the ESP32-PLC.
+- Hardened the der interne Setup-Wicklerworkflow learning run:
   - the Raspi now waits for the expected Motor-3 travel time and position feedback before starting the reverse pass.
   - this prevents a premature reverse pass if the ESP busy flag is not visible immediately.
   - the measuring pass now uses the ESP command `MOTOR 3 MOVE_REL_MM_OP=...` so forward and reverse setup moves are executed through AZD operation start, not through the production hardware START hold-time path.

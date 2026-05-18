@@ -134,22 +134,12 @@
   - ESP timeout defaults are intentionally shorter than generic HTTP: connect `1.5 s`, read `2.0 s`, command `8.0 s`.
   - When diagnosing process/Wickler tests, leave diagnostics low: no continuous `MOTOR LIST?`, no background `MOTOR POLL=1`, no parallel shell stress loops.
 
-## 2.1 Temporary IBN Commands Via Microtom
-- The `MAC` command family is temporary and only for commissioning tests; remove or replace it before final Microtom interface release.
-- `MAC0001=0`: stop current process test.
-- `MAC0001=1`: calibrate both Smart Wicklers, run the 1000-mm diameter measurement forward/back, and write the learned diameters to the Wicklers.
-  - This command is accepted only in setup context: `MAS0002=3`, `MAS0001=2/3`, or requested state `2/3`.
-  - During active Purge/Not-Stop it returns `MAC0001=NAK_PurgeActive`; outside setup it returns `MAC0001=NAK_SetupRequired`.
-  - Reset/Purge recovery must only recover drives (`stop/resetAlarm/etoRecovery/stop`) and must not start Wickler calibration or measuring motion.
-  - Current production reset behavior is intentionally passive for Wicklers: `stop/resetAlarm/etoRecovery/stop`. A standing Wippe at the lower/upper end is accepted as safe stop, not as a reason to start regulation.
-- `MAC0001=2`: start indexed/takt test on the ESP32-PLC.
-- `MAC0001=3`: continuous forward feed through Motor 3.
-- `MAC0001=4`: continuous reverse feed through Motor 3.
-- `MAC0002`: indexed label/travel length in 1/10 mm, default `1000` = `100.0 mm`.
-- `MAC0003`: feed speed in mm/s, default `100`.
-- `MAC0004`: acceleration/deceleration ramp in mm/s2, default `300`.
-- `MAC0005`: continuous travel length in 1/10 mm; `0` means endless until `MAC0001=0`.
-- `MAC0006`: indexed cycle count; `0` means endless until `MAC0001=0`.
+## 2.1 Einricht-Wicklerworkflow
+- Die frueheren temporaeren Microtom-Testbefehle fuer Wickler-/Transporttests sind entfernt.
+- Wickler-Einmessen und 1000-mm-Durchmesser-Messfahrt werden nur noch intern durch den Raspi-Maschinenzustand gestartet, wenn die Anlage in den Einrichtmodus wechselt.
+- Reset/Purge-Recovery muss bewegungsarm bleiben: nur `stop`, `resetAlarm`, `etoRecovery`, `stop`; dabei darf keine Wicklerkalibrierung und keine Messfahrt gestartet werden.
+- Current production reset behavior is intentionally passive for Wicklers: a standing Wippe at the lower/upper end is accepted as safe stop, not as a reason to start regulation.
+- Fuer manuelle Service-Diagnose bleiben die Wickler-HTTP-/USB-Servicebefehle nutzbar; sie sind aber keine produktive Microtom-Schnittstelle.
 
 ## 3. Pi Commands
 - Production update:
@@ -475,8 +465,8 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - if live mode is disabled or the endpoint is offline, the Raspi proxy UI must still open inside the main Machine-Setup shell and show a stable simulation/offline state instead of failing hard
   - Smart Wickler pushes to `/api/inbox` must include `source=smartwickler`; these messages are device status updates and must not be validated as Microtom writes.
   - If Microtom receives `MAS0008/MAS0009/MAS0026/MAS0027/MAE* = NAK_ReadOnly` after a Wickler status change, verify that the deployed Router includes the device-origin inbox path from 2026-04-30.
-  - Temporary IBN command `MAC0001=1` performs Wickler calibration plus a 1000 mm forward/reverse diameter measurement; if only about 500 mm is travelled, inspect Motor-3 busy/position feedback and the minimum travel-time wait.
-  - The `MAC0001=1` measuring run expects ESP firmware support for `MOTOR 3 MOVE_REL_MM_OP=...`; this deliberately avoids the hardware START hold-time path that is reserved for takt/production timing.
+  - The setup measuring run performs Wickler calibration plus a 1000 mm forward/reverse diameter measurement; if only about 500 mm is travelled, inspect Motor-3 busy/position feedback and the minimum travel-time wait.
+  - The measuring run expects ESP firmware support for `MOTOR 3 MOVE_REL_MM_OP=...`; this deliberately avoids the hardware START hold-time path that is reserved for takt/production timing.
 - For commissioning/backup handling:
   - protected `Machine-Setup` login must be required before commissioning or backup APIs are usable
   - machine serial number and machine name should be set before creating qualification-relevant backup bundles

@@ -174,11 +174,11 @@ class MachineRuntimeTests(unittest.TestCase):
         ok, msg = self.params.set_value("MAS0002", "3", actor="microtom")
         self.assertTrue(ok, msg)
 
-        with patch("mas004_rpi_databridge.machine_runtime.TemporaryProcessCommandController") as controller_cls:
+        with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
             controller = controller_cls.return_value
-            controller.execute.return_value = "ACK_MAC0001=1"
+            controller.run.return_value = {"ok": True, "applied": ["unwinder:200.0mm", "rewinder:200.0mm"]}
             first = runtime.refresh()
-            controller.execute.assert_called_once_with("1")
+            controller.run.assert_called_once_with()
         self.assertEqual(6, first["current_state"])
         self.assertEqual(7, first["requested_state"])
         self.assertEqual(7, first["info"]["requested_command"])
@@ -196,16 +196,16 @@ class MachineRuntimeTests(unittest.TestCase):
         ok, msg = self.params.set_value("MAS0002", "3", actor="microtom")
         self.assertTrue(ok, msg)
 
-        with patch("mas004_rpi_databridge.machine_runtime.TemporaryProcessCommandController") as controller_cls:
+        with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
             controller = controller_cls.return_value
-            controller.execute.return_value = "MAC0001=NAK_DeviceComm"
+            controller.run.side_effect = RuntimeError("device communication failed")
             snapshot = runtime.refresh()
 
         self.assertEqual(8, snapshot["current_state"])
         self.assertEqual(9, snapshot["requested_state"])
         self.assertEqual(2, snapshot["info"]["requested_command"])
         self.assertEqual(False, snapshot["info"]["setup"]["last_result"]["ok"])
-        self.assertEqual("MAC0001=NAK_DeviceComm", snapshot["info"]["setup"]["last_result"]["response"])
+        self.assertEqual("SETUP_WICKLER=NAK_DeviceComm", snapshot["info"]["setup"]["last_result"]["response"])
         self.assertEqual(9, runtime.refresh()["current_state"])
 
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
@@ -279,11 +279,11 @@ class MachineRuntimeTests(unittest.TestCase):
             info={},
         )
 
-        with patch("mas004_rpi_databridge.machine_runtime.TemporaryProcessCommandController") as controller_cls:
+        with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
             controller = controller_cls.return_value
-            controller.execute.return_value = "ACK_MAC0001=1"
+            controller.run.return_value = {"ok": True, "applied": ["unwinder:200.0mm", "rewinder:200.0mm"]}
             result = runtime.press_virtual_button("setup")
-            controller.execute.assert_called_once_with("1")
+            controller.run.assert_called_once_with()
 
         self.assertTrue(result["ok"])
         self.assertEqual("setup", result["button"])

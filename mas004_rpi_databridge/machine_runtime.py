@@ -32,7 +32,7 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.production_logs import ProductionLogManager, sanitize_production_label
-from mas004_rpi_databridge.process_test_controller import TemporaryProcessCommandController
+from mas004_rpi_databridge.setup_wickler_orchestrator import SetupWicklerOrchestrator
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
 
 
@@ -896,12 +896,13 @@ class MachineRuntime:
                 "Einrichten gestartet: beide Wickler einmessen, Messfahrt ausfuehren und Durchmesser uebernehmen",
                 {},
             )
-            controller = TemporaryProcessCommandController(self.cfg, self.params, self.logs)
-            response = controller.execute("1")
-            ok = response == "ACK_MAC0001=1"
+            controller = SetupWicklerOrchestrator(self.cfg, self.params, self.logs)
+            workflow = controller.run()
+            ok = bool(workflow.get("ok"))
             result = {
                 "ok": ok,
-                "response": response,
+                "response": "ACK_SETUP_WICKLER",
+                "workflow": workflow,
                 "started_ts": started_ts,
                 "finished_ts": now_ts(),
             }
@@ -915,7 +916,7 @@ class MachineRuntime:
         except Exception as exc:
             result = {
                 "ok": False,
-                "response": "MAC0001=NAK_DeviceComm",
+                "response": "SETUP_WICKLER=NAK_DeviceComm",
                 "error": str(exc),
                 "started_ts": started_ts,
                 "finished_ts": now_ts(),
