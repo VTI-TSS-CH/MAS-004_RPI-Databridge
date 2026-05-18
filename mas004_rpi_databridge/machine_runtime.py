@@ -86,7 +86,9 @@ STOP_MODE_AXIS_TARGETS_MM = {
 STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
 STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
-STOP_MODE_POSITION_LOGIC_VERSION = 4
+STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 30.0
+STOP_MODE_POSITION_VERIFY_POLL_S = 0.5
+STOP_MODE_POSITION_LOGIC_VERSION = 5
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -966,6 +968,11 @@ class MachineRuntime:
 
         last_attempt_ts = float(stop_info.get("last_attempt_ts") or 0.0)
         attempt_count = int(stop_info.get("attempt_count") or 0)
+        reset_attempt_counter = (
+            bool(state_changed)
+            or stop_info.get("target_key") != target_key
+            or stop_info.get("logic_version") != STOP_MODE_POSITION_LOGIC_VERSION
+        )
         retry_due = attempt_count < STOP_MODE_POSITION_MAX_ATTEMPTS and (ts - last_attempt_ts) >= STOP_MODE_POSITION_RETRY_S
         should_apply = (
             bool(state_changed)
@@ -985,7 +992,7 @@ class MachineRuntime:
             "active": True,
             "ok": False,
             "logic_version": STOP_MODE_POSITION_LOGIC_VERSION,
-            "attempt_count": int(stop_info.get("attempt_count") or 0) + 1,
+            "attempt_count": (0 if reset_attempt_counter else int(stop_info.get("attempt_count") or 0)) + 1,
             "target_key": target_key,
             "last_attempt_ts": ts,
             "targets_mm": dict(STOP_MODE_AXIS_TARGETS_MM),
@@ -1042,28 +1049,52 @@ class MachineRuntime:
         errors: list[str] = []
         for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
             target_tenths = int(round(float(target_mm) * 10.0))
+            deadline = time.time() + STOP_MODE_POSITION_VERIFY_TIMEOUT_S
+            last_result: dict[str, Any] | None = None
             try:
-                payload = client.refresh(motor_id)
-                motor = payload.get("motor") if isinstance(payload, dict) else {}
-                state = (motor or {}).get("state") or motor or {}
-                feedback_tenths = int(state.get("feedback_tenths_mm"))
-                moving = bool(state.get("move")) or bool(state.get("busy"))
-                error_tenths = target_tenths - feedback_tenths
-                at_target = abs(error_tenths) <= STOP_MODE_POSITION_TOLERANCE_TENTHS
-                result = {
-                    "motor_id": motor_id,
-                    "target_tenths_mm": target_tenths,
-                    "feedback_tenths_mm": feedback_tenths,
-                    "error_tenths_mm": error_tenths,
-                    "moving": moving,
-                    "at_target": at_target,
-                }
-                results.append(result)
-                if not at_target and not moving:
-                    errors.append(
-                        f"Motor {motor_id} steht bei {feedback_tenths / 10.0:.1f}mm, "
-                        f"Ziel {target_mm:.1f}mm, keine Bewegung gemeldet"
-                    )
+                while True:
+                    payload = client.refresh(motor_id)
+                    motor = payload.get("motor") if isinstance(payload, dict) else {}
+                    state = (motor or {}).get("state") or motor or {}
+                    feedback_tenths = int(state.get("feedback_tenths_mm"))
+                    moving = bool(state.get("move")) or bool(state.get("busy"))
+                    alarm = bool(state.get("alarm"))
+                    error_tenths = target_tenths - feedback_tenths
+                    at_target = abs(error_tenths) <= STOP_MODE_POSITION_TOLERANCE_TENTHS
+                    last_result = {
+                        "motor_id": motor_id,
+                        "target_tenths_mm": target_tenths,
+                        "feedback_tenths_mm": feedback_tenths,
+                        "error_tenths_mm": error_tenths,
+                        "moving": moving,
+                        "alarm": alarm,
+                        "alarm_code": state.get("alarm_code"),
+                        "at_target": at_target,
+                    }
+                    if at_target and not moving and not alarm:
+                        break
+                    if alarm:
+                        errors.append(
+                            f"Motor {motor_id} Alarm {state.get('alarm_code')} bei {feedback_tenths / 10.0:.1f}mm, "
+                            f"Ziel {target_mm:.1f}mm"
+                        )
+                        break
+                    if not moving:
+                        errors.append(
+                            f"Motor {motor_id} steht bei {feedback_tenths / 10.0:.1f}mm, "
+                            f"Ziel {target_mm:.1f}mm, keine Bewegung gemeldet"
+                        )
+                        break
+                    if time.time() >= deadline:
+                        errors.append(
+                            f"Motor {motor_id} Ziel {target_mm:.1f}mm nach "
+                            f"{STOP_MODE_POSITION_VERIFY_TIMEOUT_S:.0f}s nicht erreicht "
+                            f"(Ist {feedback_tenths / 10.0:.1f}mm)"
+                        )
+                        break
+                    time.sleep(STOP_MODE_POSITION_VERIFY_POLL_S)
+                if last_result is not None:
+                    results.append(last_result)
             except Exception as exc:
                 results.append({"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)})
                 errors.append(f"Motor {motor_id} Refresh: {exc}")

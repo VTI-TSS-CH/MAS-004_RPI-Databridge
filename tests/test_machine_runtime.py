@@ -304,9 +304,33 @@ class MachineRuntimeTests(unittest.TestCase):
             snapshot = runtime.refresh()
 
         self.assertEqual(True, snapshot["info"]["stop_positions"]["ok"])
-        self.assertEqual(4, snapshot["info"]["stop_positions"]["logic_version"])
+        self.assertEqual(5, snapshot["info"]["stop_positions"]["logic_version"])
         self.assertEqual(1, snapshot["info"]["stop_positions"]["attempt_count"])
         self.assertEqual(5, client.move_absolute_mm.call_count)
+
+    def test_stop_axis_position_verification_waits_for_motion_to_finish(self):
+        runtime = self.build_runtime()
+
+        class FakeClient:
+            def __init__(self):
+                self.motor6_calls = 0
+
+            def refresh(self, motor_id):
+                motor_id = int(motor_id)
+                if motor_id == 6:
+                    self.motor6_calls += 1
+                    if self.motor6_calls == 1:
+                        return {"motor": {"state": {"feedback_tenths_mm": -150, "move": True, "alarm": False}}}
+                targets = {5: 0, 6: -200, 7: -200, 8: 910, 9: 910}
+                return {"motor": {"state": {"feedback_tenths_mm": targets[motor_id], "move": False, "alarm": False}}}
+
+        with patch("mas004_rpi_databridge.machine_runtime.STOP_MODE_POSITION_VERIFY_POLL_S", 0.0):
+            result = runtime._verify_stop_mode_axis_targets(FakeClient())
+
+        self.assertTrue(result["ok"], result)
+        motor6 = [item for item in result["results"] if item["motor_id"] == 6][-1]
+        self.assertEqual(-200, motor6["feedback_tenths_mm"])
+        self.assertFalse(motor6["moving"])
 
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
         runtime = self.build_runtime()
