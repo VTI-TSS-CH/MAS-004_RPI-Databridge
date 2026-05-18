@@ -1,9 +1,10 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
-## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und Ready-Gate)
-- Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in Bereitschaft und wartet auf `ready=true`.
+## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und AZD-Operable-Gate)
+- Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in einen fahrbaren Zustand. Das AZD-`ready`-Bit wird nur noch diagnostisch verwendet, weil es am Produktionsstand nicht bei allen AZD-Konfigurationen stabil gemappt ist; harte Sperren bleiben Linkfehler, Alarm und HWTO.
 - Erst danach wird die aktuelle physische Position mit `MOTOR 3 SET_POSITION_MM=0.000` als neuer Messfahrt-Nullpunkt uebernommen.
 - Die Stop-Toleranz `+/-0.05 mm` wird nicht am Start der Messfahrt bewertet, sondern nach der 1000-mm-Vorwaertsfahrt und nach der Rueckfahrt auf den neuen Nullpunkt. Pro Stopp bleiben maximal drei Nachkorrekturen erlaubt.
+- Abwickler und Aufwickler erhalten `stop`/`resetAlarm`/`etoRecovery`/`calibrate` nun phasenweise parallel, damit das Einmessen beider Wippen zeitgleich startet und keine kuenstliche 2-3-s-Verzoegerung zwischen den Wicklern entsteht.
 
 ## 2026-05-11 (Machine Control Purge/Safety Anzeige getrennt)
 - Machine Control unterscheidet die rote Kopfstatus-Anzeige jetzt zwischen echtem `Purge` (`MAS0028`/`purge_active`) und `Safety/Reset` (Safety-Latch oder Maschinenstatus `21`).

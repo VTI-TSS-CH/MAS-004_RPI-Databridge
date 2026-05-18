@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,8 +62,16 @@ class SetupWicklerOrchestrator:
             f"MOTOR 3 SET speed_mm_s={speed:.3f} accel_mm_s2={ramp:.3f} decel_mm_s2={ramp:.3f}"
         )
 
-    def _motor3_ready(self, motor: dict[str, Any]) -> bool:
-        return bool(motor.get("link_ok") or motor.get("linkOk")) and bool(motor.get("ready")) and not bool(motor.get("alarm"))
+    def _motor3_operable(self, motor: dict[str, Any]) -> bool:
+        # Some AZD installations do not expose a stable READY bit even though
+        # the drive is link-ok, alarm-free and out of HWTO. Treat READY as
+        # diagnostic information here; the measuring run is verified by exact
+        # target/feedback stop tolerance afterwards.
+        return (
+            bool(motor.get("link_ok") or motor.get("linkOk"))
+            and not bool(motor.get("alarm"))
+            and not bool(motor.get("hwto"))
+        )
 
     def _motor3_status(self) -> dict[str, Any]:
         return self._motor3_state_from_status(self._json_response(self._esp("MOTOR 3 REFRESH", read_timeout_s=5.0)))
@@ -78,7 +87,7 @@ class SetupWicklerOrchestrator:
         last_state: dict[str, Any] = {}
         while time.time() < deadline:
             last_state = self._motor3_status()
-            if self._motor3_ready(last_state):
+            if self._motor3_operable(last_state):
                 self._esp("MOTOR 3 SET_POSITION_MM=0.000", read_timeout_s=5.0)
                 zero_state = self._motor3_status()
                 self._set_motor3_postposition_error(False)
@@ -104,7 +113,7 @@ class SetupWicklerOrchestrator:
             )
             if key in last_state
         }
-        raise RuntimeError(f"Motor 3 is not ready for measuring travel: {details}")
+        raise RuntimeError(f"Motor 3 is not operable for measuring travel: {details}")
 
     def _json_response(self, response: str) -> dict[str, Any]:
         text = (response or "").strip()
@@ -246,6 +255,26 @@ class SetupWicklerOrchestrator:
     def _winder_clients(self) -> list[SmartWicklerClient]:
         return [SmartWicklerClient(self.cfg, "unwinder"), SmartWicklerClient(self.cfg, "rewinder")]
 
+    def _run_wickler_commands_parallel(self, action: str, timeout_s: float = 5.0) -> list[dict[str, Any]]:
+        clients = self._winder_clients()
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=len(clients)) as executor:
+            futures = {
+                executor.submit(client.post_mode, action, timeout_s=timeout_s): client.descriptor.role
+                for client in clients
+            }
+            for future in as_completed(futures):
+                role = futures[future]
+                try:
+                    reply = future.result()
+                    results.append({"role": role, "action": action, "ok": bool(reply.get("ok", True)), "reply": reply})
+                except Exception as exc:
+                    results.append({"role": role, "action": action, "ok": False, "error": str(exc)})
+        errors = [f"{item['role']} {action}: {item.get('error') or item.get('reply')}" for item in results if not item.get("ok")]
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        return results
+
     def _wait_wicklers_ready(self, timeout_s: float = 90.0) -> None:
         deadline = time.time() + float(timeout_s)
         while time.time() < deadline:
@@ -270,10 +299,9 @@ class SetupWicklerOrchestrator:
 
         for client in self._winder_clients():
             client.post_master({"indexedModeEnabled": "0"}, timeout_s=5.0)
-            client.post_mode("stop", timeout_s=5.0)
-            client.post_mode("resetAlarm", timeout_s=5.0)
-            client.post_mode("etoRecovery", timeout_s=5.0)
-            client.post_mode("calibrate", timeout_s=5.0)
+        for action in ("stop", "resetAlarm", "etoRecovery"):
+            self._run_wickler_commands_parallel(action, timeout_s=5.0)
+        self._run_wickler_commands_parallel("calibrate", timeout_s=5.0)
         self._wait_wicklers_ready()
         self._prepare_motor3_for_measurement()
 

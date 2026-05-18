@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -120,9 +121,9 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
             side_effect=[
                 "ACK_RESET_ALARM",
                 "ACK_RECOVER_ETO",
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"feedback_tenths_mm":1631838,"target_tenths_mm":1641838}}}',
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":false,"feedback_tenths_mm":1631838,"target_tenths_mm":1641838}}}',
                 "ACK_SET_POSITION_MM",
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"feedback_tenths_mm":0,"target_tenths_mm":0}}}',
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":false,"feedback_tenths_mm":0,"target_tenths_mm":0}}}',
             ]
         )
 
@@ -135,25 +136,49 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertEqual("MOTOR 3 RECOVER_ETO", calls[1])
         self.assertIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
 
-    def test_motor3_measurement_preparation_rejects_not_ready_drive_before_move(self):
+    def test_motor3_measurement_preparation_rejects_hwto_before_move(self):
         self.controller._esp = Mock(
             side_effect=[
                 "ACK_RESET_ALARM",
                 "ACK_RECOVER_ETO",
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"output_raw_hex":"43"}}}',
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":true,"output_raw_hex":"43"}}}',
             ]
             + [
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"output_raw_hex":"43"}}}'
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":true,"output_raw_hex":"43"}}}'
             ]
             * 30
         )
 
-        with self.assertRaisesRegex(RuntimeError, "not ready"):
+        with self.assertRaisesRegex(RuntimeError, "not operable"):
             self.controller._prepare_motor3_for_measurement()
 
         calls = [call.args[0] for call in self.controller._esp.call_args_list]
         self.assertNotIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
         self.assertFalse(any(call.startswith("MOTOR 3 MOVE_REL_MM_OP") for call in calls))
+
+    def test_wickler_calibrate_commands_are_started_in_parallel(self):
+        barrier = threading.Barrier(2, timeout=1.0)
+
+        class FakeDescriptor:
+            def __init__(self, role: str):
+                self.role = role
+
+        class FakeWicklerClient:
+            def __init__(self, role: str):
+                self.descriptor = FakeDescriptor(role)
+
+            def post_mode(self, mode: str, timeout_s: float | None = None):
+                barrier.wait()
+                return {"ok": True, "mode": mode, "timeout_s": timeout_s}
+
+        self.controller._winder_clients = Mock(
+            return_value=[FakeWicklerClient("unwinder"), FakeWicklerClient("rewinder")]
+        )
+
+        result = self.controller._run_wickler_commands_parallel("calibrate", timeout_s=5.0)
+
+        self.assertEqual({"unwinder", "rewinder"}, {item["role"] for item in result})
+        self.assertTrue(all(item["ok"] for item in result))
 
 
 if __name__ == "__main__":
