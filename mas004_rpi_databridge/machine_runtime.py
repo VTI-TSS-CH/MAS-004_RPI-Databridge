@@ -85,6 +85,7 @@ STOP_MODE_AXIS_TARGETS_MM = {
 }
 STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
 STOP_MODE_POSITION_RETRY_S = 15.0
+STOP_MODE_POSITION_LOGIC_VERSION = 2
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -967,6 +968,8 @@ class MachineRuntime:
         should_apply = (
             bool(state_changed)
             or stop_info.get("target_key") != target_key
+            or stop_info.get("logic_version") != STOP_MODE_POSITION_LOGIC_VERSION
+            or "verification" not in stop_info
             or (not bool(stop_info.get("ok")) and retry_due)
         )
         if not should_apply:
@@ -979,6 +982,7 @@ class MachineRuntime:
             **stop_info,
             "active": True,
             "ok": False,
+            "logic_version": STOP_MODE_POSITION_LOGIC_VERSION,
             "target_key": target_key,
             "last_attempt_ts": ts,
             "targets_mm": dict(STOP_MODE_AXIS_TARGETS_MM),

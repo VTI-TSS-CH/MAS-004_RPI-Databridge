@@ -279,6 +279,34 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(False, snapshot["info"]["stop_positions"]["ok"])
         self.assertTrue(any("Motor 6 steht" in item for item in snapshot["info"]["stop_positions"]["errors"]))
 
+    def test_existing_stop_state_revalidates_old_stop_position_result(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=9,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"stop_positions": {"active": True, "ok": True, "target_key": "5:0.000;6:-20.000;7:-20.000;8:91.000;9:91.000"}},
+        )
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
+            client = client_cls.return_value
+            client.available.return_value = True
+            client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
+            client.refresh.side_effect = lambda motor_id: {
+                "motor": {"state": {"feedback_tenths_mm": {5: 0, 6: -200, 7: -200, 8: 910, 9: 910}[int(motor_id)], "move": False, "busy": False}}
+            }
+
+            snapshot = runtime.refresh()
+
+        self.assertEqual(True, snapshot["info"]["stop_positions"]["ok"])
+        self.assertEqual(2, snapshot["info"]["stop_positions"]["logic_version"])
+        self.assertEqual(5, client.move_absolute_mm.call_count)
+
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
         runtime = self.build_runtime()
         runtime._write_state(
