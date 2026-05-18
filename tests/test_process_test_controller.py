@@ -116,6 +116,24 @@ class ProcessTestControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "did not reach target"):
             self.controller._wait_motor3_idle(timeout_s=0.01, min_wait_s=0.0)
 
+    def test_motor3_wait_accepts_inpos_even_with_small_position_delta(self):
+        self.controller._esp = Mock(
+            side_effect=[
+                (
+                    'JSON {"ok":true,"motor":{"state":{"busy":true,"move":true,'
+                    '"feedback_tenths_mm":997,"target_tenths_mm":1000,'
+                    '"in_pos":false,"ready":false,"hwto":false}}}'
+                ),
+                (
+                    'JSON {"ok":true,"motor":{"state":{"busy":false,"move":false,'
+                    '"feedback_tenths_mm":997,"target_tenths_mm":1000,'
+                    '"in_pos":true,"ready":true,"hwto":false}}}'
+                ),
+            ]
+        )
+
+        self.controller._wait_motor3_idle(timeout_s=1.0, min_wait_s=0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

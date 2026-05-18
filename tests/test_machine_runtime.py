@@ -190,6 +190,24 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(7, second["requested_state"])
         self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
 
+    def test_failed_setup_workflow_returns_to_stop_instead_of_sticking_in_transition(self):
+        runtime = self.build_runtime()
+
+        ok, msg = self.params.set_value("MAS0002", "3", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch("mas004_rpi_databridge.machine_runtime.TemporaryProcessCommandController") as controller_cls:
+            controller = controller_cls.return_value
+            controller.execute.return_value = "MAC0001=NAK_DeviceComm"
+            snapshot = runtime.refresh()
+
+        self.assertEqual(8, snapshot["current_state"])
+        self.assertEqual(9, snapshot["requested_state"])
+        self.assertEqual(2, snapshot["info"]["requested_command"])
+        self.assertEqual(False, snapshot["info"]["setup"]["last_result"]["ok"])
+        self.assertEqual("MAC0001=NAK_DeviceComm", snapshot["info"]["setup"]["last_result"]["response"])
+        self.assertEqual(9, runtime.refresh()["current_state"])
+
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):
         runtime = self.build_runtime()
         runtime._write_state(

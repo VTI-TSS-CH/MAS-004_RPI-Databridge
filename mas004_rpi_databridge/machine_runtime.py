@@ -412,6 +412,22 @@ class MachineRuntime:
                             "Einrichten abgeschlossen, aber Formatparameter noch nicht vollstaendig: "
                             + ",".join(missing_format),
                         )
+                else:
+                    result = setup_info.get("last_result") or {}
+                    if not bool(result.get("skipped")):
+                        # A failed measuring/setup workflow must not leave the
+                        # machine trapped in transition state 2. Fall back to
+                        # Produktions-Stop so the operator can retry after the
+                        # reported cause is fixed.
+                        self.params.apply_device_value("MAS0002", "2", promote_default=True)
+                        requested_command = 2
+                        setup_info["failed_ts"] = now_ts()
+                        self._record_event(
+                            "setup_failed_return_stop",
+                            "warning",
+                            "Einrichten fehlgeschlagen: Rueckkehr zu Produktions-Stop freigegeben",
+                            {"target_state": 9, "result": result},
+                        )
         info["setup"] = setup_info
 
         requested_state = command_to_target_state(requested_command, snapshot["current_state"])

@@ -177,16 +177,17 @@ class TemporaryProcessCommandController:
             motor = self._motor3_state_from_status(payload)
             last_state = motor
             busy = bool(motor.get("busy")) or bool(motor.get("move"))
+            in_pos = bool(motor.get("in_pos"))
             feedback = motor.get("feedback_tenths_mm")
             target = motor.get("target_tenths_mm")
             try:
-                position_close = abs(int(target) - int(feedback)) <= 2
+                position_close = abs(int(target) - int(feedback)) <= 5
             except Exception:
                 position_close = False
             if busy:
                 seen_busy = True
             elapsed = time.time() - started
-            if motor and not busy and position_close and elapsed >= float(min_wait_s) and (
+            if motor and not busy and (in_pos or position_close) and elapsed >= float(min_wait_s) and (
                 seen_busy or elapsed > 2.0
             ):
                 return
