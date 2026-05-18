@@ -10,8 +10,10 @@ from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.machine_runtime import (
+    BAND_BREAK_ERROR_KEYS,
     MachineRuntime,
     PROCESS_SENSOR_FAULT_STATES,
+    band_break_monitoring_active,
     parse_machine_event_line,
     recent_external_purge_clear,
 )
@@ -216,6 +218,17 @@ class EspPushListener:
             params.apply_device_value("MAE0027", "0")
             resp = "ACK_MAE0027=0"
             logs.log("raspi", "info", "ignored ESP MAE0027=1 outside process sensor states")
+            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            return resp
+
+        if (
+            pkey in BAND_BREAK_ERROR_KEYS
+            and _truthy_value(value)
+            and not band_break_monitoring_active(_current_machine_state(params))
+        ):
+            params.apply_device_value(pkey, "0")
+            resp = f"ACK_{pkey}=0"
+            logs.log("raspi", "info", f"ignored ESP {pkey}=1 outside band-break monitor states")
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")
             return resp
 

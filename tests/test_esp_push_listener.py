@@ -93,6 +93,21 @@ class EspPushListenerTests(unittest.TestCase):
             self.assertEqual("0", params.get_effective_value("MAE0027"))
             self.assertEqual(0, Outbox(db).count())
 
+    def test_esp_band_break_is_ignored_in_stop_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0001", "MAS", "0001", "9", "R", "W")
+            _insert_param(db, "MAE0008", "MAE", "0008", "0", "R", "W")
+            params = ParamStore(db)
+            params.apply_device_value("MAS0001", "9", promote_default=True)
+            cfg = Settings(db_path=str(db_path), peer_base_url="https://peer-a:9090", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            self.assertEqual("ACK_MAE0008=0", listener._process_line("MAE0008=1"))
+            self.assertEqual("0", params.get_effective_value("MAE0008"))
+            self.assertEqual(0, Outbox(db).count())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -672,7 +672,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("0", self.params.get_effective_value("MAE0008"))
         self.assertEqual("0", self.params.get_effective_value("MAE0009"))
 
-    def test_reset_keeps_etikettenfuehrung_error_when_input_is_still_active(self):
+    def test_reset_clears_etikettenfuehrung_error_even_when_input_active_outside_process(self):
         runtime = self.build_runtime()
         runtime._write_state(
             current_state=21,
@@ -691,11 +691,37 @@ class MachineRuntimeTests(unittest.TestCase):
         result = runtime.press_virtual_button("start_pause")
 
         snapshot = result["snapshot"]
-        self.assertEqual(21, snapshot["current_state"])
-        self.assertTrue(snapshot["purge_active"])
-        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
-        self.assertEqual("1", self.params.get_effective_value("MAE0008"))
-        self.assertIn("bahnriss_einlauf", snapshot["info"]["critical_reasons"])
+        self.assertEqual(9, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        self.assertEqual("0", self.params.get_effective_value("MAE0008"))
+        self.assertNotIn("bahnriss_einlauf", snapshot["info"]["critical_reasons"])
+
+    def test_band_break_inputs_are_only_critical_after_setup_until_production_end(self):
+        runtime = self.build_runtime()
+        self.io_store.upsert_value("esp32_plc58__I0_4", "1", "simulation", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_11", "1", "simulation", "test")
+        io_map = runtime._io_values()
+
+        inactive_critical, inactive_reasons = runtime._critical_state(
+            io_map,
+            {"MAS0001": "9", "MAE0008": "1", "MAE0009": "1"},
+        )
+        self.assertFalse(inactive_critical)
+        self.assertNotIn("bahnriss_einlauf", inactive_reasons)
+        self.assertNotIn("bahnriss_auswurf", inactive_reasons)
+        self.assertNotIn("MAE0008", inactive_reasons)
+        self.assertNotIn("MAE0009", inactive_reasons)
+
+        active_critical, active_reasons = runtime._critical_state(
+            io_map,
+            {"MAS0001": "5", "MAE0008": "1", "MAE0009": "1"},
+        )
+        self.assertTrue(active_critical)
+        self.assertIn("bahnriss_einlauf", active_reasons)
+        self.assertIn("bahnriss_auswurf", active_reasons)
+        self.assertIn("MAE0008", active_reasons)
+        self.assertIn("MAE0009", active_reasons)
 
     def test_reset_clears_purge_latch_even_if_motion_recovery_fails_without_critical_input(self):
         runtime = self.build_runtime()

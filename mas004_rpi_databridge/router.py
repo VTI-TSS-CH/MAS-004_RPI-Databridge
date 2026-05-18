@@ -5,7 +5,9 @@ from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.machine_runtime import (
+    BAND_BREAK_ERROR_KEYS,
     PROCESS_SENSOR_FAULT_STATES,
+    band_break_monitoring_active,
     mark_external_purge_clear,
     recent_external_purge_clear,
 )
@@ -227,6 +229,19 @@ class Router:
                 f"ignored stale device-origin MAE0027=1 from {device_source} outside process sensor states",
             )
             return "ACK_MAE0027=0"
+
+        if (
+            pkey in BAND_BREAK_ERROR_KEYS
+            and _truthy_value(value)
+            and not band_break_monitoring_active(_current_machine_state(self.params))
+        ):
+            self.params.apply_device_value(pkey, "0", promote_default=False)
+            self.logs.log(
+                "raspi",
+                "info",
+                f"ignored stale device-origin {pkey}=1 from {device_source} outside band-break monitor states",
+            )
+            return f"ACK_{pkey}=0"
 
         ok, detail = self.params.apply_device_value(pkey, str(value), promote_default=False)
         if not ok:

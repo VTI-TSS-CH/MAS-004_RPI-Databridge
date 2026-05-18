@@ -286,6 +286,20 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertEqual("0", router.params.get_effective_value("MAS0028"))
             self.assertEqual(0, router.outbox.count())
 
+    def test_device_band_break_is_ignored_in_stop_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0001", "MAS", "0001", "9", "R", "W", "uint8")
+            _insert_param(router.params.db, "MAE0009", "MAE", "0009", "0", "R", "W", "bool")
+            router.params.apply_device_value("MAS0001", "9", promote_default=True)
+
+            resp = router.handle_device_line("MAE0009=1", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAE0009=0", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAE0009"))
+            self.assertEqual(0, router.outbox.count())
+
 
 if __name__ == "__main__":
     unittest.main()

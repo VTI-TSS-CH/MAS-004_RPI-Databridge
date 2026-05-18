@@ -432,10 +432,10 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - Raspi verifies ESP motors `1..9`: ID1/2/4-9 need live `ready=true`, `alarm=false`; ID3 needs `link_ok=true`, `alarm=false`, `hwto=false` because the Etikettenantrieb uses the hardware START/STOP path and the exact stop is verified by position feedback
     - Raspi verifies both Wicklers as safely stopped: online, no alarm, no movement, `modeLabel=Stop` or a live ready bit; a Wippe at the lower/upper end is accepted as safe mechanical stop
     - If no critical reason remains, Raspi sets `MAS0001=9`; if motion recovery still fails, `MAS0001` may remain `21` while `MAS0028` stays `0`
-  - `MAE0008` and `MAE0009` are conditional resettable latches:
-    - `MAE0008` is cleared only when ESP `I0.4` is LOW after reset.
-    - `MAE0009` is cleared only when ESP `I0.11` is LOW after reset.
-    - If either input remains active, the related MAE remains active and `MAS0028` is reasserted.
+  - `MAE0008` and `MAE0009` are process-window latches for Bahnriss Einlauf/Auslauf:
+    - In Not-Stop, Reset and Produktions-Stop they are ignored and may be cleared even if ESP `I0.4`/`I0.11` are active.
+    - After Einrichten, during the production-related states including Pause/Production/Rewind, the live inputs are valid and may reassert `MAS0028`.
+    - Device pushes `MAE0008=1`/`MAE0009=1` outside that process window are acknowledged as `0` and not stored as active faults.
   - If any AZD-CD still reports `HWTO/STO active`, alarm, movement during reset safe-stop verification, or a missing required `ready` bit, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop. Motor 3 and Wickler Stop mode are deliberate exceptions for the `ready` bit, not for Link/Alarm/HWTO/Movement.
   - Button LEDs:
     - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second

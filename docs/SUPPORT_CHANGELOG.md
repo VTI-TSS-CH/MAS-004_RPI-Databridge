@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-18 (Bahnriss nur im Prozessfenster)
+- Bahnriss Einlauf/Auslauf (`ESP I0.4`/`I0.11`, `MAE0008`/`MAE0009`) blockieren Reset, Not-Stop und Produktions-Stop nicht mehr.
+- Die beiden Signale werden erst nach dem Einrichten in den produktionsnahen Betriebsarten bewertet und bleiben bis inklusive Rueckspulen aktiv.
+- Device-/ESP-Pushes `MAE0008=1` oder `MAE0009=1` werden ausserhalb dieses Prozessfensters mit `ACK_...=0` quittiert und nicht als Purge reaktiviert.
+- Hintergrund: In Stop/Not-Stop koennen die Bahnriss-Sensoren noch nicht in Produktionsposition sein; ihre Meldung darf deshalb keinen Reset verhindern.
+
 ## 2026-05-18 (Stop-Modus Achs-Positionssatz)
 - Beim Eintritt in `MAS0001=9` / Produktions-Stop sendet die Runtime jetzt einen definierten Positionssatz an die ESP-Motorsteuerung: ID5 Materialkamera auf `0 mm`, ID6/ID7 Sensorachsen auf `-20 mm`, ID8/ID9 Etikettenanschlaege auf `91 mm`.
 - Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern nur noch maximal dreimal mit 60 Sekunden Abstand erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.

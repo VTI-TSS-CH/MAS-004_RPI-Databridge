@@ -62,9 +62,13 @@ RESETTABLE_SAFETY_ERROR_KEYS = {
     "MAE0048",  # Etikettenantrieb Nachpositionierung fehlgeschlagen
 }
 PROCESS_SENSOR_FAULT_STATES = {2, 3, 4, 5, 10, 11, 12, 13, 16, 17}
+PROCESS_BAND_BREAK_MONITOR_STATES = {3, 4, 5, 6, 7, 10, 11, 12, 13, 16, 17}
+BAND_BREAK_ERROR_KEYS = {"MAE0008", "MAE0009"}
 CONDITIONAL_RESETTABLE_SAFETY_ERRORS = {
     # These are latched machine errors. Clear them only if the matching live
-    # inputs are quiet after the reset, otherwise the purge must stay active.
+    # inputs are quiet while the process sensor monitoring window is active.
+    # In Not-Stop/Stop/reset the web sensors may be out of position, so the
+    # inputs must not keep a purge latch alive.
     "MAE0008": ("esp32_plc58", "I0.4"),
     "MAE0009": ("esp32_plc58", "I0.11"),
 }
@@ -136,6 +140,10 @@ def recent_external_purge_clear(db: DB, *, max_age_s: float = PURGE_EXTERNAL_CLE
     except Exception:
         clear_ts = 0.0
     return clear_ts > 0.0 and (now_ts() - clear_ts) <= max(0.1, float(max_age_s))
+
+
+def band_break_monitoring_active(machine_state: int) -> bool:
+    return int(machine_state or 0) in PROCESS_BAND_BREAK_MONITOR_STATES
 
 
 def _machine_state_row_from_db(db: DB) -> dict[str, Any]:
@@ -1223,18 +1231,22 @@ class MachineRuntime:
 
     def _critical_state(self, io_map: dict[tuple[str, str], str], param_map: dict[str, str]) -> tuple[bool, list[str]]:
         reasons: list[str] = []
+        machine_state = _safe_int(param_map.get("MAS0001"), 1)
+        monitor_band_break = band_break_monitoring_active(machine_state)
         if self._bool_io(io_map, "esp32_plc58", "I0.7", default=False):
             reasons.append("notaus")
         if self._bool_io(io_map, "esp32_plc58", "I0.8", default=False):
             reasons.append("lichtgitter")
         if not self._bool_io(io_map, "raspi_plc21", "I0.6", default=True):
             reasons.append("usv_not_ok")
-        if self._bool_io(io_map, "esp32_plc58", "I0.4", default=False):
+        if monitor_band_break and self._bool_io(io_map, "esp32_plc58", "I0.4", default=False):
             reasons.append("bahnriss_einlauf")
-        if self._bool_io(io_map, "esp32_plc58", "I0.11", default=False):
+        if monitor_band_break and self._bool_io(io_map, "esp32_plc58", "I0.11", default=False):
             reasons.append("bahnriss_auswurf")
         for pkey, value in param_map.items():
             if pkey in PAUSE_ERROR_KEYS:
+                continue
+            if pkey in BAND_BREAK_ERROR_KEYS and not monitor_band_break:
                 continue
             if pkey == "MAE0027" and _safe_int(param_map.get("MAS0001"), 1) not in PROCESS_SENSOR_FAULT_STATES:
                 continue
@@ -1326,8 +1338,14 @@ class MachineRuntime:
     ) -> dict[str, list[str]]:
         cleared = ["MAS0028", *sorted(RESETTABLE_SAFETY_ERROR_KEYS)]
         kept: list[str] = []
+        machine_state = _safe_int(self._state_row().get("current_state"), 1)
+        monitor_band_break = band_break_monitoring_active(machine_state)
         for pkey, (device_code, pin_label) in sorted(CONDITIONAL_RESETTABLE_SAFETY_ERRORS.items()):
-            if io_map is not None and self._bool_io(io_map, device_code, pin_label, default=False):
+            if (
+                monitor_band_break
+                and io_map is not None
+                and self._bool_io(io_map, device_code, pin_label, default=False)
+            ):
                 kept.append(pkey)
                 continue
             cleared.append(pkey)
