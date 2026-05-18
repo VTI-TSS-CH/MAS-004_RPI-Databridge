@@ -4,6 +4,7 @@
 - Beim Eintritt in `MAS0001=9` / Produktions-Stop sendet die Runtime jetzt einen definierten Positionssatz an die ESP-Motorsteuerung: ID5 Materialkamera auf `0 mm`, ID6/ID7 Sensorachsen auf `-20 mm`, ID8/ID9 Etikettenanschlaege auf `91 mm`.
 - Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern nur noch maximal dreimal mit 60 Sekunden Abstand erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.
 - `ACK_MOVE_ABS_MM` allein gilt nicht mehr als erledigt: Die Runtime refreshed die betroffenen Achsen nach dem Befehl und markiert den Stop-Positionssatz nur als `ok`, wenn die Achse am Ziel ist oder eine echte Bewegung meldet. Vor jedem Stop-Positionsbefehl werden `RESET_ALARM` und `RECOVER_ETO` fuer die jeweilige Achse ausgefuehrt.
+- Die Stop-Positions-Logikversion wurde auf `4` erhoeht, damit Produktions-Raspis alte fehlgeschlagene Versuche nach dem ESP-Direct-Data-Fix sofort neu bewerten und nicht auf die alte Retry-Sperre warten.
 
 ## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und AZD-Operable-Gate)
 - Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in einen fahrbaren Zustand. Das AZD-`ready`-Bit wird nur noch diagnostisch verwendet, weil es am Produktionsstand nicht bei allen AZD-Konfigurationen stabil gemappt ist; harte Sperren bleiben Linkfehler, Alarm und HWTO.
