@@ -371,9 +371,8 @@ class SetupWicklerOrchestrator:
         for client in self._winder_clients():
             client.start_diameter_learning(timeout_s=5.0)
         # Diameter learning is an explicit setup move, not a productive takt.
-        # Use Operation-Data so the AZD receives a selected operation and a real
-        # start in one Modbus write; the Direct-Data path is reserved for the
-        # hardware-synchronised Motor-3 takt path.
+        # MOVE_REL_MM_OP uses the ESP's immediate Direct-Data trigger and avoids
+        # the Motor-3 hardware START edge that is reserved for takt operation.
         self._esp(f"MOTOR 3 MOVE_REL_MM_OP={distance_mm:.3f}", read_timeout_s=5.0)
         abs_distance = abs(float(distance_mm))
         abs_speed = max(1.0, abs(float(speed_mm_s)))
