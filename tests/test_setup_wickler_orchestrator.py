@@ -145,6 +145,43 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertEqual("0", self.params.get_effective_value("MAE0048"))
         self.assertIn("MOTOR 3 MOVE_REL_STEPS=3", [call.args[0] for call in self.controller._esp.call_args_list])
 
+    def test_motor3_postposition_uses_fixed_target_steps_not_shifted_command_steps(self):
+        self.controller._esp = Mock(return_value="ACK")
+        self.controller._wait_motor3_idle = Mock(
+            return_value={
+                "feedback_tenths_mm": 10000,
+                "target_tenths_mm": 10000,
+                "feedback_steps": -5217764,
+                "command_steps": -5217767,
+                "config": {
+                    "steps_per_mm": 31.58765,
+                    "invert_direction": True,
+                    "zero_offset_steps": -5186176,
+                },
+                "in_pos": True,
+            }
+        )
+        self.controller._hold_wicklers_for_motor3_postpositioning = Mock()
+
+        state = self.controller._ensure_motor3_stop_tolerance(
+            {
+                "feedback_tenths_mm": 9999,
+                "target_tenths_mm": 10000,
+                "feedback_steps": -5217761,
+                "command_steps": -5217764,
+                "config": {
+                    "steps_per_mm": 31.58765,
+                    "invert_direction": True,
+                    "zero_offset_steps": -5186176,
+                },
+                "in_pos": True,
+            }
+        )
+
+        self.assertEqual(-5217764, state["feedback_steps"])
+        self.assertEqual("0", self.params.get_effective_value("MAE0048"))
+        self.assertIn("MOTOR 3 MOVE_REL_STEPS=3", [call.args[0] for call in self.controller._esp.call_args_list])
+
     def test_motor3_measurement_preparation_captures_current_position_as_zero(self):
         self.controller._esp = Mock(
             side_effect=[

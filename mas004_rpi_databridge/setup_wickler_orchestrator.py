@@ -199,16 +199,25 @@ class SetupWicklerOrchestrator:
 
     def _motor3_position_error_steps(self, motor: dict[str, Any]) -> int | None:
         steps_per_mm = self._motor3_steps_per_mm(motor)
-        command_steps = motor.get("command_steps", motor.get("commandSteps"))
         feedback_steps = motor.get("feedback_steps", motor.get("feedbackSteps"))
+        cfg = motor.get("config") if isinstance(motor.get("config"), dict) else {}
+        invert = str(cfg.get("invert_direction", cfg.get("invertDirection", ""))).lower() in {
+            "1",
+            "true",
+            "yes",
+            "ja",
+        }
+        if steps_per_mm > 0 and feedback_steps is not None and motor.get("target_tenths_mm") is not None:
+            zero_offset_steps = cfg.get("zero_offset_steps", cfg.get("zeroOffsetSteps"))
+            if zero_offset_steps is not None:
+                target_tenths_mm = int(motor.get("target_tenths_mm"))
+                target_machine_steps = int(round((target_tenths_mm / 10.0) * steps_per_mm))
+                feedback_relative_steps = int(feedback_steps) - int(zero_offset_steps)
+                feedback_machine_steps = -feedback_relative_steps if invert else feedback_relative_steps
+                return target_machine_steps - feedback_machine_steps
+
+        command_steps = motor.get("command_steps", motor.get("commandSteps"))
         if steps_per_mm > 0 and command_steps is not None and feedback_steps is not None:
-            cfg = motor.get("config") if isinstance(motor.get("config"), dict) else {}
-            invert = str(cfg.get("invert_direction", cfg.get("invertDirection", ""))).lower() in {
-                "1",
-                "true",
-                "yes",
-                "ja",
-            }
             controller_delta = int(command_steps) - int(feedback_steps)
             return -controller_delta if invert else controller_delta
         return None
