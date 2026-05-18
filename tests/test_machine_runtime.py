@@ -304,7 +304,8 @@ class MachineRuntimeTests(unittest.TestCase):
             snapshot = runtime.refresh()
 
         self.assertEqual(True, snapshot["info"]["stop_positions"]["ok"])
-        self.assertEqual(2, snapshot["info"]["stop_positions"]["logic_version"])
+        self.assertEqual(3, snapshot["info"]["stop_positions"]["logic_version"])
+        self.assertEqual(1, snapshot["info"]["stop_positions"]["attempt_count"])
         self.assertEqual(5, client.move_absolute_mm.call_count)
 
     def test_virtual_start_pause_button_uses_same_mas0002_command_path(self):

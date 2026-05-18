@@ -84,8 +84,9 @@ STOP_MODE_AXIS_TARGETS_MM = {
     9: 91.0,   # Etikettenanschlag vorne/rechts
 }
 STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
-STOP_MODE_POSITION_RETRY_S = 15.0
-STOP_MODE_POSITION_LOGIC_VERSION = 2
+STOP_MODE_POSITION_RETRY_S = 60.0
+STOP_MODE_POSITION_MAX_ATTEMPTS = 3
+STOP_MODE_POSITION_LOGIC_VERSION = 3
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -964,7 +965,8 @@ class MachineRuntime:
             return
 
         last_attempt_ts = float(stop_info.get("last_attempt_ts") or 0.0)
-        retry_due = (ts - last_attempt_ts) >= STOP_MODE_POSITION_RETRY_S
+        attempt_count = int(stop_info.get("attempt_count") or 0)
+        retry_due = attempt_count < STOP_MODE_POSITION_MAX_ATTEMPTS and (ts - last_attempt_ts) >= STOP_MODE_POSITION_RETRY_S
         should_apply = (
             bool(state_changed)
             or stop_info.get("target_key") != target_key
@@ -983,6 +985,7 @@ class MachineRuntime:
             "active": True,
             "ok": False,
             "logic_version": STOP_MODE_POSITION_LOGIC_VERSION,
+            "attempt_count": int(stop_info.get("attempt_count") or 0) + 1,
             "target_key": target_key,
             "last_attempt_ts": ts,
             "targets_mm": dict(STOP_MODE_AXIS_TARGETS_MM),

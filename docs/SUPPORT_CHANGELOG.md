@@ -2,7 +2,7 @@
 
 ## 2026-05-18 (Stop-Modus Achs-Positionssatz)
 - Beim Eintritt in `MAS0001=9` / Produktions-Stop sendet die Runtime jetzt einen definierten Positionssatz an die ESP-Motorsteuerung: ID5 Materialkamera auf `0 mm`, ID6/ID7 Sensorachsen auf `-20 mm`, ID8/ID9 Etikettenanschlaege auf `91 mm`.
-- Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern mit Cooldown erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.
+- Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern nur noch maximal dreimal mit 60 Sekunden Abstand erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.
 - `ACK_MOVE_ABS_MM` allein gilt nicht mehr als erledigt: Die Runtime refreshed die betroffenen Achsen nach dem Befehl und markiert den Stop-Positionssatz nur als `ok`, wenn die Achse am Ziel ist oder eine echte Bewegung meldet. Vor jedem Stop-Positionsbefehl werden `RESET_ALARM` und `RECOVER_ETO` fuer die jeweilige Achse ausgefuehrt.
 
 ## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und AZD-Operable-Gate)
@@ -11,7 +11,7 @@
 - Die Stop-Toleranz `+/-0.05 mm` wird nicht am Start der Messfahrt bewertet, sondern nach der 1000-mm-Vorwaertsfahrt und nach der Rueckfahrt auf den neuen Nullpunkt. Pro Stopp bleiben maximal drei Nachkorrekturen erlaubt.
 - Die Stop-Toleranz von Motor 3 wird fuer die Nachkorrektur auf Rohstep-Ebene (`feedback_steps`/`command_steps` plus `steps_per_mm`) bewertet. Die 1/10-mm-Anzeigewerte sind zu grob fuer `+/-0.05 mm`; kleine Restfehler werden deshalb mit `MOTOR 3 MOVE_REL_STEPS=<n>` korrigiert.
 - Die Rohstep-Bewertung verfolgt den festen Zielpunkt aus `target_tenths_mm` und `zero_offset_steps`, nicht den nach einer Relativkorrektur weitergeschobenen AZD-`command_steps`-Wert. Dadurch wird eine erfolgreiche kleine Nachpositionierung nicht faelschlich weiter als `0.095 mm` Restfehler gewertet.
-- Die 1000-mm-Messfahrt nutzt wieder `MOTOR 3 MOVE_REL_MM=<mm>` und damit den ESP Direct-Data-Fahrpfad. `MOVE_REL_MM_OP`/Operation-Data wurde am Produktionsstand als ACK-ohne-physische-Bewegung beobachtet und wird fuer diese Einrichtfahrt nicht mehr verwendet.
+- Die 1000-mm-Messfahrt nutzt `MOTOR 3 MOVE_REL_MM_OP=<mm>` und damit den AZD Operation-Data-Fahrpfad. `MOVE_REL_MM` bleibt fuer den spaeteren hardware-synchronen Motor-3-Taktpfad reserviert; die Einrichtfahrt darf nicht vom Direct-Data/START-Mapping abhaengen.
 - Abwickler und Aufwickler erhalten `stop`/`resetAlarm`/`etoRecovery`/`calibrate` nun phasenweise parallel, damit das Einmessen beider Wippen zeitgleich startet und keine kuenstliche 2-3-s-Verzoegerung zwischen den Wicklern entsteht.
 
 ## 2026-05-11 (Machine Control Purge/Safety Anzeige getrennt)

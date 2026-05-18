@@ -222,7 +222,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertNotIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
         self.assertFalse(any(call.startswith("MOTOR 3 MOVE_REL_MM_OP") for call in calls))
 
-    def test_diameter_learning_uses_direct_data_relative_move(self):
+    def test_diameter_learning_uses_operation_data_setup_move(self):
         class FakeWicklerClient:
             def start_diameter_learning(self, timeout_s: float | None = None):
                 return {"ok": True}
@@ -244,8 +244,8 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
 
         self.assertEqual({"unwinder": 200.0, "rewinder": 200.0}, result)
         calls = [call.args[0] for call in self.controller._esp.call_args_list]
-        self.assertIn("MOTOR 3 MOVE_REL_MM=1000.000", calls)
-        self.assertFalse(any(call.startswith("MOTOR 3 MOVE_REL_MM_OP=1000") for call in calls))
+        self.assertIn("MOTOR 3 MOVE_REL_MM_OP=1000.000", calls)
+        self.assertFalse(any(call == "MOTOR 3 MOVE_REL_MM=1000.000" for call in calls))
 
     def test_wickler_calibrate_commands_are_started_in_parallel(self):
         barrier = threading.Barrier(2, timeout=1.0)
