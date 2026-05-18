@@ -656,6 +656,48 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["master:{'indexedModeEnabled': '0'}", "stop", "resetAlarm", "etoRecovery", "stop"], calls["unwinder"])
         self.assertEqual(["master:{'indexedModeEnabled': '0'}", "stop", "resetAlarm", "etoRecovery", "stop"], calls["rewinder"])
 
+    def test_motion_reset_accepts_wickler_stop_even_when_drive_ready_bit_is_false(self):
+        runtime = self.build_runtime()
+
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                pass
+
+            def available(self):
+                return False
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, _role):
+                pass
+
+            def available(self):
+                return True
+
+            def post_mode(self, _mode, timeout_s=None):
+                return {"ok": True}
+
+            def post_master(self, _payload, timeout_s=None):
+                return {"ok": True}
+
+            def fetch_state(self):
+                return {
+                    "ok": True,
+                    "drive": {"online": True, "ready": False, "move": False, "alarm": False, "alarmCode": 0, "rawOutput": 72},
+                    "telemetry": {"modeLabel": "Stop", "faultReason": "keine"},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", FakeEspMotorClient), patch(
+            "mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient
+        ):
+            result = runtime._reset_motion_devices()
+
+        self.assertTrue(result["ok"], result)
+        for role_detail in result["details"]["wicklers"]:
+            verify = [step for step in role_detail["steps"] if step.get("step") == "verify_safe_stop"][-1]
+            self.assertTrue(verify["safe_stop"])
+            self.assertFalse(verify["ready"])
+            self.assertFalse(verify["move"])
+
     def test_motion_reset_accepts_motor3_operable_without_ready_bit(self):
         self.cfg.esp_simulation = False
         runtime = self.build_runtime()

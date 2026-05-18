@@ -430,13 +430,13 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
     - Raspi runs `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, then `MOTOR <id> RESET_ALARM` for `1..9`
     - Raspi posts `stop`, `resetAlarm`, `etoRecovery`, `stop` to both Wicklers if they are live
     - Raspi verifies ESP motors `1..9`: ID1/2/4-9 need live `ready=true`, `alarm=false`; ID3 needs `link_ok=true`, `alarm=false`, `hwto=false` because the Etikettenantrieb uses the hardware START/STOP path and the exact stop is verified by position feedback
-    - Raspi verifies both Wicklers with live `drive.ready=true`, `drive.alarm=false`; a Wippe at the lower/upper end is accepted as safe stop
+    - Raspi verifies both Wicklers as safely stopped: online, no alarm, no movement, `modeLabel=Stop` or a live ready bit; a Wippe at the lower/upper end is accepted as safe mechanical stop
     - If no critical reason remains, Raspi sets `MAS0001=9`; if motion recovery still fails, `MAS0001` may remain `21` while `MAS0028` stays `0`
   - `MAE0008` and `MAE0009` are conditional resettable latches:
     - `MAE0008` is cleared only when ESP `I0.4` is LOW after reset.
     - `MAE0009` is cleared only when ESP `I0.11` is LOW after reset.
     - If either input remains active, the related MAE remains active and `MAS0028` is reasserted.
-  - If any AZD-CD still reports `HWTO/STO active`, alarm, or a missing required `ready` bit, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop. Motor 3 is the deliberate exception for the `ready` bit, not for Link/Alarm/HWTO.
+  - If any AZD-CD still reports `HWTO/STO active`, alarm, movement during reset safe-stop verification, or a missing required `ready` bit, the reset remains failed/latched and `MAS0001` stays in `21` instead of falsely reporting Stop. Motor 3 and Wickler Stop mode are deliberate exceptions for the `ready` bit, not for Link/Alarm/HWTO/Movement.
   - Button LEDs:
     - safety latched/failed: Raspi `Q0.0` and `Q0.2` alternate every second
     - reset running: `Q0.2` blinks, no red

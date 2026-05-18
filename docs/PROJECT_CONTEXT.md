@@ -74,6 +74,7 @@
   - then it applies and triggers AZD ETO recovery on the ESP32-PLC motor bus and verifies motors `1..9`
   - final readiness uses the ESP firmware's AZD monitor-aware status, especially monitor `0179` ready state, so missing READY R-OUT mapping alone does not block reset
   - motor 3 is verified as operable with `link_ok=true`, `alarm=false` and `hwto=false`; unlike the positioning axes, it does not require the diagnostic `ready` bit because the production path uses hardware START/STOP and stop accuracy is verified by feedback
+  - the Wicklers are reset-verified as safe stopped, not as actively regulating: `modeLabel=Stop`, online, no alarm, no movement and an uncritical fault text are sufficient even if the AZD ready diagnostic bit is false in Stop mode
 - New protected Machine-Setup surface:
   - `/ui/machine-setup`
   - `/ui/machine-setup/commissioning`
@@ -373,7 +374,7 @@
   - ESP motors `1..9` receive ETO recovery / alarm reset
   - both Smart Wicklers receive `stop`, `resetAlarm`, `etoRecovery`, and `stop`
   - `MAS0001=8` while recovery is running, then `MAS0001=9` when reset is complete
-- Smart Wicklers are reset-ready when the AZD drive is online/ready/alarmfrei and the Wickler is in safe stop; a Wippe unten/oben is accepted as safe mechanical stop during reset.
+- Smart Wicklers are reset-ready when the AZD drive is online/alarmfrei and the Wickler is safely stopped; `drive.ready=true` is accepted, but `modeLabel=Stop` with no movement is also valid because reset must not start Wickler regulation. A Wippe unten/oben is accepted as safe mechanical stop during reset.
 - The latched Etikettenfuehrung errors `MAE0008` and `MAE0009` are cleared by the reset only if the corresponding ESP inputs `I0.4` and `I0.11` are LOW after the reset verification. If an input is still active, the error remains active and the purge remains latched.
 - Raspi button LED override during safety:
   - `MAS0001=21`: `Q0.0` and `Q0.2` alternate every second

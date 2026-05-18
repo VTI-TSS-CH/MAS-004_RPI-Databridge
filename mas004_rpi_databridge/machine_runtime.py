@@ -1289,6 +1289,17 @@ class MachineRuntime:
             return not bool(state.get("hwto"))
         return bool(state.get("ready"))
 
+    @staticmethod
+    def _wickler_reset_safe_stop(state_ok: bool, drive: dict[str, Any], mode_label: str, safe_stop_fault: bool) -> bool:
+        if not (bool(state_ok) and bool(drive.get("online")) and not bool(drive.get("alarm")) and safe_stop_fault):
+            return False
+        if bool(drive.get("ready")):
+            return True
+        # Reset must not start the Wickler regulation. In Stop mode the AZD can
+        # report ready=false while the Wickler is intentionally stopped and
+        # alarm-free; accept this as safe stop as long as no movement is active.
+        return str(mode_label or "").strip().lower() == "stop" and not bool(drive.get("move"))
+
     def _reset_motion_devices(self) -> dict[str, Any]:
         details: dict[str, Any] = {"esp_motors": [], "wicklers": []}
         hard_failures: list[str] = []
@@ -1439,19 +1450,19 @@ class MachineRuntime:
                     "wippe oben",
                     "externer wickler-stop aktiv",
                 )
+                state_ok = bool(state.get("ok", True))
+                verified = self._wickler_reset_safe_stop(state_ok, drive, mode_label, safe_stop_fault)
                 verify = {
                     "step": "verify_safe_stop",
-                    "ok": bool(
-                        state.get("ok")
-                        and drive.get("online")
-                        and drive.get("ready")
-                        and not drive.get("alarm")
-                        and safe_stop_fault
-                    ),
+                    "ok": verified,
+                    "state_ok": state_ok,
                     "online": bool(drive.get("online")),
                     "ready": bool(drive.get("ready")),
+                    "ready_required": not (str(mode_label or "").strip().lower() == "stop"),
+                    "safe_stop": verified,
                     "alarm": bool(drive.get("alarm")),
                     "alarm_code": drive.get("alarmCode"),
+                    "move": bool(drive.get("move")),
                     "mode": mode_label,
                     "fault_reason": fault_reason,
                     "raw_output": drive.get("rawOutput"),
@@ -1462,7 +1473,7 @@ class MachineRuntime:
                         f"{role} not in safe stop "
                         f"(online={verify['online']}, ready={verify['ready']}, alarm={verify['alarm']}, "
                         f"alarm_code={verify['alarm_code']}, mode={verify['mode']}, "
-                        f"fault={verify['fault_reason']}, raw_output={verify['raw_output']})"
+                        f"move={verify['move']}, fault={verify['fault_reason']}, raw_output={verify['raw_output']})"
                     )
             except Exception as exc:
                 role_detail["steps"].append({"step": "verify_ready", "ok": False, "error": str(exc)})
