@@ -949,6 +949,78 @@ class MachineRuntime:
     def _stop_mode_target_key(self) -> str:
         return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()))
 
+    def _motor_preflight_for_position_move(
+        self,
+        client: EspMotorClient,
+        motor_id: int,
+        target_mm: float,
+    ) -> dict[str, Any]:
+        """Read live motor state and block unsafe automatic positioning.
+
+        This is intentionally conservative: if a positional axis is in alarm,
+        in HWTO, or already outside its active limits, the automatic stop-mode
+        routine must not reset and continue moving it. Manual Machine Setup is
+        then required to recover the axis deliberately.
+        """
+        result: dict[str, Any] = {"motor_id": int(motor_id), "target_mm": float(target_mm), "ok": False}
+        cfg_payload = client.config(motor_id)
+        motor_cfg = (cfg_payload or {}).get("config") or {}
+        refresh_payload = client.refresh(motor_id)
+        motor = (refresh_payload or {}).get("motor") or {}
+        state = motor.get("state") or motor or {}
+
+        result["config"] = motor_cfg
+        result["state"] = state
+
+        target_tenths = int(round(float(target_mm) * 10.0))
+        try:
+            feedback_tenths = int(float(state.get("feedback_tenths_mm")))
+        except Exception:
+            result["reason"] = "Istposition nicht lesbar"
+            return result
+
+        min_enabled = bool(motor_cfg.get("min_enabled", True))
+        max_enabled = bool(motor_cfg.get("max_enabled", True))
+        min_tenths = _safe_int(motor_cfg.get("min_tenths_mm"), -2_147_483_648)
+        max_tenths = _safe_int(motor_cfg.get("max_tenths_mm"), 2_147_483_647)
+        result.update(
+            {
+                "feedback_tenths_mm": feedback_tenths,
+                "target_tenths_mm": target_tenths,
+                "min_enabled": min_enabled,
+                "max_enabled": max_enabled,
+                "min_tenths_mm": min_tenths,
+                "max_tenths_mm": max_tenths,
+            }
+        )
+
+        if bool(state.get("alarm")):
+            result["reason"] = f"Achse im Alarm {state.get('alarm_code')}"
+            return result
+        if bool(state.get("hwto")):
+            result["reason"] = "HWTO/Sicherheitskreis aktiv"
+            return result
+        if min_enabled and feedback_tenths < min_tenths:
+            result["reason"] = (
+                f"Istposition {feedback_tenths / 10.0:.1f}mm unter Min {min_tenths / 10.0:.1f}mm"
+            )
+            return result
+        if max_enabled and feedback_tenths > max_tenths:
+            result["reason"] = (
+                f"Istposition {feedback_tenths / 10.0:.1f}mm ueber Max {max_tenths / 10.0:.1f}mm"
+            )
+            return result
+        if min_enabled and target_tenths < min_tenths:
+            result["reason"] = f"Ziel {target_mm:.1f}mm unter Min {min_tenths / 10.0:.1f}mm"
+            return result
+        if max_enabled and target_tenths > max_tenths:
+            result["reason"] = f"Ziel {target_mm:.1f}mm ueber Max {max_tenths / 10.0:.1f}mm"
+            return result
+
+        result["ok"] = True
+        result["reason"] = "safe"
+        return result
+
     def _apply_stop_mode_axis_targets(
         self,
         state: int,
@@ -1006,6 +1078,19 @@ class MachineRuntime:
         errors: list[str] = []
         for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
             try:
+                preflight = self._motor_preflight_for_position_move(client, motor_id, target_mm)
+                if not preflight.get("ok"):
+                    reason = str(preflight.get("reason") or "Positionierfreigabe verweigert")
+                    result = {
+                        "motor_id": motor_id,
+                        "target_mm": target_mm,
+                        "ok": False,
+                        "preflight": preflight,
+                        "error": reason,
+                    }
+                    stop_info["results"].append(result)
+                    errors.append(f"Motor {motor_id}: {reason}")
+                    continue
                 client.reset_alarm(motor_id)
                 client.recover_eto_motor(motor_id)
                 reply = client.move_absolute_mm(motor_id, target_mm)

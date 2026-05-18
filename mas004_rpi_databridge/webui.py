@@ -655,6 +655,90 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             if acquired:
                 lock.release()
 
+    def _to_int_or_none(value: Any) -> Optional[int]:
+        try:
+            return int(float(str(value).strip()))
+        except Exception:
+            return None
+
+    def guard_motor_position_move(
+        client: EspMotorClient,
+        motor_id: int,
+        mode: str,
+        value: float,
+    ) -> None:
+        if int(motor_id) == 3:
+            return
+        cfg_payload = motor_client_call("CONFIG", lambda: client.config(motor_id))
+        motor_cfg = (cfg_payload or {}).get("config") or {}
+        is_positional = bool(motor_cfg.get("min_enabled", True)) or bool(motor_cfg.get("max_enabled", True))
+        if not is_positional:
+            return
+        refresh_payload = refresh_motor_snapshot(client, motor_id, allow_recent_cache=False)
+        motor = (refresh_payload or {}).get("motor") or {}
+        state = motor.get("state") or motor or {}
+        feedback_tenths = _to_int_or_none(state.get("feedback_tenths_mm"))
+        if feedback_tenths is None:
+            raise HTTPException(status_code=409, detail=f"Motor {int(motor_id)} Istposition nicht lesbar")
+        if bool(state.get("alarm")):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Motor {int(motor_id)} ist im Alarm ({state.get('alarm_code')}); Bewegung gesperrt",
+            )
+        if bool(state.get("hwto")):
+            raise HTTPException(status_code=409, detail=f"Motor {int(motor_id)} HWTO/Sicherheitskreis aktiv")
+
+        min_enabled = bool(motor_cfg.get("min_enabled", True))
+        max_enabled = bool(motor_cfg.get("max_enabled", True))
+        min_tenths = _to_int_or_none(motor_cfg.get("min_tenths_mm"))
+        max_tenths = _to_int_or_none(motor_cfg.get("max_tenths_mm"))
+        if min_enabled and min_tenths is not None and feedback_tenths < min_tenths:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Motor {int(motor_id)} steht unter Min-Grenze "
+                    f"({feedback_tenths / 10.0:.1f}mm < {min_tenths / 10.0:.1f}mm); Bewegung gesperrt"
+                ),
+            )
+        if max_enabled and max_tenths is not None and feedback_tenths > max_tenths:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Motor {int(motor_id)} steht ueber Max-Grenze "
+                    f"({feedback_tenths / 10.0:.1f}mm > {max_tenths / 10.0:.1f}mm); Bewegung gesperrt"
+                ),
+            )
+
+        mode_norm = (mode or "").strip().lower()
+        if mode_norm == "absolute_mm":
+            target_tenths = int(round(float(value) * 10.0))
+        elif mode_norm == "relative_mm":
+            target_tenths = feedback_tenths + int(round(float(value) * 10.0))
+        elif mode_norm == "relative_steps":
+            steps_per_mm = float(motor_cfg.get("steps_per_mm") or 0.0)
+            if steps_per_mm <= 0.0:
+                raise HTTPException(status_code=409, detail=f"Motor {int(motor_id)} steps/mm ungueltig")
+            target_tenths = feedback_tenths + int(round((float(value) / steps_per_mm) * 10.0))
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported motor move mode")
+
+        if min_enabled and min_tenths is not None and target_tenths < min_tenths:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Motor {int(motor_id)} Ziel unter Min-Grenze "
+                    f"({target_tenths / 10.0:.1f}mm < {min_tenths / 10.0:.1f}mm); Bewegung gesperrt"
+                ),
+            )
+        if max_enabled and max_tenths is not None and target_tenths > max_tenths:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Motor {int(motor_id)} Ziel ueber Max-Grenze "
+                    f"({target_tenths / 10.0:.1f}mm > {max_tenths / 10.0:.1f}mm); Bewegung gesperrt"
+                ),
+            )
+
     def motor_action_response(
         client: EspMotorClient,
         motor_id: int,
@@ -1999,6 +2083,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         mode = (body.mode or "").strip().lower()
+        guard_motor_position_move(client, motor_id, mode, float(body.value))
         if mode == "relative_steps":
             result = motor_client_call(
                 "MOVE_REL_STEPS",
@@ -2049,6 +2134,32 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         payload = body.model_dump(exclude_none=True)
+        if int(motor_id) != 3:
+            if payload.get("min_enabled") is False:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Motor {int(motor_id)} Min-Grenze darf bei Positionsachsen nicht deaktiviert werden",
+                )
+            if payload.get("max_enabled") is False:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Motor {int(motor_id)} Max-Grenze darf bei Positionsachsen nicht deaktiviert werden",
+                )
+            current_cfg: dict[str, Any] = {}
+            try:
+                client_for_cfg = EspMotorClient(cfg2)
+                if client_for_cfg.available():
+                    current_cfg = (motor_client_call("CONFIG", lambda: client_for_cfg.config(motor_id)) or {}).get("config") or {}
+            except HTTPException:
+                raise
+            except Exception:
+                current_cfg = {}
+            min_tenths = payload.get("min_tenths_mm", current_cfg.get("min_tenths_mm"))
+            max_tenths = payload.get("max_tenths_mm", current_cfg.get("max_tenths_mm"))
+            min_int = _to_int_or_none(min_tenths)
+            max_int = _to_int_or_none(max_tenths)
+            if min_int is not None and max_int is not None and min_int > max_int:
+                raise HTTPException(status_code=409, detail="Min-Grenze darf nicht groesser als Max-Grenze sein")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         result = motor_client_call("SET_CONFIG", lambda: client.set_config(motor_id, payload))

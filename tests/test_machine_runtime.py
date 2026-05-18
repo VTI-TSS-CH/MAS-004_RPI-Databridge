@@ -227,10 +227,29 @@ class MachineRuntimeTests(unittest.TestCase):
         with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
             client = client_cls.return_value
             client.available.return_value = True
+            client.config.side_effect = lambda motor_id: {
+                "ok": True,
+                "config": {
+                    "min_enabled": True,
+                    "max_enabled": True,
+                    "min_tenths_mm": -200,
+                    "max_tenths_mm": 1100,
+                },
+            }
             client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
             def fake_refresh(motor_id):
                 targets = {5: 0, 6: -200, 7: -200, 8: 910, 9: 910}
-                return {"motor": {"state": {"feedback_tenths_mm": targets[int(motor_id)], "move": False, "busy": False}}}
+                return {
+                    "motor": {
+                        "state": {
+                            "feedback_tenths_mm": targets[int(motor_id)],
+                            "move": False,
+                            "busy": False,
+                            "alarm": False,
+                            "hwto": False,
+                        }
+                    }
+                }
             client.refresh.side_effect = fake_refresh
 
             snapshot = runtime.refresh()
@@ -268,9 +287,26 @@ class MachineRuntimeTests(unittest.TestCase):
         with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
             client = client_cls.return_value
             client.available.return_value = True
+            client.config.side_effect = lambda motor_id: {
+                "ok": True,
+                "config": {
+                    "min_enabled": True,
+                    "max_enabled": True,
+                    "min_tenths_mm": -200,
+                    "max_tenths_mm": 1100,
+                },
+            }
             client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
             client.refresh.side_effect = lambda motor_id: {
-                "motor": {"state": {"feedback_tenths_mm": 300 if int(motor_id) == 6 else 910, "move": False, "busy": False}}
+                "motor": {
+                    "state": {
+                        "feedback_tenths_mm": 300 if int(motor_id) == 6 else 910,
+                        "move": False,
+                        "busy": False,
+                        "alarm": False,
+                        "hwto": False,
+                    }
+                }
             }
 
             snapshot = runtime.refresh()
@@ -296,9 +332,26 @@ class MachineRuntimeTests(unittest.TestCase):
         with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
             client = client_cls.return_value
             client.available.return_value = True
+            client.config.side_effect = lambda motor_id: {
+                "ok": True,
+                "config": {
+                    "min_enabled": True,
+                    "max_enabled": True,
+                    "min_tenths_mm": -200,
+                    "max_tenths_mm": 1100,
+                },
+            }
             client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
             client.refresh.side_effect = lambda motor_id: {
-                "motor": {"state": {"feedback_tenths_mm": {5: 0, 6: -200, 7: -200, 8: 910, 9: 910}[int(motor_id)], "move": False, "busy": False}}
+                "motor": {
+                    "state": {
+                        "feedback_tenths_mm": {5: 0, 6: -200, 7: -200, 8: 910, 9: 910}[int(motor_id)],
+                        "move": False,
+                        "busy": False,
+                        "alarm": False,
+                        "hwto": False,
+                    }
+                }
             }
 
             snapshot = runtime.refresh()
@@ -307,6 +360,61 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(5, snapshot["info"]["stop_positions"]["logic_version"])
         self.assertEqual(1, snapshot["info"]["stop_positions"]["attempt_count"])
         self.assertEqual(5, client.move_absolute_mm.call_count)
+
+    def test_stop_axis_positions_block_axis_outside_soft_limits(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=8,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        ok, msg = self.params.set_value("MAS0002", "2", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
+            client = client_cls.return_value
+            client.available.return_value = True
+            client.config.side_effect = lambda motor_id: {
+                "ok": True,
+                "config": {
+                    "min_enabled": True,
+                    "max_enabled": True,
+                    "min_tenths_mm": -200,
+                    "max_tenths_mm": 1100,
+                },
+            }
+
+            def fake_refresh(motor_id):
+                motor_id = int(motor_id)
+                return {
+                    "motor": {
+                        "state": {
+                            "feedback_tenths_mm": -6508 if motor_id == 7 else {5: 0, 6: -200, 8: 910, 9: 910}.get(motor_id, 0),
+                            "move": False,
+                            "busy": False,
+                            "alarm": motor_id == 7,
+                            "alarm_code": 16 if motor_id == 7 else 0,
+                            "hwto": False,
+                        }
+                    }
+                }
+
+            client.refresh.side_effect = fake_refresh
+            client.move_absolute_mm.return_value = {"ok": True, "reply": "ACK_MOVE_ABS_MM"}
+
+            snapshot = runtime.refresh()
+
+        self.assertEqual(9, snapshot["current_state"])
+        self.assertEqual(False, snapshot["info"]["stop_positions"]["ok"])
+        self.assertTrue(any("Motor 7" in item and "Alarm" in item for item in snapshot["info"]["stop_positions"]["errors"]))
+        moved_ids = [call.args[0] for call in client.move_absolute_mm.call_args_list]
+        self.assertNotIn(7, moved_ids)
 
     def test_stop_axis_position_verification_waits_for_motion_to_finish(self):
         runtime = self.build_runtime()
