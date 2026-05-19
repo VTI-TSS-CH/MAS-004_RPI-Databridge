@@ -163,7 +163,10 @@ def sync_motor_master_values(
     feedback = _to_int_or_none(state.get("feedback_tenths_mm"))
     target = _to_int_or_none(state.get("target_tenths_mm"))
     command = _to_int_or_none(state.get("command_tenths_mm"))
-    default_tenths = target if target is not None else (command if command is not None else feedback)
+    # For commissioned axis defaults the measured actual position is the
+    # source of truth. ESP target/command can still contain stale order data
+    # from a previous move and must not overwrite the Motor-Setup baseline.
+    default_tenths = feedback if feedback is not None else (target if target is not None else command)
     actual_tenths = feedback if feedback is not None else default_tenths
 
     min_enabled = bool(config.get("min_enabled", motor_id != 3))
