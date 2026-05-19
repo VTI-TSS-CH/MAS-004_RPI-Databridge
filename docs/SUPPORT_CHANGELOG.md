@@ -8,7 +8,7 @@
 
 ## 2026-05-18 (Stop-Modus Achs-Positionssatz)
 - Beim Eintritt in `MAS0001=9` / Produktions-Stop sendet die Runtime jetzt einen definierten Positionssatz an die ESP-Motorsteuerung: ID5 Materialkamera auf `0 mm`, ID6/ID7 Sensorachsen auf `-20 mm`, ID8/ID9 Etikettenanschlaege auf `100 mm`.
-- Die Motor-Setup-Seite ist fuer ID1-9 die Masterquelle der Inbetriebnahmeparameter. Ein `Parameter speichern` schreibt die ESP-Konfiguration nun auch in Parameter-DB und Master-Excel, damit alte Importwerte keine Softlimits oder Defaults zuruecksetzen.
+- Die Motor-Setup-Seite ist fuer ID1-9 die Masterquelle der Inbetriebnahmeparameter. Ein `Parameter speichern` schreibt die ESP-Konfiguration nun auch in Parameter-DB und maschinenlokale Master-Excel, damit alte Importwerte keine Softlimits oder Defaults zuruecksetzen. Die Git-Repo-Excel bleibt ueber Release-Commits versioniert.
 - Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern nur noch maximal dreimal mit 60 Sekunden Abstand erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.
 - `ACK_MOVE_ABS_MM` allein gilt nicht mehr als erledigt: Die Runtime refreshed die betroffenen Achsen nach dem Befehl und markiert den Stop-Positionssatz nur als `ok`, wenn die Achse am Ziel ist oder eine echte Bewegung meldet. Vor jedem Stop-Positionsbefehl werden `RESET_ALARM` und `RECOVER_ETO` fuer die jeweilige Achse ausgefuehrt.
 - Die Stop-Positions-Logikversion wurde angehoben, damit Produktions-Raspis alte fehlgeschlagene Versuche nach dem ESP-Direct-Data-Fix sofort neu bewerten und nicht auf die alte Retry-Sperre warten.

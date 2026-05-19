@@ -770,8 +770,6 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         paths: list[str] = []
         if cfg2.master_params_xlsx_path:
             paths.append(cfg2.master_params_xlsx_path)
-        if REPO_MASTER_PARAMS_XLSX:
-            paths.append(REPO_MASTER_PARAMS_XLSX)
         return paths
 
     def sync_motor_master_from_response(
