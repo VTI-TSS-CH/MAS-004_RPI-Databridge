@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-05-19 (Einrichten: Formatachsen vor Wickler-Messfahrt)
+- Der Einrichtworkflow positioniert vor der Wickler-Messfahrt immer zuerst die formatrelevanten Anschlagachsen ID9/ID8 und danach die Sensor-/Kameraachsen ID6/ID7/ID5.
+- Die Zielwerte stammen aus dem aktuellen Raspi-Formatplan (`MAP0001`, `MAP0008`, `MAP0009`, `MAP0010` plus Korrekturen `MAP0029` bis `MAP0033`). Vor jeder Bewegung wird gegen die aktiven ESP-Motor-Min/Max-Grenzen geprueft.
+- Wickler-Einmessen und die 1000-mm-Vor-/Rueck-Messfahrt bleiben fester Bestandteil jedes `Einrichten`-Aufrufs; gespeicherte Durchmesser oder alte Messergebnisse kuerzen den Ablauf nicht ab.
+- Wenn Motor 3 den Operation-Data-Messfahrbefehl akzeptiert, aber keine Bewegung startet, fuehrt der Raspi genau einen kontrollierten Retry mit vorherigem `RESET_ALARM`/`RECOVER_ETO` aus. Teilfahrten werden weiterhin nicht blind wiederholt.
+
 ## 2026-05-18 (Bahnriss nur im Prozessfenster)
 - Bahnriss Einlauf/Auslauf (`ESP I0.4`/`I0.11`, `MAE0008`/`MAE0009`) blockieren Reset, Not-Stop und Produktions-Stop nicht mehr.
 - Die beiden Signale werden erst nach dem Einrichten in den produktionsnahen Betriebsarten bewertet und bleiben bis inklusive Rueckspulen aktiv.

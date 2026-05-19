@@ -136,7 +136,9 @@
 
 ## 2.1 Einricht-Wicklerworkflow
 - Die frueheren temporaeren Microtom-Testbefehle fuer Wickler-/Transporttests sind entfernt.
+- Beim Einrichten faehrt der Raspi zuerst die formatrelevanten Anschlagachsen ID9/ID8 auf die Rezeptbreite und danach ID6/ID7/ID5 auf die Rezeptpositionen fuer Etikettensensoren und Materialkamera.
 - Wickler-Einmessen und 1000-mm-Durchmesser-Messfahrt werden nur noch intern durch den Raspi-Maschinenzustand gestartet, wenn die Anlage in den Einrichtmodus wechselt.
+- Die Wickler-Messfahrt wird bei jedem Einrichten neu ausgefuehrt, auch wenn noch gespeicherte Durchmesser oder alte Messwerte vorhanden sind.
 - Reset/Purge-Recovery muss bewegungsarm bleiben: nur `stop`, `resetAlarm`, `etoRecovery`, `stop`; dabei darf keine Wicklerkalibrierung und keine Messfahrt gestartet werden.
 - Current production reset behavior is intentionally passive for Wicklers: a standing Wippe at the lower/upper end is accepted as safe stop, not as a reason to start regulation.
 - Fuer manuelle Service-Diagnose bleiben die Wickler-HTTP-/USB-Servicebefehle nutzbar; sie sind aber keine produktive Microtom-Schnittstelle.
