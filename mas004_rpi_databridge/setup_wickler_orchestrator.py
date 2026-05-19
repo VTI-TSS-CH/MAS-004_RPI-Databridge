@@ -153,10 +153,40 @@ class SetupWicklerOrchestrator:
             if busy:
                 seen_busy = True
             elapsed = time.time() - started
-            if motor and not busy and elapsed >= float(min_wait_s) and (
-                seen_busy or elapsed > 2.0
-            ):
-                return motor
+            if motor and not busy and elapsed >= float(min_wait_s):
+                if seen_busy:
+                    return motor
+                try:
+                    if self._motor3_within_stop_tolerance(motor):
+                        return motor
+                except RuntimeError:
+                    pass
+                # An ACK without MOVE/BUSY and without target progress is a
+                # failed start, not a completed travel. Do not continue into
+                # post-positioning with the full measuring distance as error.
+                if elapsed > 2.0:
+                    details = {
+                        key: motor.get(key)
+                        for key in (
+                            "ready",
+                            "busy",
+                            "move",
+                            "hwto",
+                            "alarm",
+                            "alarm_code",
+                            "feedback_tenths_mm",
+                            "command_tenths_mm",
+                            "target_tenths_mm",
+                            "feedback_steps",
+                            "command_steps",
+                            "input_raw_hex",
+                            "output_raw_hex",
+                            "last_reply",
+                            "last_error",
+                        )
+                        if key in motor
+                    }
+                    raise RuntimeError(f"Motor 3 move was accepted but did not start/reach target: {details}")
             time.sleep(0.25)
         details = {
             key: last_state.get(key)
@@ -371,8 +401,8 @@ class SetupWicklerOrchestrator:
         for client in self._winder_clients():
             client.start_diameter_learning(timeout_s=5.0)
         # Diameter learning is an explicit setup move, not a productive takt.
-        # MOVE_REL_MM_OP uses the ESP's immediate Direct-Data trigger and avoids
-        # the Motor-3 hardware START edge that is reserved for takt operation.
+        # MOVE_REL_MM_OP uses the ESP's setup-only Operation-Data start path and
+        # avoids the Motor-3 hardware START edge reserved for takt operation.
         self._esp(f"MOTOR 3 MOVE_REL_MM_OP={distance_mm:.3f}", read_timeout_s=5.0)
         abs_distance = abs(float(distance_mm))
         abs_speed = max(1.0, abs(float(speed_mm_s)))

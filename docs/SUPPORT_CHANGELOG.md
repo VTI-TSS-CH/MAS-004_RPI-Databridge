@@ -21,7 +21,7 @@
 - Die Stop-Toleranz `+/-0.05 mm` wird nicht am Start der Messfahrt bewertet, sondern nach der 1000-mm-Vorwaertsfahrt und nach der Rueckfahrt auf den neuen Nullpunkt. Pro Stopp bleiben maximal drei Nachkorrekturen erlaubt.
 - Die Stop-Toleranz von Motor 3 wird fuer die Nachkorrektur auf Rohstep-Ebene (`feedback_steps`/`command_steps` plus `steps_per_mm`) bewertet. Die 1/10-mm-Anzeigewerte sind zu grob fuer `+/-0.05 mm`; kleine Restfehler werden deshalb mit `MOTOR 3 MOVE_REL_STEPS=<n>` korrigiert.
 - Die Rohstep-Bewertung verfolgt den festen Zielpunkt aus `target_tenths_mm` und `zero_offset_steps`, nicht den nach einer Relativkorrektur weitergeschobenen AZD-`command_steps`-Wert. Dadurch wird eine erfolgreiche kleine Nachpositionierung nicht faelschlich weiter als `0.095 mm` Restfehler gewertet.
-- Die 1000-mm-Messfahrt nutzt `MOTOR 3 MOVE_REL_MM_OP=<mm>` und damit den ESP-Setup-Fahrpfad mit sofortigem Direct-Data-Trigger. `MOVE_REL_MM` bleibt fuer den spaeteren hardware-synchronen Motor-3-Taktpfad reserviert; die Einrichtfahrt darf nicht vom Hardware-START-Mapping abhaengen.
+- Die 1000-mm-Messfahrt nutzt `MOTOR 3 MOVE_REL_MM_OP=<mm>` und damit den ESP-Setup-Fahrpfad mit Operation-Data-START. `MOVE_REL_MM` bleibt fuer den spaeteren hardware-synchronen Motor-3-Taktpfad reserviert; die Einrichtfahrt darf nicht vom Hardware-START-Mapping abhaengen.
 - Abwickler und Aufwickler erhalten `stop`/`resetAlarm`/`etoRecovery`/`calibrate` nun phasenweise parallel, damit das Einmessen beider Wippen zeitgleich startet und keine kuenstliche 2-3-s-Verzoegerung zwischen den Wicklern entsteht.
 
 ## 2026-05-11 (Machine Control Purge/Safety Anzeige getrennt)

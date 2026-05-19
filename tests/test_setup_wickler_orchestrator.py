@@ -79,6 +79,22 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_motor3_idle_rejects_ack_without_motion_or_target_progress(self):
+        self.controller._esp = Mock(
+            return_value=(
+                'JSON {"ok":true,"motor":{"state":{"ready":false,"busy":false,"move":false,'
+                '"hwto":false,"alarm":false,"feedback_tenths_mm":0,"command_tenths_mm":1,'
+                '"target_tenths_mm":10000,"last_reply":"Move accepted"}}}'
+            )
+        )
+
+        with patch(
+            "mas004_rpi_databridge.setup_wickler_orchestrator.time.time",
+            side_effect=[0.0, 0.0, 0.0, 3.1],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "accepted but did not start"):
+                self.controller._wait_motor3_idle(timeout_s=30.0, min_wait_s=0.0)
+
     def test_motor3_postposition_rejects_nested_status_position_outside_tolerance(self):
         self.controller._esp = Mock(return_value="ACK")
         self.controller._wait_motor3_idle = Mock(

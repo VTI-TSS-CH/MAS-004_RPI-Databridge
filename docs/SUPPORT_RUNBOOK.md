@@ -466,7 +466,7 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - Smart Wickler pushes to `/api/inbox` must include `source=smartwickler`; these messages are device status updates and must not be validated as Microtom writes.
   - If Microtom receives `MAS0008/MAS0009/MAS0026/MAS0027/MAE* = NAK_ReadOnly` after a Wickler status change, verify that the deployed Router includes the device-origin inbox path from 2026-04-30.
   - The setup measuring run performs Wickler calibration plus a 1000 mm forward/reverse diameter measurement; if only about 500 mm is travelled, inspect Motor-3 busy/position feedback and the minimum travel-time wait.
-- The measuring run expects ESP firmware support for `MOTOR 3 MOVE_REL_MM_OP=...` on the immediate setup trigger path. Keep `MOVE_REL_MM` reserved for the productive hardware-synchronised takt path.
+- The measuring run expects ESP firmware support for `MOTOR 3 MOVE_REL_MM_OP=...` on the setup-only Operation-Data start path. Keep `MOVE_REL_MM` reserved for the productive hardware-synchronised takt path.
 - For commissioning/backup handling:
   - protected `Machine-Setup` login must be required before commissioning or backup APIs are usable
   - machine serial number and machine name should be set before creating qualification-relevant backup bundles
