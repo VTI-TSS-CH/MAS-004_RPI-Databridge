@@ -84,15 +84,15 @@ STOP_MODE_AXIS_TARGETS_MM = {
     5: 0.0,    # Material-Kontrollkamera TV1
     6: -20.0,  # Sensor Etikettenerfassung
     7: -20.0,  # Sensor Auswurfkontrolle
-    8: 91.0,   # Etikettenanschlag links
-    9: 91.0,   # Etikettenanschlag vorne/rechts
+    8: 100.0,  # Etikettenanschlag links
+    9: 100.0,  # Etikettenanschlag vorne/rechts
 }
 STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
 STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
 STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 30.0
 STOP_MODE_POSITION_VERIFY_POLL_S = 0.5
-STOP_MODE_POSITION_LOGIC_VERSION = 5
+STOP_MODE_POSITION_LOGIC_VERSION = 6
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -1128,11 +1128,11 @@ class MachineRuntime:
             )
         else:
             stop_info.update({"ok": True, "errors": [], "finished_ts": now_ts()})
-            self.logs.log("machine", "info", "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=91mm")
+            self.logs.log("machine", "info", "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=100mm")
             self._record_event(
                 "stop_mode_axis_targets",
                 "info",
-                "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=91mm",
+                "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=100mm",
                 stop_info,
             )
         info["stop_positions"] = stop_info

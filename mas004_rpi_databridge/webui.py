@@ -46,6 +46,7 @@ from mas004_rpi_databridge.backup_ui import build_backup_ui_html
 from mas004_rpi_databridge.format_profiles import FormatProfileStore, normalize_profile_name
 from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
+from mas004_rpi_databridge.motor_master_sync import sync_motor_master_values
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
@@ -763,6 +764,54 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             except Exception as exc:
                 # Command ACK is still useful; the UI shows if the follow-up refresh failed.
                 response["refresh_error"] = str(exc)
+        return response
+
+    def motor_master_workbook_paths(cfg2: Settings) -> list[str]:
+        paths: list[str] = []
+        if cfg2.master_params_xlsx_path:
+            paths.append(cfg2.master_params_xlsx_path)
+        if REPO_MASTER_PARAMS_XLSX:
+            paths.append(REPO_MASTER_PARAMS_XLSX)
+        return paths
+
+    def sync_motor_master_from_response(
+        cfg2: Settings,
+        motor_id: int,
+        action: str,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_motor = response.get("motor") if isinstance(response, dict) else None
+        if not isinstance(raw_motor, dict):
+            return response
+        try:
+            sync_result = sync_motor_master_values(
+                params,
+                cfg2,
+                motor_id,
+                raw_motor,
+                get_motor_bindings(),
+                workbook_paths=motor_master_workbook_paths(cfg2),
+            )
+            response["master_sync"] = sync_result
+            if sync_result.get("updated_pkeys"):
+                motor_bindings_cache["loaded"] = False
+                logs.log(
+                    "machine",
+                    "info",
+                    (
+                        f"Motor {int(motor_id)} Setup-Master nach {action} synchronisiert: "
+                        + ", ".join(sync_result.get("updated_pkeys") or [])
+                    ),
+                )
+            if sync_result.get("db_errors"):
+                logs.log(
+                    "machine",
+                    "warning",
+                    f"Motor {int(motor_id)} Setup-Master teilweise nicht synchronisiert: {sync_result.get('db_errors')}",
+                )
+        except Exception as exc:
+            response["master_sync_error"] = str(exc)
+            logs.log("machine", "warning", f"Motor {int(motor_id)} Setup-Master-Sync fehlgeschlagen: {exc}")
         return response
 
     def get_winder_state(role: str) -> dict[str, Any]:
@@ -2121,7 +2170,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "ok": True,
             "reply": f"{result.get('reply', '')}; {save_result.get('reply', '')}".strip("; "),
         }
-        return motor_action_response(client, motor_id, "SET_POSITION_MM", combined)
+        response = motor_action_response(client, motor_id, "SET_POSITION_MM", combined)
+        return sync_motor_master_from_response(cfg2, motor_id, "SET_POSITION_MM", response)
 
     @app.post("/api/motors/{motor_id}/config")
     def api_motor_config(
@@ -2177,7 +2227,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         result = motor_client_call("SAVE", lambda: client.save(motor_id))
-        return motor_action_response(client, motor_id, "SAVE", result)
+        response = motor_action_response(client, motor_id, "SAVE", result)
+        return sync_motor_master_from_response(cfg2, motor_id, "SAVE", response)
 
     @app.post("/api/motors/{motor_id}/zero")
     def api_motor_zero(
