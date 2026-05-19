@@ -16,6 +16,7 @@ from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
 MOTOR3_STOP_TOLERANCE_MM = 0.05
 MOTOR3_POSTPOSITION_MAX_ATTEMPTS = 3
 MOTOR3_POSTPOSITION_ERROR_PKEY = "MAE0048"
+MOTOR3_MEASUREMENT_START_MAX_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -324,6 +325,47 @@ class SetupWicklerOrchestrator:
             f"error={final_error_mm:.3f}mm tolerance=+/-{MOTOR3_STOP_TOLERANCE_MM:.3f}mm"
         )
 
+    def _expected_motor3_move_seconds(self, distance_mm: float, speed_mm_s: float) -> float:
+        abs_distance = abs(float(distance_mm))
+        abs_speed = max(1.0, abs(float(speed_mm_s)))
+        ramp = max(1.0, self.defaults.learn_ramp_mm_s2)
+        ramp_distance = (abs_speed * abs_speed) / ramp
+        if abs_distance > ramp_distance:
+            return (abs_distance / abs_speed) + (abs_speed / ramp)
+        return 2.0 * ((abs_distance / ramp) ** 0.5)
+
+    def _run_motor3_measurement_move(self, distance_mm: float, speed_mm_s: float) -> dict[str, Any]:
+        expected_move_s = self._expected_motor3_move_seconds(distance_mm, speed_mm_s)
+        last_error: RuntimeError | None = None
+        for attempt in range(1, MOTOR3_MEASUREMENT_START_MAX_ATTEMPTS + 1):
+            for client in self._winder_clients():
+                client.start_diameter_learning(timeout_s=5.0)
+            # Diameter learning is an explicit setup move, not a productive takt.
+            # MOVE_REL_MM_OP uses the ESP's setup-only Operation-Data start path and
+            # avoids the Motor-3 hardware START edge reserved for takt operation.
+            self._esp(f"MOTOR 3 MOVE_REL_MM_OP={distance_mm:.3f}", read_timeout_s=5.0)
+            try:
+                return self._wait_motor3_idle(
+                    timeout_s=max(30.0, expected_move_s + 20.0),
+                    min_wait_s=max(0.0, expected_move_s + 0.5),
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                message = str(exc)
+                if "accepted but did not start/reach target" not in message:
+                    raise
+                if attempt >= MOTOR3_MEASUREMENT_START_MAX_ATTEMPTS:
+                    raise
+                self.logs.log(
+                    "raspi",
+                    "warning",
+                    f"Motor 3 measurement move did not start, retrying once: distance={distance_mm:.3f}mm",
+                )
+                for command in ("MOTOR 3 RESET_ALARM", "MOTOR 3 RECOVER_ETO"):
+                    self._esp(command, read_timeout_s=5.0)
+                time.sleep(0.5)
+        raise last_error or RuntimeError("Motor 3 measurement move failed")
+
     def _winder_clients(self) -> list[SmartWicklerClient]:
         return [SmartWicklerClient(self.cfg, "unwinder"), SmartWicklerClient(self.cfg, "rewinder")]
 
@@ -398,24 +440,8 @@ class SetupWicklerOrchestrator:
         return {"ok": True, "applied": applied, "distance_mm": distance, "speed_mm_s": speed, "ramp_mm_s2": ramp}
 
     def _learn_diameter_pass(self, distance_mm: float, speed_mm_s: float) -> dict[str, float]:
-        for client in self._winder_clients():
-            client.start_diameter_learning(timeout_s=5.0)
-        # Diameter learning is an explicit setup move, not a productive takt.
-        # MOVE_REL_MM_OP uses the ESP's setup-only Operation-Data start path and
-        # avoids the Motor-3 hardware START edge reserved for takt operation.
-        self._esp(f"MOTOR 3 MOVE_REL_MM_OP={distance_mm:.3f}", read_timeout_s=5.0)
         abs_distance = abs(float(distance_mm))
-        abs_speed = max(1.0, abs(float(speed_mm_s)))
-        ramp = max(1.0, self.defaults.learn_ramp_mm_s2)
-        ramp_distance = (abs_speed * abs_speed) / ramp
-        if abs_distance > ramp_distance:
-            expected_move_s = (abs_distance / abs_speed) + (abs_speed / ramp)
-        else:
-            expected_move_s = 2.0 * ((abs_distance / ramp) ** 0.5)
-        motor_state = self._wait_motor3_idle(
-            timeout_s=max(30.0, expected_move_s + 20.0),
-            min_wait_s=max(0.0, expected_move_s + 0.5),
-        )
+        motor_state = self._run_motor3_measurement_move(distance_mm, speed_mm_s)
         time.sleep(1.0)
 
         candidates: dict[str, float] = {}

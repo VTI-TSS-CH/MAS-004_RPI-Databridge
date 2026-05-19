@@ -265,6 +265,35 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertIn("MOTOR 3 MOVE_REL_MM_OP=1000.000", calls)
         self.assertFalse(any(call == "MOTOR 3 MOVE_REL_MM=1000.000" for call in calls))
 
+    def test_motor3_measurement_move_retries_when_operation_data_does_not_start(self):
+        class FakeWicklerClient:
+            def __init__(self):
+                self.learning_starts = 0
+
+            def start_diameter_learning(self, timeout_s: float | None = None):
+                self.learning_starts += 1
+                return {"ok": True}
+
+        clients = [FakeWicklerClient(), FakeWicklerClient()]
+        self.controller._winder_clients = Mock(return_value=clients)
+        self.controller._esp = Mock(return_value="ACK")
+        self.controller._wait_motor3_idle = Mock(
+            side_effect=[
+                RuntimeError("Motor 3 move was accepted but did not start/reach target: {}"),
+                {"feedback_tenths_mm": 10000, "target_tenths_mm": 10000},
+            ]
+        )
+
+        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep"):
+            result = self.controller._run_motor3_measurement_move(1000.0, 100.0)
+
+        self.assertEqual({"feedback_tenths_mm": 10000, "target_tenths_mm": 10000}, result)
+        self.assertEqual([2, 2], [client.learning_starts for client in clients])
+        calls = [call.args[0] for call in self.controller._esp.call_args_list]
+        self.assertEqual(2, calls.count("MOTOR 3 MOVE_REL_MM_OP=1000.000"))
+        self.assertIn("MOTOR 3 RESET_ALARM", calls)
+        self.assertIn("MOTOR 3 RECOVER_ETO", calls)
+
     def test_wickler_calibrate_commands_are_started_in_parallel(self):
         barrier = threading.Barrier(2, timeout=1.0)
 

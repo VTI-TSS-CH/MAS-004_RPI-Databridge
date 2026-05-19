@@ -190,6 +190,85 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(7, second["requested_state"])
         self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
 
+    def test_setup_positions_format_axes_before_wickler_measurement(self):
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                self.position_tenths = {}
+                self.moves = []
+
+            def available(self):
+                return True
+
+            def config(self, motor_id):
+                return {
+                    "config": {
+                        "min_enabled": True,
+                        "max_enabled": True,
+                        "min_tenths_mm": -10000,
+                        "max_tenths_mm": 10000,
+                    }
+                }
+
+            def refresh(self, motor_id):
+                return {
+                    "motor": {
+                        "state": {
+                            "feedback_tenths_mm": self.position_tenths.get(int(motor_id), 0),
+                            "move": False,
+                            "busy": False,
+                            "alarm": False,
+                            "hwto": False,
+                        }
+                    }
+                }
+
+            def reset_alarm(self, motor_id):
+                return {"ok": True, "reply": "ACK"}
+
+            def recover_eto_motor(self, motor_id):
+                return {"ok": True, "reply": "ACK"}
+
+            def move_absolute_mm(self, motor_id, absolute_mm):
+                motor_id = int(motor_id)
+                self.position_tenths[motor_id] = int(round(float(absolute_mm) * 10.0))
+                self.moves.append((motor_id, round(float(absolute_mm), 3)))
+                return {"ok": True, "reply": "ACK"}
+
+        self.cfg.esp_simulation = False
+        for pkey, default_v in (
+            ("MAP0008", "23"),
+            ("MAP0009", "24"),
+            ("MAP0010", "48"),
+            ("MAP0029", "2"),
+            ("MAP0030", "3"),
+            ("MAP0031", "20"),
+            ("MAP0032", "30"),
+            ("MAP0033", "4"),
+        ):
+            _insert_param(self.db, pkey, "MAP", pkey[-4:], default_v, "W", "R", "uint16")
+        runtime = self.build_runtime()
+        ok, msg = self.params.set_value("MAS0002", "3", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        fake_client = FakeEspMotorClient(self.cfg)
+        with (
+            patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", return_value=fake_client),
+            patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls,
+        ):
+            controller = controller_cls.return_value
+            controller.run.return_value = {"ok": True, "applied": ["unwinder:200.0mm", "rewinder:200.0mm"]}
+            snapshot = runtime.refresh()
+
+        controller.run.assert_called_once_with()
+        self.assertEqual(True, snapshot["info"]["setup"]["last_result"]["format_axes"]["ok"])
+        self.assertLess(max(fake_client.moves.index(move) for move in fake_client.moves if move[0] in {8, 9}),
+                        min(fake_client.moves.index(move) for move in fake_client.moves if move[0] in {5, 6, 7}))
+        self.assertIn((9, 52.0), fake_client.moves)
+        self.assertIn((8, 53.0), fake_client.moves)
+        self.assertIn((6, 23.2), fake_client.moves)
+        self.assertIn((7, 24.3), fake_client.moves)
+        self.assertIn((5, 48.4), fake_client.moves)
+
     def test_failed_setup_workflow_returns_to_stop_instead_of_sticking_in_transition(self):
         runtime = self.build_runtime()
 

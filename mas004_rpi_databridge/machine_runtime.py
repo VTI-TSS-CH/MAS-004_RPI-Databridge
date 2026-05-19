@@ -93,6 +93,9 @@ STOP_MODE_POSITION_MAX_ATTEMPTS = 3
 STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 30.0
 STOP_MODE_POSITION_VERIFY_POLL_S = 0.5
 STOP_MODE_POSITION_LOGIC_VERSION = 6
+SETUP_AXIS_POSITION_TOLERANCE_TENTHS = 1
+SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S = 45.0
+SETUP_AXIS_POSITION_VERIFY_POLL_S = 0.25
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -911,27 +914,36 @@ class MachineRuntime:
         if not _SETUP_WICKLER_LOCK.acquire(blocking=False):
             return {"ok": False, "skipped": True, "reason": "already_running", "started_ts": started_ts}
         try:
-            self.logs.log("machine", "info", "Einrichten: Wickler einmessen und Messfahrt gestartet")
+            param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+            format_plan = build_format_plan(param_map)
+            self.logs.log("machine", "info", "Einrichten: Formatachsen positionieren, Wickler einmessen und Messfahrt starten")
             self._record_event(
                 "setup_wickler_calibration",
                 "info",
-                "Einrichten gestartet: beide Wickler einmessen, Messfahrt ausfuehren und Durchmesser uebernehmen",
+                "Einrichten gestartet: Formatachsen positionieren, beide Wickler einmessen, Messfahrt ausfuehren und Durchmesser uebernehmen",
                 {},
             )
+            axis_result = self._position_setup_format_axes(format_plan)
             controller = SetupWicklerOrchestrator(self.cfg, self.params, self.logs)
             workflow = controller.run()
             ok = bool(workflow.get("ok"))
             result = {
                 "ok": ok,
                 "response": "ACK_SETUP_WICKLER",
+                "format_axes": axis_result,
                 "workflow": workflow,
                 "started_ts": started_ts,
                 "finished_ts": now_ts(),
             }
+            result_message = (
+                "Einrichten-Wicklerworkflow abgeschlossen"
+                if ok
+                else f"Einrichten-Wicklerworkflow fehlgeschlagen: {result.get('response')}"
+            )
             self._record_event(
                 "setup_wickler_calibration",
                 "info" if ok else "error",
-                "Einrichten-Wicklerworkflow abgeschlossen" if ok else f"Einrichten-Wicklerworkflow fehlgeschlagen: {response}",
+                result_message,
                 result,
             )
             return result
@@ -953,6 +965,110 @@ class MachineRuntime:
             return result
         finally:
             _SETUP_WICKLER_LOCK.release()
+
+    def _setup_format_axis_phases(self, format_plan: dict[str, Any]) -> list[tuple[str, dict[int, float]]]:
+        axes = dict((format_plan.get("axes") or {}) if isinstance(format_plan, dict) else {})
+
+        def target_mm(key: str) -> float:
+            return _safe_int(axes.get(key), 0) / 10.0
+
+        return [
+            (
+                "label_guides",
+                {
+                    9: target_mm("label_guide_infeed_target_tenths_mm"),
+                    8: target_mm("label_guide_outfeed_target_tenths_mm"),
+                },
+            ),
+            (
+                "sensors_and_material_camera",
+                {
+                    6: target_mm("label_detect_sensor_target_tenths_mm"),
+                    7: target_mm("label_control_sensor_target_tenths_mm"),
+                    5: target_mm("material_camera_x_target_tenths_mm"),
+                },
+            ),
+        ]
+
+    def _position_setup_format_axes(self, format_plan: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {"ok": False, "skipped": False, "phases": []}
+        phases = self._setup_format_axis_phases(format_plan)
+        result["targets_mm"] = {str(motor_id): target for _, targets in phases for motor_id, target in targets.items()}
+
+        client = EspMotorClient(self.cfg)
+        if not client.available():
+            result.update({"ok": True, "skipped": True, "reason": "esp_motor_endpoint_unavailable_or_simulation"})
+            return result
+
+        for phase_name, targets_mm in phases:
+            phase_result: dict[str, Any] = {
+                "phase": phase_name,
+                "ok": False,
+                "targets_mm": dict(targets_mm),
+                "preflight": [],
+                "moves": [],
+            }
+            result["phases"].append(phase_result)
+
+            errors: list[str] = []
+            for motor_id, target_mm in sorted(targets_mm.items()):
+                preflight = self._motor_preflight_for_position_move(client, motor_id, target_mm)
+                phase_result["preflight"].append(preflight)
+                if not preflight.get("ok"):
+                    errors.append(f"Motor {motor_id}: {preflight.get('reason') or 'Positionierfreigabe verweigert'}")
+
+            if errors:
+                phase_result.update({"ok": False, "errors": errors})
+                raise RuntimeError(f"Einrichten Formatachsen {phase_name} verweigert: " + "; ".join(errors))
+
+            for motor_id, target_mm in sorted(targets_mm.items()):
+                try:
+                    client.reset_alarm(motor_id)
+                    client.recover_eto_motor(motor_id)
+                    reply = client.move_absolute_mm(motor_id, target_mm)
+                    move_result = {
+                        "motor_id": motor_id,
+                        "target_mm": target_mm,
+                        "ok": bool(reply.get("ok")),
+                        "reply": reply.get("reply"),
+                    }
+                    phase_result["moves"].append(move_result)
+                    if not move_result["ok"]:
+                        errors.append(f"Motor {motor_id}: {reply.get('reply')}")
+                except Exception as exc:
+                    phase_result["moves"].append(
+                        {"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)}
+                    )
+                    errors.append(f"Motor {motor_id}: {exc}")
+
+            if errors:
+                phase_result.update({"ok": False, "errors": errors})
+                raise RuntimeError(f"Einrichten Formatachsen {phase_name} nicht gesendet: " + "; ".join(errors))
+
+            verification = self._verify_axis_targets(
+                client,
+                targets_mm,
+                tolerance_tenths=SETUP_AXIS_POSITION_TOLERANCE_TENTHS,
+                timeout_s=SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S,
+                poll_s=SETUP_AXIS_POSITION_VERIFY_POLL_S,
+            )
+            phase_result["verification"] = verification
+            if not verification.get("ok"):
+                errors = [str(item) for item in verification.get("errors") or []]
+                phase_result.update({"ok": False, "errors": errors})
+                raise RuntimeError(f"Einrichten Formatachsen {phase_name} Ziel nicht erreicht: " + "; ".join(errors))
+
+            phase_result.update({"ok": True, "errors": []})
+
+        result.update({"ok": True, "finished_ts": now_ts()})
+        self.logs.log("machine", "info", "Einrichten: Formatachsen stehen auf Rezeptposition")
+        self._record_event(
+            "setup_format_axes",
+            "info",
+            "Einrichten: Formatachsen stehen auf Rezeptposition",
+            result,
+        )
+        return result
 
     def _stop_mode_target_key(self) -> str:
         return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()))
@@ -1137,12 +1253,20 @@ class MachineRuntime:
             )
         info["stop_positions"] = stop_info
 
-    def _verify_stop_mode_axis_targets(self, client: EspMotorClient) -> dict[str, Any]:
+    def _verify_axis_targets(
+        self,
+        client: EspMotorClient,
+        targets_mm: dict[int, float],
+        *,
+        tolerance_tenths: int,
+        timeout_s: float,
+        poll_s: float,
+    ) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         errors: list[str] = []
-        for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
+        for motor_id, target_mm in sorted(targets_mm.items()):
             target_tenths = int(round(float(target_mm) * 10.0))
-            deadline = time.time() + STOP_MODE_POSITION_VERIFY_TIMEOUT_S
+            deadline = time.time() + float(timeout_s)
             last_result: dict[str, Any] | None = None
             try:
                 while True:
@@ -1153,7 +1277,7 @@ class MachineRuntime:
                     moving = bool(state.get("move")) or bool(state.get("busy"))
                     alarm = bool(state.get("alarm"))
                     error_tenths = target_tenths - feedback_tenths
-                    at_target = abs(error_tenths) <= STOP_MODE_POSITION_TOLERANCE_TENTHS
+                    at_target = abs(error_tenths) <= int(tolerance_tenths)
                     last_result = {
                         "motor_id": motor_id,
                         "target_tenths_mm": target_tenths,
@@ -1181,17 +1305,26 @@ class MachineRuntime:
                     if time.time() >= deadline:
                         errors.append(
                             f"Motor {motor_id} Ziel {target_mm:.1f}mm nach "
-                            f"{STOP_MODE_POSITION_VERIFY_TIMEOUT_S:.0f}s nicht erreicht "
+                            f"{float(timeout_s):.0f}s nicht erreicht "
                             f"(Ist {feedback_tenths / 10.0:.1f}mm)"
                         )
                         break
-                    time.sleep(STOP_MODE_POSITION_VERIFY_POLL_S)
+                    time.sleep(float(poll_s))
                 if last_result is not None:
                     results.append(last_result)
             except Exception as exc:
                 results.append({"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)})
                 errors.append(f"Motor {motor_id} Refresh: {exc}")
         return {"ok": not errors, "results": results, "errors": errors}
+
+    def _verify_stop_mode_axis_targets(self, client: EspMotorClient) -> dict[str, Any]:
+        return self._verify_axis_targets(
+            client,
+            STOP_MODE_AXIS_TARGETS_MM,
+            tolerance_tenths=STOP_MODE_POSITION_TOLERANCE_TENTHS,
+            timeout_s=STOP_MODE_POSITION_VERIFY_TIMEOUT_S,
+            poll_s=STOP_MODE_POSITION_VERIFY_POLL_S,
+        )
 
     def _active_param_keys(self, ptype: str) -> list[str]:
         with self.db._conn() as c:
