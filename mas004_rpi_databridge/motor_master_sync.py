@@ -10,6 +10,19 @@ from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.params import ParamStore, SHEET_NAME
 
 
+DEFAULT_MOTOR_PARAM_BINDINGS: dict[int, dict[str, str]] = {
+    1: {"setpoint": "MAP0056", "actual": "MAS0011"},
+    2: {"setpoint": "MAP0057", "actual": "MAS0012"},
+    3: {"setpoint": "MAP0058", "actual": "MAS0031"},
+    4: {"setpoint": "MAP0059", "actual": "MAS0032"},
+    5: {"setpoint": "MAP0060", "actual": "MAS0017"},
+    6: {"setpoint": "MAP0061", "actual": "MAS0013"},
+    7: {"setpoint": "MAP0062", "actual": "MAS0014"},
+    8: {"setpoint": "MAP0063", "actual": "MAS0016"},
+    9: {"setpoint": "MAP0064", "actual": "MAS0015"},
+}
+
+
 def _to_int_or_none(value: Any) -> int | None:
     try:
         return int(round(float(str(value).strip())))
@@ -70,12 +83,12 @@ def _motor_binding(bindings: dict[int, dict[str, Any]] | dict[str, Any], motor_i
     return as_text if isinstance(as_text, dict) else {}
 
 
-def _pkey_for_role(binding: dict[str, Any], role: str) -> str | None:
+def _pkey_for_role(motor_id: int, binding: dict[str, Any], role: str) -> str | None:
     item = binding.get(role)
     if not isinstance(item, dict):
-        return None
+        return DEFAULT_MOTOR_PARAM_BINDINGS.get(int(motor_id), {}).get(role)
     pkey = _cell_text(item.get("pkey"))
-    return pkey or None
+    return pkey or DEFAULT_MOTOR_PARAM_BINDINGS.get(int(motor_id), {}).get(role)
 
 
 def _unique_existing(paths: list[str]) -> list[str]:
@@ -165,8 +178,8 @@ def sync_motor_master_values(
         max_v = None
 
     updates: dict[str, dict[str, Any]] = {}
-    setpoint_pkey = _pkey_for_role(binding, "setpoint")
-    actual_pkey = _pkey_for_role(binding, "actual")
+    setpoint_pkey = _pkey_for_role(motor_id, binding, "setpoint")
+    actual_pkey = _pkey_for_role(motor_id, binding, "actual")
     if setpoint_pkey:
         updates[setpoint_pkey] = {
             "default_v": _format_default(default_tenths),
