@@ -1,10 +1,179 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-06-29 (Microtom DIClient Adapter Header)
+- Ausgehende Raspi -> Microtom Outbox-Requests ergaenzen fuer alle konfigurierten Microtom-Peers zentral den Header `X-DIClient-Adapter-Key`.
+- Der Key liegt als `diclient_adapter_key` in der lokalen Raspi-Konfiguration und wird erst unmittelbar beim Senden hinzugefuegt; Outbox-Jobs speichern den Key nicht selbst.
+- Die Settings-UI kann den Key setzen/loeschen und maskiert ihn beim Lesen wie ein Secret.
+- Der Microtom-Test-Deploy-Helper setzt weiterhin alle externen Systeme auf Simulation und kann den DIClient-Key beim Raspi-only-Deploy in die Testsystem-Konfiguration schreiben.
+
+## 2026-06-24 (MAP0065 fuer physische und virtuelle Taster)
+- `MAP0065` sperrt jetzt auch den Safety-/Purge-Reset auf dem gemeinsamen Start/Pause/Reset-Tastelement. Weil Reset physisch auf `raspi_plc21 I0.7` liegt, gilt dafuer das Start-Bit der Maske.
+- Die Web-Taste in `/ui/machine-setup/process` und der physische Tasterpfad verwenden dieselbe Freigabelogik: bei gesperrtem Start-Bit ist Reset wirkungslos.
+- Die Safety-/Reset-LED-Uebersteuerung auf `Q0.0`/`Q0.2` respektiert `MAP0065`; gesperrte Start/Pause/Reset-Taster bleiben auch physisch dunkel.
+- Normale Zustands-LEDs leuchten nicht mehr dauerhaft weiter, wenn ihre zugehoerige MAP0065-Funktion gesperrt ist.
+- Die Tasterlampen werden bei jedem Runtime-Zyklus hart physisch synchronisiert, damit alte Ausgangslatches nicht weiterleuchten, wenn der logische LED-Plan bereits `aus` ist.
+
+## 2026-06-22 (Microtom Purge Scenario B)
+- `MAS0028=0` beendet den Purge-Prozess nur noch als Microtom/DIClient-origin Kommando.
+- `MAS0028=1` von Microtom/DIClient startet einen extern gefuehrten Purge-Prozess und wird nicht mehr als stale Safety-Latch automatisch auf `0` geloescht.
+- Bei Microtom `MAS0028=1` werden jetzt ebenfalls stale pending `MAS0028=<state>` Outbox-Callbacks geloescht, damit nach `ACK_MAS0028=1` kein alter `MAS0028=0` Callback mehr zugestellt werden kann.
+- ESP-/Device-origin `MAS0028=0` oder `MAS0028=1` wird als Echo des Raspi-authoritativen Zustands quittiert und darf den Purge-Latch nicht setzen oder loeschen.
+- Bei Microtom `MAS0028=0` werden weiterhin stale pending `MAS0028=<state>` Outbox-Callbacks geloescht, bevor `ACK_MAS0028=0` gesendet wird.
+- Machine-runtime unterdrueckt `MAS0028=0` als eigenen Callback; die Purge-Terminierung bleibt Microtom/DIClient-owned.
+- Der Raspi spiegelt den Clear an die ESP32-PLC, damit deren interner Prozess-Purge-Latch geloescht wird, ohne dass die ESP32-PLC selbst ein `MAS0028=0` Richtung Microtom erzeugt.
+
+## 2026-06-18 (Hardware-Reset ueber Raspi I0.7)
+- Der Hardware-Reset-/Start-Pause-Taster auf `raspi_plc21 I0.7` loest im Safety-/Purge-/Notstop-Kontext nun denselben Resetpfad aus wie der UI-Reset in `/ui/machine-setup/process`.
+- Die Raspberry-PLC-21-Tastereingänge `I0.7` bis `I0.12` werden nun als Analog-/Digital-Eingaenge per `analog_read` mit Schwellwert `raspi_analog_input_high_threshold` ausgewertet. Vorher wurde `I0.7` per `digital_read` gelesen und blieb dadurch softwareseitig `0`; der Resetpfad wurde nicht betreten und `ESP Q0.2` konnte nicht pulsen.
+- Die gemeinsame Reset-Sequenz fuer Webinterface und Hardware-Taster pulst `ESP Q0.2` jetzt mit `200 ms HIGH`, `1000 ms LOW`, `200 ms HIGH`, dann LOW.
+- Die MachineRuntime aktualisiert im Reset-Kontext den Raspi-PLC-IO-Stand unmittelbar vor der Buttonauswertung, damit ein echter Tasterdruck nicht auf den Hintergrundpoller warten muss.
+- Ein gehaltenes `I0.7` darf den Reset nach Cooldown erneut ausloesen, falls eine vorherige Flanke schon als alter Buttonzustand gespeichert war.
+- Der nachgelagerte ESP-Befehl `PROCESS RESET` wird bei einem transienten Socket-Timeout einmal wiederholt, damit ein einzelner Kommunikationshaenger den Reset nicht blockiert.
+- Der Produktions-Config-Patch setzt `raspi_io_simulation=false`, damit die Raspi-PLC-Eingaenge bei Re-Deploys live bleiben.
+
+## 2026-06-02 (ESP Safety Inputs HIGH=OK)
+- Raspi-Runtime interpretiert `ESP32-PLC58 I0.7` und `I0.8` jetzt als Safety-OK-Signale: `HIGH=OK`, `LOW=Fehler aktiv`.
+- `I0.7=0` latched `notaus`, `I0.8=0` latched `lichtgitter`; beide setzen weiterhin `MAS0001=21` und `MAS0028=1`.
+- Safety-Reset verifiziert nun `ESP I0.7=1` und `ESP I0.8=1`, bevor Prozess- und Motion-Recovery freigegeben werden.
+
+## 2026-06-01 (Absolute ID3-Messfahrt und HMI-Kalibrierung)
+- Die ESP-Setup-Messfahrt faehrt ID3 nun ueber absolute AZD-Ziele: `500 mm`, zurueck auf `0 mm`, dann `2500 mm` mit Label-/Schlupf-/Kontrollsensor-Teach und abschliessend absolut auf `erste Labelreferenz - 10 mm`. Am Ende werden ID3 und beide Encoder genullt; der Produktionsstart kennt den 10-mm-Handover.
+- Die Wickler-Durchmesserberechnung nutzt weiterhin die vom ESP aufsummierte absolute Wegstrecke `diameter_learn_travel_mm`; die neue absolute Vor-/Ruecksequenz kuerzt diese Basis nicht auf Netto-Endposition.
+- Die bisher automatische 2000-mm-ID3-Skalierfahrt wurde aus dem normalen Einrichten entfernt und als geschuetzte HMI-Funktion nach `/ui/machine-setup/calibration` verschoben. Dort koennen Prepare, 2000-mm-Fahrt, Ergebnisanzeige und Anwendung der gemessenen realen Strecke ausgefuehrt werden.
+- Neue feste Maschinenparameter: `MAP0077` = Einlaufencoder-Wirkdurchmesser in `1/1000 mm`, `MAP0078` = Auslauf-/ID3-Encoder-Wirkdurchmesser in `1/1000 mm`. Beide sind nicht formatrelevant; `MAP0076` bleibt die feste Label-Laengenkorrektur und steht nach dem aktuellen Maschinenabgleich auf `8` (`+0.8 mm`). Setup und Produktion loesen Label-Laengenfehler nur aus, wenn Rohwert und kompensierter Wert gemeinsam ausserhalb derselben Grenze liegen.
+- Produktion gibt bekannte Druckpositionsstopps jetzt als berechnete absolute ID3-Ziele an den AZD-CD aus, nicht mehr als relative Restweg-Positionierung.
+
+## 2026-06-01 (GitHub remotes fuer alle MAS-004-Unterprojekte)
+- Fehlende zentrale GitHub-Repos wurden unter `VTI-TSS-CH` angelegt und als `origin` gesetzt:
+  - `MAS-004_ESP32-PLC-Firmware`
+  - `MAS-004_SmartWickler`
+  - `MAS-004_ZBC-Library`
+- Der jeweils bereits committed lokale `main`-Stand wurde initial nach GitHub gepusht. Dirty Inbetriebnahme-Aenderungen bleiben lokal unveraendert und wurden nicht automatisch committed.
+- `scripts/mas004_multirepo_status.ps1` fuehrt nun auch `MAS-004_SmartWickler`.
+- `scripts/mas004_multirepo_sync.ps1` behandelt ESP-Firmware und ZBC-Library nicht mehr als Bundle-only-Repos, da nun zentrale Remotes existieren; SmartWickler ist ebenfalls in der Repo-Liste sichtbar.
+
+## 2026-05-29 (Produktionsfehler Erstkanten-Diagnose)
+- ESP-Events vom Typ `production_fault` werden nun in der zentralen Kommunikation als eigene Produktionswarnung protokolliert.
+- Bei `label_edge_timeout` zeigt der Log jetzt gefahrenen Suchweg, erlaubten Grenzwert, Timeout sowie Start- und Istpegel von `I0.5`. Damit ist ersichtlich, ob `MAE0027` wirklich Sensorprellen ist oder ob beim Produktionsstart keine neue LOW->HIGH-Labelkante rechtzeitig akzeptiert wurde.
+
+## 2026-05-29 (Einricht-Sensor-Teach vor Motorbewegung)
+- Der Raspi setzt den Teach-Eingang des Etikettenerfassungssensors auf Moxa #3 `DIO3` nun synchron fuer `3.5 s` high, setzt ihn danach low und startet erst dann `PROCESS SETUP_MEASURE START` auf der ESP32-PLC.
+- Der ESP-Startbefehl enthaelt nun die feste Teach-/Messfahrtsequenz: `TEACH_MS=3500`, `CONTROL_TEACH_MS=3500`, `INFEED_SETTLE_MS=5000`, `CONTROL_POST_TEACH_MS=5000` und `BACKOFF_MM=10.000`.
+- Die Encoder-Schlupfdiagnose der langen Teachfahrt nutzt nun mindestens `8.0 mm` Reserve. Das betrifft nur die Setup-Messfahrt; die Druckpositions-Nachkorrektur mit `+/-0.05 mm` bleibt unveraendert.
+- Das Wickler-Durchmesserlernen umfasst weiterhin die komplette ESP-Messfahrt. Der Raspi liest `diameter_learn_travel_mm` erst nach abgeschlossenem `PROCESS SETUP_MEASURE`, wendet die Durchmesser an und setzt danach wie bisher die Produktionsbasis inkl. ID3-Position auf `0`.
+
+## 2026-05-26 (Produktionsstart Wickler-Nachpruefung)
+- Nach `PROCESS PRODUCTION START` prueft die RPI-Runtime die beiden SmartWickler nach kurzer Anlaufzeit erneut auf `Bereit`/`Warnung`, `continuousModeReady`, `indexedModeEnabled=false`, kein externes Stop-Signal und Wippe im Bereich 8..92 %.
+- Wenn ein Wickler direkt nach Start oder waehrend aktivem Produktionslauf aus diesem Continuous-Ready-Fenster faellt, stoppt die Runtime Motor 3 und beide Wickler, setzt den Lauf auf Stoerung und setzt `MAS0028=1`.
+- Der Produktions-Master-Payload setzt keine `leaderSpeedMmS`-Vorgabe. Der aktive Produktionsmodus bleibt der lokale Wippen-Continuous-Regler, nicht Indexed; der Raspi gibt nur `indexedModeEnabled=0` und danach `ready&allowMotion=1`.
+- Wiederholte Stop-Logs bei dauerhaft gelatchtem `MAS0028` sind unterdrueckt: pro unveraenderter Fehler-Signatur wird der harte Stop nur einmal protokolliert und nicht alle zwei Sekunden erneut.
+
+## 2026-05-23 (Produktionsstart nutzt ESP-Produktionsrunner und Wickler-Continuous)
+- Der automatische Start von Motor 3 aus `Pause`/`MAS0002=1` ist wieder freigegeben, aber nicht mehr ueber den alten `PROCESS INDEXED START`-Takt. Der Raspi startet jetzt `PROCESS PRODUCTION START SPEED_MM_S=<MAP0014> RAMP_MM_S2=300`.
+- Beide SmartWickler werden vor dem Start in den kontinuierlichen Regler gebracht: `indexedModeEnabled=0`, danach `ready&allowMotion=1`, anschliessend Verifikation von `continuousModeReady`, `lastCommandOk`, alarmfreiem Drive und Wippe im Bereich 8..92 %.
+- Beim Stop/Pause/Fault sendet die Runtime jetzt zusaetzlich `PROCESS PRODUCTION STOP`; die Wickler bleiben in `Pause`/`Bereit` im Continuous-ready-Zustand und werden nur bei Stop/Fault in blau/Stop gesetzt.
+- Richtungsstandard dokumentiert: Motor 3, Infeed-Encoder und Drive-Encoder zaehlen in Vorzugsrichtung positiv, Rueckspulen ist negativ. Motor 3 behaelt dafuer die Maschinenmapping-Konfiguration `invert_direction=true`; die Encoder werden firmwareseitig an der PCNT/ISR-Eingangsgrenze normalisiert.
+- ID3 wird nicht als Positionsachse behandelt: der Motor-Setup-Master spielt fuer ID3 keinen `zero_offset_steps`-Restore mehr zurueck. Die logische ID3-Null wird beim Einrichten/Messfahrtstart und beim `PROCESS PRODUCTION_RESET` vor Pause/Start mit `MOTOR 3 SET_POSITION_MM=0.000` neu gesetzt.
+
+## 2026-05-22 (Produktionsstart startet ESP-Indexed-Takt, durch 2026-05-23 ersetzt)
+- Ursache fuer `MAS0001=5`, aber keine Bewegung: Der RPI-Zustandsautomat hat bisher nur den Maschinenzustand nach `Produktionsbetrieb` gesetzt; ein expliziter ESP-Bewegungsauftrag fuer Motor 3/Wickler wurde beim Start aus Pause nicht ausgelöst.
+- Historischer Zwischenstand: Beim akzeptierten Start aus `Pause` wurde ein `production_runtime.pending_start` gesetzt. Nach dem Uebergang `4 -> 5` synchronisierte der Raspi zuerst `MAS0001=5` zum ESP, liess dessen Zustandswechsel-Reset ablaufen, setzte die Produktionsparameter, bereitete beide Wickler fuer Indexed-Betrieb vor und startete danach `PROCESS INDEXED START`. Dieser Pfad wurde am 2026-05-23 durch `PROCESS PRODUCTION START` ersetzt.
+- Beim Verlassen von Produktion stoppt die Runtime `MOTOR 3`, `PROCESS INDEXED`, `PROCESS PROFILE`, `PROCESS WICKLER` und setzt die Wickler je nach Zielzustand in `Bereit`/Pause oder Stop.
+- `MachineRuntime` nutzt nun denselben Produktionslog-Pfad wie `LogStore`, damit Startsperre `MAS0030`/alte Produktionsdateien nicht gegen eine andere State-Datei laufen als die UI/Downloads.
+- Nicht-bewegende Maschinenzustaende wie `Pause`/`Produktions-Stop` werden einmalig zum ESP synchronisiert, auch wenn nach einem Service-Neustart kein RPI-Statewechsel stattgefunden hat.
+
+## 2026-05-22 (Positionsachsen: Hardware-MOVE/IN-POS Rueckmeldung)
+- ID1/2/4-9 bleiben fuer Zielpositionen und Softlimits protocol-first ueber ESP/AZD Direct-Data.
+- AZD `DOUT0 = 134 MOVE` wird als schnelle Hardware-Bewegungsrueckmeldung verwendet; die Runtime liest die verdrahteten ESP-Eingaenge waehrend der Zielpruefung mit.
+- AZD `DOUT1 = 138 IN-POS` bleibt fuer ID1/ID2 als hardwareseitiges Positioning-Complete-Signal dokumentiert und kann die Zielpruefung abschliessen, wenn vorher Hardware-MOVE gesehen wurde oder der frische Motorstatus das Zielkommando bestaetigt.
+- Fuer ID4-9 ist aktuell nur OUT0 verdrahtet; dort wird MOVE hardwareseitig genutzt, IN-POS bleibt bis zu einer zusaetzlichen OUT1-Verdrahtung protocol-basiert.
+- IO-Liste `master_data/SAR41-MAS-004_SPS_I-Os.xlsx` wurde entsprechend von Reserve-Bezeichnungen auf MOVE/IN-POS-Signale aktualisiert.
+
+## 2026-05-21 (Wickler-Sicherheitsabbruch bei Messfahrt geschaerft)
+- Der Einricht-Orchestrator bricht Motor-3-Messfahrten nun bereits ab, wenn eine Wicklerwippe in den Sicherheitsrandbereich laeuft (`<=8 %` oder `>=92 %`). Damit wird nicht erst auf roten Wicklerstatus/MAE-Latch gewartet.
+- Beim Abbruch wird weiterhin der zentrale Bewegungsstopp ausgefuehrt: ESP-Setup-Messfahrt Stop, Wickler-Cancel, Index/Profile Stop, Motor 3 auf 0 und beide Wickler in Stop.
+- Hintergrund zum Fehler `setup_measure_max_forward_exceeded`: Die Ursache liegt firmwareseitig in einer absoluten Max-Forward-Pruefung nach bereits gefundener Etikettenreferenz; der passende ESP-Fix ist im Firmware-Repo dokumentiert und muss mitgeflasht sein.
+
+## 2026-05-21 (Motor-Setup gegen Runtime-Ueberschreiben gehaertet)
+- Ursache fuer springende Istpositionen eingegrenzt: Vor manuellen Motorbewegungen wurde bisher der Motor-Setup-Master komplett zurueckgespielt. Dabei wurden auch `zero_offset_steps` bzw. `SET_POSITION_MM` erneut geschrieben, wodurch eine zuvor gesetzte Istposition bei der naechsten Bewegung wieder umdefiniert werden konnte.
+- Restore vor Bewegungen schreibt nun nur noch bewegungsrelevante Parameter/Limits, aber keine Positionsreferenz. Die aktuelle Achsposition bleibt damit im ESP/AZD erhalten; `SET_POSITION_MM` passiert nur noch bei ausdruecklicher Positionsuebernahme bzw. bewusstem Positionsrestore.
+- Die Motor-Setup-Seite setzt beim Oeffnen/Bedienen eine temporaere Motor-Setup-Sperre. Solange diese aktiv ist, darf die automatische Stop-Positionslogik ID5/6/7/8/9 nicht im Hintergrund auf Stop-Positionen verfahren. Ein echter Maschinenbefehl ueber virtuelle/physische Tasten oder Microtom hebt diese Sperre wieder auf.
+
+## 2026-05-21 (Motor-Setup-Master Positionsrestore)
+- Der Motor-Setup-Master schuetzt gespeicherte Achspositionen jetzt gegen falsche Live-Istwerte nach ESP/AZD-Neustart: reine Config-/Restore-Aktionen aktualisieren zwar Motorparameter, ueberschreiben aber nicht mehr den gespeicherten Positions-Snapshot.
+- Historischer Hinweis: Der zwischenzeitlich eingefuehrte automatische Positionszaehler-Restore fuer ID1/2/4-9 wurde am 2026-06-25 wieder entfernt und gesperrt. `SET_POSITION_MM`, `ZERO`, `SET_MIN`, `SET_MAX`, `zero_offset_steps`, `min_tenths_mm` und `max_tenths_mm` duerfen fuer Positionsachsen nur noch ueber `/ui/machine-setup/motors` geschrieben werden.
+- Motor ID3 bleibt davon ausgenommen, da die Transportachse ihre produktive Nullung im Einricht-/Messfahrprozess erhaelt.
+
+## 2026-06-25 (Positionsachsen gegen DB-/Runtime-Restore gesperrt)
+- Ursache fuer ID7-Anschlaglauf live bestaetigt: `motor_setup_position_restored` hatte nach einer Live-Position ausserhalb Min/Max den Positionszaehler aus einem alten `motor_setup_master` per `SET_POSITION_MM` gesetzt und gespeichert. Dadurch konnte die UI wieder plausible Werte anzeigen, obwohl die reale Mechanik nicht mehr dazu passte.
+- Runtime und Web-Status/Move-Guard schreiben keine Motor-Setup-Master-Daten mehr auf den ESP zurueck. `motor_setup_master` ist fuer Positionsachsen nur noch Spiegel/Archiv der Motor-Setup-Seite.
+- Der Raspi-ESP-Motorclient blockiert geschuetzte Setup-Schreibbefehle fuer ID1/2/4-9, ausser der Aufruf kommt explizit aus der Machine-Setup-Motorseite.
+- Wenn ein alter automatischer Positionsrestore neuer ist als die letzte Machine-Setup-Speicherung, blockiert die Runtime automatische Positionsfahrten der betroffenen Achse bis zur erneuten bewussten Kalibrierung/Speicherung in `/ui/machine-setup/motors`.
+
+## 2026-05-21 (Moxa E1211 -> 3x E1213 Source-Ausgaenge)
+- Die Feld-IO-Topologie wurde von `2x Moxa ioLogik E1211` auf `3x Moxa ioLogik E1213` umgestellt, damit Source-Ausgaenge verwendet werden koennen.
+- Neue ETH1-Adressen: Moxa #1 `192.168.2.102`, Moxa #2 `192.168.2.103`, Moxa #3 `192.168.2.104`, jeweils Modbus/TCP Port `502`.
+- IO-Remap in `master_data/SAR41-MAS-004_SPS_I-Os.xlsx`: Moxa #1 fuehrt die frueheren alten Modul-1-Ausgaenge `DO8..DO15`, Moxa #2 die frueheren alten Modul-1-Ausgaenge `DO0..DO7`, Moxa #3 die frueheren alten Modul-2-Ausgaenge `DO0..DO7`.
+- E1213-Kanaele werden als `DO0..DO3` plus `DIO0..DIO3` importiert; die DIO-Kanaele werden softwareseitig als Ausgaenge behandelt.
+- Statusleuchte liegt neu auf Moxa #3 `DIO0..DIO2`; Teach Etikettenerfassung liegt neu auf Moxa #3 `DIO3`.
+
+## 2026-05-20 (Wickler-Fault stoppt Motor 3 hart)
+- Der Einricht-Orchestrator ueberwacht waehrend der sensorreferenzierten Messfahrt beide Smart-Wickler aktiv. Ein roter Wicklerstatus, AZD-Alarm, MAE-Tänzerfehler oder eine Wippe nahe Anschlag (`<=3 %` / `>=97 %`) bricht die Messfahrt sofort ab.
+- Beim Abbruch werden `PROCESS SETUP_MEASURE STOP`, `PROCESS WICKLER CANCEL`, `PROCESS INDEXED STOP`, `PROCESS PROFILE STOP`, `MOTOR 3 MOVE_VEL_MM_S=0`, Diameter-Learning-Cancel und `mode=stop` fuer beide Wickler gesendet; `MAS0028` wird gelatcht.
+- Die Maschinenruntime sendet dieselbe Bewegungs-Notbremse auch bei sonstigen kritischen roten Fehlern/Purge-Zustaenden, damit Motor 3 und beide Wickler nicht gegeneinander weiterlaufen.
+
+## 2026-05-20 (Setup-Baseline loescht stale Label-Laengenfehler)
+- Der Einrichtabschluss loescht nach `PROCESS PRODUCTION_RESET` nun auch Raspi-lokal `MAE0024`, `MAE0025`, `MAE0026`, `MAE0027` und `MAS0028`.
+- Damit bleiben Setup-/Messfahrt-Latches wie `Label zu kurz` oder `Label zu lang` nicht mehr als Pause-Blocker stehen, wenn die ESP-Prozessbasis fuer den Produktionsstart bereits zurueckgesetzt wurde.
+- Ein akzeptiertes `MAS0002=1` wird nach der Uebernahme konsumiert (`MAS0002=0`), damit derselbe Startbefehl im Uebergangszustand `4` nicht nochmals als unzulaessiger neuer Start geloggt wird.
+
+## 2026-05-20 (Raspi-State gegen stale ESP-Echos gehaertet)
+- `MAS0001`, `MAS0002`, `MAS0028` und `MAS0030` sind konsequent Raspi-autoritative Maschinenwerte. ESP-/Wickler-Echos dieser Werte werden quittiert, duerfen den Raspi-Zustand aber nicht mehr ueberschreiben.
+- Damit kann ein alter ESP-Mirror von `MAS0028=1` oder `MAS0001=21` den Einrichtprozess nicht mehr nachtraeglich als `Purge active during setup` abbrechen.
+- State-Change-Events enthalten jetzt zusaetzlich `purge_active`, `MAS0028`, `critical_reasons` und den aktuellen Safety-Status, damit kuenftige Wechsel auf `21` eindeutig diagnostizierbar sind.
+- Die lange Einricht-/Teachfahrt nutzt fuer den kumulativen Encodervergleich nun mindestens `3.0 mm` Schlupfreserve. Die harte Druck-Stop-Nachpositionierung von `+/-0.05 mm` bleibt davon unberuehrt.
+
+## 2026-05-20 (Bahnriss nicht mehr im Einrichten als Purge)
+- Bahnriss-/Entnahmesensorik (`ESP I0.4`/`I0.11`, `MAE0008`/`MAE0009`) wird im Einricht-Uebergang und im Einrichtbetrieb (`MAS0001=2/3`) nicht mehr als kritischer Purge-Grund bewertet.
+- Hintergrund: Beim Einrichten werden Sensorachsen positioniert und Sensoren geteacht; die Signale duerfen den Wickler-Einrichtworkflow deshalb nicht vorzeitig mit `Purge active during setup` abbrechen.
+- Die Ueberwachung bleibt nach abgeschlossenem Einrichten in den produktionsnahen Betriebsarten aktiv.
+
+## 2026-05-20 (Produktions-Bypass und Einrichtabschluss-Baseline)
+- Machine Control / Prozesssicht enthaelt jetzt eine Bypass-/Simulation-Karte fuer `MAP0035` bis `MAP0038` inklusive Simulationsparameter `MAP0067` bis `MAP0070`.
+- Bypass-Werte werden ueber denselben Routerpfad wie Microtom geschrieben, damit Parameter-DB, Outbox/Audit und ESP32-PLC-Spiegelung konsistent bleiben.
+- Neue Parameter: `MAP0067` Materialkamera-Simulation, `MAP0068` Verifikationskamera-Simulation, `MAP0069` Laser-Bypass-Druckdauer und `MAP0070` TTO-Bypass-Druckdauer.
+- Der Einrichtworkflow setzt vor dem internen Wechsel nach `Pause` die produktive Prozessbasis zurueck: Label-Schieberegister leer, Prozesslatches zurueckgesetzt und Motor 3 als neuer `0.000 mm` Bezugspunkt uebernommen.
+
+## 2026-05-20 (Maschinenstatus Pause / Einrichten-Gating)
+- `Pause` (`MAS0001=7`) erlaubt auf der UI, den physischen Tasten und dem Microtom-Kommandopfad nur noch `Start` und `Stop`.
+- `Einrichten` (`MAS0002=3`) ist nur noch aus `Produktions-Stop` (`MAS0001=9`) erlaubt; ein erneutes Einrichten aus `Pause` wird bewusst blockiert.
+- Der erfolgreiche Einrichtabschluss schaltet intern auf Zielzustand `Pause`, setzt `MAS0002` aber wieder auf `0`, damit kein stale `MAS0002=7` im Uebergangszustand `2` als unzulaessiges externes Pause-Kommando geloggt wird.
+- Laufende Uebergangszustaende behalten ihr internes Ziel bei, auch wenn `MAS0002` nach dem Trigger wieder auf `0` steht.
+
+## 2026-05-20 (Audit-Anzeige lokal leeren)
+- Machine Control / zentrale Kommunikationssicht hat nun einen Button `Anzeige leeren`.
+- Der Button setzt nur im Browser eine lokale Anzeigegrenze; die Audit-Eintraege bleiben serverseitig gemaess Retention gespeichert und koennen mit `Verlauf wieder anzeigen` wieder in die Ansicht geholt werden.
+- Die gespeicherten Audit-UI-Praeferenzen behalten Retention, Fenster und Limit und ueberschreiben die lokale Anzeigegrenze nicht mehr versehentlich beim automatischen Refresh.
+
+## 2026-05-20 (Machine-Control Auditfilter)
+- Die zentrale Kommunikationssicht in Machine Control hat nun Filter fuer Richtung (`IN`/`OUT`), Level (`Error`/`Warning`/`Info`), Kategorie (`Kommunikation`/`Maschine`/`Label`) und Freitextsuche.
+- Fehler werden hellrot und Warnungen hellgelb hinterlegt. Neben echten `ERR`/`WARNING`-Levels werden auch typische Kommunikationsfehler wie `NAK`, `timeout`, `failed` und `Fehler` lesbar markiert.
+
+## 2026-05-19 (Wickler-Messfahrt erst nach echter Motion-Freigabe)
+- Nach dem Wickler-Einmessen reicht `Bereit/Warnung` als Textstatus nicht mehr aus, um Motor 3 fuer die Messfahrt zu starten. Der Raspi prueft jetzt zusaetzlich, dass `externalStopActive=false`, der AZD-Continuous-Speed-Pfad bereit ist und der letzte Wicklerbefehl OK war.
+- Vor der sensorreferenzierten Messfahrt sendet der Raspi an beide Wickler explizit `/api/mode mode=ready&allowMotion=1`. Das loest den internen AZD-STOP-Hold fuer den kontinuierlichen lokalen Wippenregler, ohne den normalen Stop-Modus aufzuweichen.
+- `start_diameter_learning` wird erst nach dieser Motion-Ready-Pruefung ausgefuehrt. Dadurch kann Motor 3 nicht mehr losziehen, waehrend ein Wickler formal gruen wirkt, aber wegen aktivem STOP nicht nachregelt.
+
 ## 2026-05-19 (Einrichten: Formatachsen vor Wickler-Messfahrt)
-- Der Einrichtworkflow positioniert vor der Wickler-Messfahrt immer zuerst die formatrelevanten Anschlagachsen ID9/ID8 und danach die Sensor-/Kameraachsen ID6/ID7/ID5.
+- Der Einrichtworkflow positioniert vor der Wickler-Messfahrt alle formatrelevanten Achsen ID5/6/7/8/9 als gemeinsamen ESP-Positionssatz. Der ESP laedt die AZD-Direktdaten zuerst in alle Achsen und triggert danach die Bewegungen; es wird nicht mehr achsweise auf Zielerreichung gewartet.
 - Die Zielwerte stammen aus dem aktuellen Raspi-Formatplan (`MAP0001`, `MAP0008`, `MAP0009`, `MAP0010` plus Korrekturen `MAP0029` bis `MAP0033`). Vor jeder Bewegung wird gegen die aktiven ESP-Motor-Min/Max-Grenzen geprueft.
+- Die lange Einricht-Messfahrt nutzt fuer den Vergleich Einlaufencoder zu Antriebsencoder eine eigene robuste Mindest-Schlupfgrenze von `2.0 mm`. `MAP0040` bleibt die Etikettenlaengen-Toleranz; die harte Druck-Stop-Nachpositionierung bleibt separat bei `+/-0.05 mm`.
+- Der exakte `PROCESS SETUP_MEASURE START ...` Befehl wird im Audit-Log protokolliert, damit Einrichtabbrueche wie Slip-/Teach-Fehler direkt mit den gesendeten Toleranzen und Fahrparametern nachvollziehbar sind.
+- Bei jedem Einrichtabbruch prueft der Wickler-Orchestrator laufend `MAS0001`/`MAS0002`/`MAS0028`. Sobald der Einrichtzustand verlassen wird, werden `PROCESS SETUP_MEASURE STOP`, `PROCESS WICKLER CANCEL`, `PROCESS INDEXED STOP`, `PROCESS PROFILE STOP`, Diameter-Learning-Cancel und `mode=stop` fuer beide Wickler erzwungen. Dadurch koennen keine vorbereiteten Takt-/Messfahrkommandos nach einem Abbruch weiterlaufen.
 - Wickler-Einmessen und die 1000-mm-Vor-/Rueck-Messfahrt bleiben fester Bestandteil jedes `Einrichten`-Aufrufs; gespeicherte Durchmesser oder alte Messergebnisse kuerzen den Ablauf nicht ab.
 - Wenn Motor 3 den Operation-Data-Messfahrbefehl akzeptiert, aber keine Bewegung startet, fuehrt der Raspi genau einen kontrollierten Retry mit vorherigem `RESET_ALARM`/`RECOVER_ETO` aus. Teilfahrten werden weiterhin nicht blind wiederholt.
+- Motor-Setup ist fuer ID1/2/4-9 die Masterquelle: `Parameter speichern`, `Min setzen`, `Max setzen`, `Nullpunkt setzen` und `Istposition uebernehmen` fuehren jetzt immer ESP-`SAVE`, frischen Refresh, Verifikation und Sync in Parameter-DB plus Master-Excel aus. Reine Parameter-/Limit-Speicherungen ueberschreiben keine Positionsdefaults mehr; Positionen werden nur noch bei explizitem `Istposition uebernehmen` oder `Nullpunkt setzen` als Default fortgeschrieben.
+- Produktionsstand nachgezogen: ID7 steht wieder bei `-20.0 mm`, ID8/ID9 stehen bei `100.0 mm`; die Max-Grenzen von ID8/ID9 sind dauerhaft `1000` 1/10 mm und in ESP, DB, Produktions-Excel sowie Repo-Excel synchronisiert.
 
 ## 2026-05-18 (Bahnriss nur im Prozessfenster)
 - Bahnriss Einlauf/Auslauf (`ESP I0.4`/`I0.11`, `MAE0008`/`MAE0009`) blockieren Reset, Not-Stop und Produktions-Stop nicht mehr.
@@ -14,13 +183,14 @@
 
 ## 2026-05-18 (Stop-Modus Achs-Positionssatz)
 - Beim Eintritt in `MAS0001=9` / Produktions-Stop sendet die Runtime jetzt einen definierten Positionssatz an die ESP-Motorsteuerung: ID5 Materialkamera auf `0 mm`, ID6/ID7 Sensorachsen auf `-20 mm`, ID8/ID9 Etikettenanschlaege auf `100 mm`.
+- Auch der Stop-/Reset-Positionssatz nutzt jetzt den ESP-Satzbefehl `MOTOR MOVE_ABS_SET ...`, damit Anschlaege, Sensorachsen und Kamera nicht mehr sichtbar nacheinander losfahren.
 - Die Motor-Setup-Seite ist fuer ID1-9 die Masterquelle der Inbetriebnahmeparameter. Ein `Parameter speichern` schreibt die ESP-Konfiguration nun auch in Parameter-DB und maschinenlokale Master-Excel, damit alte Importwerte keine Softlimits oder Defaults zuruecksetzen. Die Git-Repo-Excel bleibt ueber Release-Commits versioniert.
 - Der Positionssatz wird pro Stop-Eintritt idempotent gesendet und bei Fehlern nur noch maximal dreimal mit 60 Sekunden Abstand erneut versucht; er wird nicht bei jedem UI-/Status-Refresh dauerhaft wiederholt, damit der Motorbus nicht unnoetig belastet wird.
 - `ACK_MOVE_ABS_MM` allein gilt nicht mehr als erledigt: Die Runtime refreshed die betroffenen Achsen nach dem Befehl und markiert den Stop-Positionssatz nur als `ok`, wenn die Achse am Ziel ist oder eine echte Bewegung meldet. Vor jedem Stop-Positionsbefehl werden `RESET_ALARM` und `RECOVER_ETO` fuer die jeweilige Achse ausgefuehrt.
 - Die Stop-Positions-Logikversion wurde angehoben, damit Produktions-Raspis alte fehlgeschlagene Versuche nach dem ESP-Direct-Data-Fix sofort neu bewerten und nicht auf die alte Retry-Sperre warten.
 - Safety-/Purge-Reset nutzt fuer Motor 3 jetzt dieselbe Operable-Semantik wie die Wickler-Messfahrt: Link OK, kein Alarm und kein HWTO reichen fuer die Reset-Verifikation, weil der Etikettenantrieb ueber den Hardware-START/STOP-Pfad laeuft und das AZD-READY-Bit dort nicht stabil als Reset-Kriterium taugt. Fuer ID1/2/4-9 bleibt `ready=true` weiterhin Pflicht.
 - Die Wickler-Reset-Verifikation bewertet jetzt den geforderten sicheren Stop-Zustand: `online`, kein Alarm, keine Bewegung, `modeLabel=Stop` und ein unkritischer Fault-Text reichen auch dann, wenn das AZD-READY-Diagnosebit im Stop-Modus `false` meldet. Der Reset startet weiterhin keine Wickler-Regelung.
-- Die Stop-Positions-Logikversion wurde auf `6` erhoeht. Die Verifikation zaehlt `moving=true` nicht mehr sofort als Erfolg, sondern pollt bis Ziel erreicht, Stillstand ausserhalb Ziel, Alarm oder Timeout. Damit werden Achsalarme wie bei ID7 nicht mehr durch einen zu fruehen Erfolg verdeckt.
+- Die Stop-Positions-Logikversion wurde auf `7` erhoeht. Die Verifikation zaehlt `moving=true` nicht mehr sofort als Erfolg, sondern pollt bis Ziel erreicht, Stillstand ausserhalb Ziel, Alarm oder Timeout. Damit werden Achsalarme wie bei ID7 nicht mehr durch einen zu fruehen Erfolg verdeckt.
 
 ## 2026-05-18 (Wickler-Messfahrt: Motor-3-Referenz und AZD-Operable-Gate)
 - Der interne Setup-Wicklerworkflow setzt Motor 3 nach erfolgreichem Wickler-Einmessen explizit mit `RESET_ALARM`/`RECOVER_ETO` in einen fahrbaren Zustand. Das AZD-`ready`-Bit wird nur noch diagnostisch verwendet, weil es am Produktionsstand nicht bei allen AZD-Konfigurationen stabil gemappt ist; harte Sperren bleiben Linkfehler, Alarm und HWTO.
@@ -922,7 +1092,7 @@
   - `Release` clears the override and is highlighted light yellow whenever either High or Low is active.
 - Normal machine/runtime writers now respect active IO overrides and do not overwrite the physical output until the override is released.
 - IO refresh keeps overridden values visible with quality `override` instead of replacing them with live/simulation snapshots.
-- `GPIO0` is treated as pulse-only for the LED stripe and cannot be manually overridden from this page.
+- LED commissioning update: the WS2812/FastLED timing is moved to an external ESP32 LED controller. The ESP32-PLC publishes `MAS004-LED-UDP/v1` frames for the shortened `520 mm` / `75` LED strip; TX1/GPIO17 and PLC GPIO0 are not used as LED data terminals.
 - Internal navigation away from the IO page asks whether active overrides should be released or intentionally kept active.
 
 ## 2026-05-01 (Machine-Setup IO Motorpolling Switch)
@@ -934,14 +1104,15 @@
 
 ## 2026-05-01 (Safety Stop + Reset Contract)
 - Updated the machine runtime safety semantics:
-  - ESP `I0.7` is now interpreted active-high as hard Notaus.
-  - ESP `I0.8` is now interpreted active-high as Lichtgitter and currently follows the same machine-state/reset behavior as Notaus.
+  - Original commissioning polarity was active-high fault; superseded on 2026-06-02 by `HIGH=OK` / `LOW=fault`.
+  - ESP `I0.7` handles hard Notaus.
+  - ESP `I0.8` handles Lichtgitter and currently follows the same machine-state/reset behavior as Notaus.
 - Safety activation latches `MAS0001=21` / `MAS0028=1`, blocks normal button transitions, sets the status lamp red and overrides Raspi button LEDs:
   - `Q0.0` and `Q0.2` alternate every second while latched/failed.
 - Added the reset flow requested for commissioning:
   - trigger by `MAS0002=2` or Raspi `I0.7`
-  - pulse ESP `Q0.2` as `200 ms HIGH / 100 ms LOW / 200 ms HIGH / LOW`
-  - verify ESP safety inputs are LOW
+  - pulse ESP `Q0.2` as `200 ms HIGH / 1000 ms LOW / 200 ms HIGH / LOW`
+  - verify ESP safety inputs are in their OK state
   - run ESP motor ETO recovery and alarm reset for motors `1..9`
   - run Smart-Wickler `stop`, `resetAlarm`, `etoRecovery`, `ready`
   - set `MAS0001=8` during reset and `MAS0001=9` when ready
@@ -1004,6 +1175,25 @@
 - Cloned the current production SD boot/root filesystems to the USB/NVMe target and verified the Databridge service after reboot.
 - Updated the Pi 4 EEPROM tooling and configured `BOOT_ORDER=0xf14`, so USB/NVMe is tried before SD while SD remains fallback.
 - Verified production runtime after reboot: `/` from `55740328-02`, `/boot` from `/dev/sda1`, `mas004-rpi-databridge.service` active, UI health OK.
+
+## 2026-05-19 (Sensorbasierte Messfahrt mit Wickler-Durchmesseruebernahme)
+- Der Einrichtablauf verwendet weiterhin die neue ESP-geführte, sensorreferenzierte Messfahrt statt eines starren 1000-mm-Relativkommandos.
+- Der Raspi öffnet dabei wieder explizite `/api/diameter/learn`-Fenster auf beiden Wicklern.
+- Die Durchmesserberechnung nutzt die vom ESP gemeldete absolut aufsummierte Einlauf-Encoderstrecke (`diameter_learn_travel_mm`) und den Wickler-Motorpuls-Akkumulator (`method=motor-accum`), nicht die Netto-Endposition der Hin-und-zurück-Fahrt.
+- Nach erfolgreichem Lernen werden die Kandidaten direkt per `/api/diameter` persistent in beide Wickler geschrieben; ein fehlender absoluter Fahrweg bricht den Einrichtablauf bewusst ab, damit keine still falschen Rollendurchmesser übernommen werden.
+
+## 2026-05-19 (Motor-Setup als Master)
+- `/ui/machine-setup/motors` ist fuer Oriental-Motoren `1..9` die Master-Parametrierung, mit Motor `3` als Transportachsen-Sonderfall.
+- `Parameter speichern` schreibt Konfiguration, Fahrstrom, Haltestrom, Min/Max und bei geaenderter Istposition auch den Positionsnullbezug auf den ESP und fuehrt danach `MOTOR <id> SAVE` aus.
+- Erfolgreich gespeicherte Motorwerte werden in `motor_setup_master`, ParamStore und allen bekannten Master-Parameterlisten gespiegelt.
+- Parameterlisten-Importe wenden anschliessend automatisch wieder den gespeicherten Motor-Setup-Master an, damit alte Excel-Werte keine Motorgrenzen oder Motorpositionen zurueckrollen.
+- Automatische Stop-Positionsfahrten spielen vor der Bewegung die gespeicherten Motor-Setup-Grenzen und Stromwerte wieder auf den ESP, damit ein ESP-Neustart/Flash nicht mit alten Softlimits losfaehrt.
+
+## 2026-05-19 (Einrichten Formatachsen als Positionssatz)
+- Die Einricht-Formatachsen `ID5`, `ID6`, `ID7`, `ID8` und `ID9` werden nicht mehr in zwei wartenden Phasen positioniert.
+- Der Raspi sendet alle Absolutziele als einen Positionssatz direkt nacheinander auf den ESP/Modbus-Pfad; erst danach wird gemeinsam verifiziert, ob alle Achsen ihre Zielposition erreicht haben.
+- Die Sicherheitslogik bleibt erhalten: vor dem Senden werden Motor-Setup-Masterwerte angewendet und Min/Max, Alarm und HWTO je Achse geprueft.
+- Die gemeinsame Positionspruefung pollt alle offenen Achsen im Round-Robin statt pro Achse blockierend bis Ziel.
 
 ## Maintenance Rule
 - Add one entry for every change that affects:

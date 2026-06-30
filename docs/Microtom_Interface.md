@@ -108,6 +108,10 @@ Prefix-basiert:
 1. `X-Idempotency-Key` für robuste Retry-Strategie.
 2. Inbox dedupliziert über UNIQUE-Key.
 3. Callback-Korrelation über `X-Correlation-Id`.
+### 5.5 DIClient Adapter Key
+1. Raspi -> Microtom Callbacks enthalten fuer alle konfigurierten Microtom-Peers den Header `X-DIClient-Adapter-Key`.
+2. Der Wert wird lokal in `diclient_adapter_key` der Raspi-Konfiguration gespeichert und erst unmittelbar beim HTTP-Senden ergaenzt.
+3. Queue-Eintraege speichern den Schluessel nicht selbst; auch bereits wartende Outbox-Jobs werden beim Senden mit dem aktuellen Header versehen.
 
 <div class="page-break"></div>
 
@@ -460,7 +464,7 @@ curl -k -X POST "https://192.168.210.20:8080/api/inbox" \
 Raspi sendet an `peer_base_url + /api/inbox`, z. B.:
 1. URL: `https://192.168.210.10:9090/api/inbox`
 2. Body: `{"msg":"TTP00002=55","source":"raspi"}`
-3. Header: `X-Idempotency-Key`, `X-Correlation-Id`
+3. Header: `X-Idempotency-Key`, `X-Correlation-Id`, `X-DIClient-Adapter-Key`
 
 Microtom muss auf 2xx antworten, sonst bleibt Nachricht in Outbox und wird erneut versucht.
 
@@ -583,11 +587,13 @@ Positive Rueckmeldung:
 ACK_MAS0028=0
 ```
 
-Konsistenzregel ab 2026-05-08:
-1. Ein erfolgreiches `MAS0028=0` entfernt alte noch nicht zugestellte `MAS0028=<state>` Status-Callbacks aus der Raspi-Outbox.
-2. Ein unmittelbares altes ESP-/Device-Echo `MAS0028=1` wird fuer ein kurzes Zeitfenster unterdrueckt.
-3. Diese Unterdrueckung gilt nur fuer stale Echo-/Retry-Faelle.
-4. Wenn die Maschine weiterhin einen echten kritischen Grund erkennt, darf und muss der Raspi wieder `MAS0028=1` senden.
+Konsistenzregel ab 2026-06-22 / Szenario B:
+1. Ein erfolgreiches Microtom/DIClient-Write auf `MAS0028=1` oder `MAS0028=0` entfernt alte noch nicht zugestellte `MAS0028=<state>` Status-Callbacks aus der Raspi-Outbox.
+2. `MAS0028=1` von Microtom/DIClient startet einen extern gefuehrten Purge-Prozess und bleibt aktiv, bis Microtom/DIClient selbst `MAS0028=0` sendet.
+3. `MAS0028=0` beendet den Purge-Prozess ausschliesslich, wenn es von Microtom/DIClient kommt.
+4. ESP-/Device-origin `MAS0028=0` oder `MAS0028=1` wird als Echo quittiert und darf den Raspi-Purge-Zustand nicht setzen oder loeschen.
+5. Der Raspi spiegelt `MAS0028=0` an die ESP32-PLC, damit deren interner Prozess-Purge-Latch geloescht wird; die ESP32-PLC sendet daraus kein eigenes `MAS0028=0` zurueck.
+6. Machine-runtime darf `MAS0028=1` bei echten kritischen Gruenden setzen, sendet aber kein `MAS0028=0` als Purge-Terminierung an Microtom.
 
 Beispiele fuer echte Reassertion:
 1. Notaus oder Lichtgitter ist am ESP noch aktiv.

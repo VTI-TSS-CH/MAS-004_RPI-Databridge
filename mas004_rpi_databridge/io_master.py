@@ -16,7 +16,12 @@ _DEVICE_SHEETS = {
     "esp32 plc 58 pinout": ("esp32_plc58", "ESP32 PLC 58"),
     "iologik e1211 pinout modul 1": ("moxa_e1211_1", "Moxa ioLogik E1211 #1"),
     "iologik e1211 pinout modul 2": ("moxa_e1211_2", "Moxa ioLogik E1211 #2"),
+    "iologik e1213 pinout modul 1": ("moxa_e1213_1", "Moxa ioLogik E1213 #1"),
+    "iologik e1213 pinout modul 2": ("moxa_e1213_2", "Moxa ioLogik E1213 #2"),
+    "iologik e1213 pinout modul 3": ("moxa_e1213_3", "Moxa ioLogik E1213 #3"),
 }
+
+UNCHANGED_IO_VALUE_REFRESH_WRITE_INTERVAL_S = 10.0
 
 
 def _to_clean_str(value: Any) -> str:
@@ -55,11 +60,13 @@ def _normalize_pin_label(pin_label: str) -> str:
 
 def _is_valid_pin_label(pin_label: str) -> bool:
     pin = _normalize_pin_label(pin_label)
-    return bool(re.fullmatch(r"(?:I|Q|A|R)\d+\.\d+|(?:DI|DO|AI|AO|GPIO)\d+", pin))
+    return bool(re.fullmatch(r"(?:I|Q|A|R)\d+\.\d+|(?:DIO|DI|DO|AI|AO|GPIO)\d+", pin))
 
 
 def _detect_io_dir(pin_label: str) -> str:
     pin = _normalize_pin_label(pin_label)
+    if pin.startswith("DIO"):
+        return "output"
     if pin.startswith(("I", "DI")):
         return "input"
     if pin.startswith(("Q", "DO", "R")):
@@ -333,28 +340,57 @@ class IoStore:
         ]
 
     def upsert_value(self, io_key: str, value: Any, quality: str, source: str) -> bool:
-        text_value = str(int(value)) if isinstance(value, bool) else str(value)
-        quality_txt = _to_clean_str(quality) or "unknown"
-        source_txt = _to_clean_str(source)
+        return bool(self.upsert_values([(io_key, value, quality, source)]))
+
+    def upsert_values(self, items: list[tuple[str, Any, str, str]]) -> int:
+        normalized: list[tuple[str, str, str, str]] = []
+        for io_key, value, quality, source in items:
+            key = _to_clean_str(io_key)
+            if not key:
+                continue
+            text_value = str(int(value)) if isinstance(value, bool) else str(value)
+            normalized.append((key, text_value, _to_clean_str(quality) or "unknown", _to_clean_str(source)))
+        if not normalized:
+            return 0
+
         ts = now_ts()
+        changed_count = 0
         with self.db._conn() as conn:
-            current = conn.execute(
-                "SELECT value, quality, source FROM io_values WHERE io_key=?",
-                (io_key,),
-            ).fetchone()
-            if current and current[0] == text_value and current[1] == quality_txt and (current[2] or "") == source_txt:
-                return False
-            conn.execute(
-                """INSERT INTO io_values(io_key, value, quality, source, updated_ts)
-                   VALUES(?,?,?,?,?)
-                   ON CONFLICT(io_key) DO UPDATE SET
-                     value=excluded.value,
-                     quality=excluded.quality,
-                     source=excluded.source,
-                     updated_ts=excluded.updated_ts""",
-                (io_key, text_value, quality_txt, source_txt, ts),
-            )
-        return True
+            keys = [item[0] for item in normalized]
+            placeholders = ",".join("?" for _key in keys)
+            rows = conn.execute(
+                f"SELECT io_key, value, quality, source, updated_ts FROM io_values WHERE io_key IN ({placeholders})",
+                keys,
+            ).fetchall()
+            current_by_key = {str(row[0]): row for row in rows}
+            for io_key, text_value, quality_txt, source_txt in normalized:
+                current = current_by_key.get(io_key)
+                changed = not (
+                    current
+                    and current[1] == text_value
+                    and current[2] == quality_txt
+                    and (current[3] or "") == source_txt
+                )
+                if not changed:
+                    try:
+                        current_age_s = ts - float(current[4] or 0.0)
+                    except Exception:
+                        current_age_s = 999.0
+                    if current_age_s < UNCHANGED_IO_VALUE_REFRESH_WRITE_INTERVAL_S:
+                        continue
+                conn.execute(
+                    """INSERT INTO io_values(io_key, value, quality, source, updated_ts)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(io_key) DO UPDATE SET
+                         value=excluded.value,
+                         quality=excluded.quality,
+                         source=excluded.source,
+                         updated_ts=excluded.updated_ts""",
+                    (io_key, text_value, quality_txt, source_txt, ts),
+                )
+                if changed:
+                    changed_count += 1
+        return changed_count
 
     def set_override(self, io_key: str, value: Any, source: str = "manual-ui") -> Dict[str, Any]:
         text_value = str(_to_int01(value))

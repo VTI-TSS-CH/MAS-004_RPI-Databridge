@@ -2,7 +2,11 @@ import time
 import threading
 import json
 import os
+import queue
 import shutil
+import signal
+import sys
+import traceback
 import uuid
 from typing import Optional
 
@@ -18,10 +22,12 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.http_client import HttpClient
 from mas004_rpi_databridge.io_master import IoStore
-from mas004_rpi_databridge.io_runtime import IoRuntime
+from mas004_rpi_databridge.io_runtime import IoRuntime, _ensure_rpiplc, _read_raspi_input
 from mas004_rpi_databridge.machine_runtime import MachineRuntime
+from mas004_rpi_databridge.machine_semantics import BUTTON_INPUTS
 from mas004_rpi_databridge.peers import (
     SenderLane,
+    peer_request_headers,
     primary_peer_base_url,
     secondary_peer_base_url,
     sender_lanes,
@@ -53,6 +59,11 @@ FALLBACK_REPO_MASTER_IOS_XLSX = os.path.join(
     "master_data",
     "SAR41-MAS-004_SPS_I-Os.xlsx",
 )
+PANEL_BUTTON_SAMPLE_INTERVAL_S = 0.05
+PANEL_BUTTON_QUEUE_MAX = 100
+PANEL_BUTTON_EVENT_QUEUE: queue.Queue[dict[str, object]] = queue.Queue(maxsize=PANEL_BUTTON_QUEUE_MAX)
+SECONDARY_PEER_FAILURE_COOLDOWN_S = 15.0
+SECONDARY_PEER_COOLDOWN_LOG_S = 30.0
 
 
 def resolve_repo_master_ios_xlsx() -> str:
@@ -75,6 +86,30 @@ def disable_global_esp_motor_polling(cfg: Settings) -> None:
             print(f"[MOTORS] global ESP motor auto-poll disabled: {result.get('reply')}", flush=True)
     except Exception as exc:
         print(f"[MOTORS] global ESP motor auto-poll disable skipped: {exc!r}", flush=True)
+
+
+def install_thread_dump_signal() -> None:
+    def _dump(_signum, _frame):
+        try:
+            frames = sys._current_frames()
+            threads = {t.ident: t for t in threading.enumerate()}
+            print("[THREAD-DUMP] begin", flush=True)
+            for ident, frame in frames.items():
+                thread = threads.get(ident)
+                name = thread.name if thread is not None else "unknown"
+                native_id = getattr(thread, "native_id", None) if thread is not None else None
+                print(f"[THREAD-DUMP] thread name={name} ident={ident} native_id={native_id}", flush=True)
+                for line in traceback.format_stack(frame):
+                    for part in line.rstrip().splitlines():
+                        print(f"[THREAD-DUMP]   {part}", flush=True)
+            print("[THREAD-DUMP] end", flush=True)
+        except Exception as exc:
+            print(f"[THREAD-DUMP] failed: {exc!r}", flush=True)
+
+    try:
+        signal.signal(signal.SIGUSR1, _dump)
+    except Exception as exc:
+        print(f"[THREAD-DUMP] signal install skipped: {exc!r}", flush=True)
 
 
 def build_device_inbox_app(cfg_path: str) -> FastAPI:
@@ -154,6 +189,8 @@ def sender_loop(cfg_path: str, lane: SenderLane):
             )
 
         client = HttpClient(timeout_s=cfg.http_timeout_s, source_ip=cfg.eth0_source_ip, verify_tls=cfg.tls_verify)
+        secondary_cooldown_until = 0.0
+        secondary_cooldown_last_log = 0.0
 
         while True:
             if watchdog and not watchdog.tick():
@@ -161,16 +198,29 @@ def sender_loop(cfg_path: str, lane: SenderLane):
                 time.sleep(0.2)
                 continue
 
-            job = outbox.next_due(
+            job = outbox.claim_next_due(
                 url_prefixes=lane.url_prefixes,
                 exclude_url_prefixes=lane.exclude_url_prefixes,
+                lease_s=max(30.0, float(cfg.http_timeout_s or 10.0) + 5.0),
             )
             if not job:
-                time.sleep(0.05)
+                time.sleep(0.35)
                 continue
 
             secondary_base = secondary_peer_base_url(cfg)
             is_secondary_target = url_matches_peer_base(job.url or "", secondary_base)
+            now_s = time.time()
+            if is_secondary_target and now_s < secondary_cooldown_until:
+                if now_s - secondary_cooldown_last_log >= SECONDARY_PEER_COOLDOWN_LOG_S:
+                    remaining = int(max(0.0, secondary_cooldown_until - now_s))
+                    print(
+                        f"[OUTBOX:{lane.name}] drop secondary during cooldown "
+                        f"id={job.id} remaining_s={remaining} url={job.url}",
+                        flush=True,
+                    )
+                    secondary_cooldown_last_log = now_s
+                outbox.delete(job.id)
+                continue
 
             try:
                 started_at = time.time()
@@ -179,7 +229,7 @@ def sender_loop(cfg_path: str, lane: SenderLane):
                     outbox.delete(job.id)
                     continue
 
-                headers = json.loads(job.headers_json)
+                headers = peer_request_headers(cfg, job.url, json.loads(job.headers_json))
                 body = json.loads(job.body_json) if job.body_json else None
 
                 print(f"[OUTBOX:{lane.name}] send id={job.id} rc={job.retry_count} {job.method} {job.url}", flush=True)
@@ -192,8 +242,11 @@ def sender_loop(cfg_path: str, lane: SenderLane):
             except Exception as e:
                 elapsed_ms = int((time.time() - started_at) * 1000)
                 if is_secondary_target:
+                    secondary_cooldown_until = time.time() + SECONDARY_PEER_FAILURE_COOLDOWN_S
+                    secondary_cooldown_last_log = time.time()
                     print(
                         f"[OUTBOX:{lane.name}] drop secondary id={job.id} elapsed_ms={elapsed_ms} "
+                        f"cooldown_s={int(SECONDARY_PEER_FAILURE_COOLDOWN_S)} "
                         f"err={repr(e)} url={job.url}",
                         flush=True,
                     )
@@ -219,13 +272,16 @@ def router_loop(cfg_path: str):
             outbox = Outbox(db)
             params = ParamStore(db)
             logs = LogStore(db)
+            recovered = inbox.recover_stale_processing(max_age_s=300.0)
+            if recovered:
+                logs.log("raspi", "warning", f"stale inbox processing messages quarantined: {recovered}")
             router = Router(cfg, inbox, outbox, params, logs)
             threading.Thread(target=router.device_bridge.warm_device_caches, daemon=True).start()
 
             while True:
                 did_work = router.tick_once()
                 if not did_work:
-                    time.sleep(0.02)
+                    time.sleep(0.25)
         except Exception as e:
             print(f"[ROUTER] loop error: {repr(e)}", flush=True)
             time.sleep(1.0)
@@ -241,56 +297,249 @@ def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
         time.sleep(5.0)
 
 
+def _esp_io_poll_paused_for_production_start(db: DB) -> bool:
+    try:
+        with db._conn() as conn:
+            row = conn.execute(
+                "SELECT current_state, info_json FROM machine_state WHERE singleton_id=1"
+            ).fetchone()
+        if not row:
+            return False
+        if int(row[0] or 0) == 4:
+            return True
+        info = json.loads(row[1] or "{}")
+        production = dict(info.get("production_runtime") or {})
+        return bool(production.get("pending_start"))
+    except Exception:
+        return False
+
+
 def io_runtime_loop(cfg_path: str):
     last_import_sig = None
+    next_due_by_device: dict[str, float] = {}
+    cfg = None
+    io_store = None
+    reload_due = 0.0
     while True:
-        cfg = Settings.load(cfg_path)
         try:
-            db = DB(cfg.db_path)
-            io_store = IoStore(db)
-            repo_master_ios_xlsx = resolve_repo_master_ios_xlsx()
-            if not os.path.exists(cfg.master_ios_xlsx_path) and repo_master_ios_xlsx:
-                os.makedirs(os.path.dirname(cfg.master_ios_xlsx_path), exist_ok=True)
-                shutil.copyfile(repo_master_ios_xlsx, cfg.master_ios_xlsx_path)
+            now_m = time.monotonic()
+            if cfg is None or io_store is None or now_m >= reload_due:
+                cfg = Settings.load(cfg_path)
+                db = DB(cfg.db_path)
+                io_store = IoStore(db)
+                repo_master_ios_xlsx = resolve_repo_master_ios_xlsx()
+                if not os.path.exists(cfg.master_ios_xlsx_path) and repo_master_ios_xlsx:
+                    os.makedirs(os.path.dirname(cfg.master_ios_xlsx_path), exist_ok=True)
+                    shutil.copyfile(repo_master_ios_xlsx, cfg.master_ios_xlsx_path)
 
-            workbook_sig = (
-                cfg.master_ios_xlsx_path,
-                os.path.getmtime(cfg.master_ios_xlsx_path) if os.path.exists(cfg.master_ios_xlsx_path) else 0.0,
-            )
-            if io_store.count_points() == 0 or workbook_sig != last_import_sig:
-                if os.path.exists(cfg.master_ios_xlsx_path):
-                    io_store.import_xlsx(cfg.master_ios_xlsx_path)
-                    last_import_sig = workbook_sig
+                workbook_sig = (
+                    cfg.master_ios_xlsx_path,
+                    os.path.getmtime(cfg.master_ios_xlsx_path) if os.path.exists(cfg.master_ios_xlsx_path) else 0.0,
+                )
+                if io_store.count_points() == 0 or workbook_sig != last_import_sig:
+                    if os.path.exists(cfg.master_ios_xlsx_path):
+                        io_store.import_xlsx(cfg.master_ios_xlsx_path)
+                        last_import_sig = workbook_sig
+                reload_due = now_m + 2.0
 
-            IoRuntime(cfg, io_store).refresh()
+            intervals = {
+                "esp32_plc58": max(0.5, float(getattr(cfg, "esp_io_poll_interval_s", 1.0) or 1.0)),
+                "raspi_plc21": max(0.5, float(getattr(cfg, "raspi_io_poll_interval_s", 1.0) or 1.0)),
+                "moxa_e1211_1": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
+                "moxa_e1211_2": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
+                "moxa_e1213_1": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
+                "moxa_e1213_2": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
+                "moxa_e1213_3": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
+            }
+            due_devices = {
+                device_code
+                for device_code, interval_s in intervals.items()
+                if now_m >= float(next_due_by_device.get(device_code, 0.0))
+            }
+            if "esp32_plc58" in due_devices and _esp_io_poll_paused_for_production_start(db):
+                due_devices.discard("esp32_plc58")
+                next_due_by_device["esp32_plc58"] = now_m + max(
+                    2.0,
+                    float(getattr(cfg, "esp_io_poll_interval_s", 1.0) or 1.0),
+                )
+            if due_devices:
+                IoRuntime(cfg, io_store).refresh(include_points=False, device_codes=due_devices)
+                for device_code in due_devices:
+                    next_due_by_device[device_code] = now_m + intervals[device_code]
         except Exception as e:
             print(f"[IO] loop error: {repr(e)}", flush=True)
 
-        poll_s = max(
-            0.5,
-            min(
-                float(getattr(cfg, "raspi_io_poll_interval_s", 1.0) or 1.0),
-                float(getattr(cfg, "esp_io_poll_interval_s", 1.0) or 1.0),
-                float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0),
-            ),
-        )
-        time.sleep(poll_s)
+        time.sleep(0.2)
+
+
+def _panel_button_sample(cfg: Settings) -> dict[str, bool]:
+    if bool(getattr(cfg, "raspi_io_simulation", True)):
+        raise RuntimeError("raspi IO simulation active")
+    rpiplc, error = _ensure_rpiplc(str(getattr(cfg, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21"))
+    if rpiplc is None:
+        raise RuntimeError(f"rpiplc unavailable: {error}")
+    current: dict[str, bool] = {}
+    for button_name, (device_code, pin_label) in BUTTON_INPUTS.items():
+        if device_code != "raspi_plc21":
+            continue
+        current[str(button_name)] = bool(_read_raspi_input(rpiplc, cfg, pin_label))
+    return current
+
+
+def _queue_panel_button_event(event: dict[str, object]) -> None:
+    try:
+        PANEL_BUTTON_EVENT_QUEUE.put_nowait(event)
+        return
+    except queue.Full:
+        pass
+    try:
+        PANEL_BUTTON_EVENT_QUEUE.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        PANEL_BUTTON_EVENT_QUEUE.put_nowait(event)
+    except queue.Full:
+        pass
+
+
+def button_sampler_loop(cfg_path: str):
+    cfg = None
+    reload_due = 0.0
+    previous_inputs: dict[str, bool] | None = None
+    last_error_log = 0.0
+    while True:
+        now_m = time.monotonic()
+        try:
+            if cfg is None or now_m >= reload_due:
+                cfg = Settings.load(cfg_path)
+                reload_due = now_m + 2.0
+            if bool(getattr(cfg, "raspi_io_simulation", True)):
+                previous_inputs = None
+                time.sleep(0.5)
+                continue
+            current_inputs = _panel_button_sample(cfg)
+            if previous_inputs is None:
+                _queue_panel_button_event(
+                    {
+                        "ts": time.time(),
+                        "current_inputs": dict(current_inputs),
+                        "previous_inputs": dict(current_inputs),
+                        "initial": True,
+                    }
+                )
+                previous_inputs = dict(current_inputs)
+            elif current_inputs != previous_inputs:
+                _queue_panel_button_event(
+                    {
+                        "ts": time.time(),
+                        "current_inputs": dict(current_inputs),
+                        "previous_inputs": dict(previous_inputs),
+                        "initial": False,
+                    }
+                )
+                previous_inputs = dict(current_inputs)
+        except Exception as e:
+            previous_inputs = None
+            if now_m - last_error_log >= 5.0:
+                print(f"[BUTTON-SAMPLE] loop error: {repr(e)}", flush=True)
+                last_error_log = now_m
+            time.sleep(0.25)
+            continue
+        time.sleep(PANEL_BUTTON_SAMPLE_INTERVAL_S)
 
 
 def machine_runtime_loop(cfg_path: str):
+    runtime = None
+    reload_due = 0.0
+    tick_s = 0.50
+    next_tick = time.monotonic()
+    fast_states = {2, 3, 4, 5, 6, 10, 11, 12, 13, 16, 17}
     while True:
-        cfg = Settings.load(cfg_path)
         try:
-            db = DB(cfg.db_path)
-            params = ParamStore(db)
-            logs = LogStore(db)
-            outbox = Outbox(db)
-            io_store = IoStore(db)
-            runtime = MachineRuntime(cfg, db, params, io_store, logs, outbox)
-            runtime.refresh()
+            now_m = time.monotonic()
+            if runtime is None or now_m >= reload_due:
+                cfg = Settings.load(cfg_path)
+                db = DB(cfg.db_path)
+                params = ParamStore(db)
+                logs = LogStore(db)
+                outbox = Outbox(db)
+                io_store = IoStore(db)
+                runtime = MachineRuntime(cfg, db, params, io_store, logs, outbox)
+                reload_due = now_m + 5.0
+            result = runtime.refresh(include_snapshot=False)
+            current_state = int(result.get("current_state") or 0)
+            if current_state in fast_states:
+                tick_s = 0.50
+            elif current_state in {20, 21}:
+                tick_s = 0.75
+            else:
+                tick_s = 1.00
         except Exception as e:
+            runtime = None
             print(f"[MACHINE] loop error: {repr(e)}", flush=True)
-        time.sleep(0.5)
+        next_tick += tick_s
+        delay = next_tick - time.monotonic()
+        if delay <= 0.0:
+            next_tick = time.monotonic() + tick_s
+            delay = tick_s
+        time.sleep(max(0.0, delay))
+
+
+def button_input_loop(cfg_path: str):
+    runtime = None
+    reload_due = 0.0
+    while True:
+        try:
+            now_m = time.monotonic()
+            if runtime is None or now_m >= reload_due:
+                cfg = Settings.load(cfg_path)
+                db = DB(cfg.db_path)
+                params = ParamStore(db)
+                logs = LogStore(db)
+                outbox = Outbox(db)
+                io_store = IoStore(db)
+                runtime = MachineRuntime(cfg, db, params, io_store, logs, outbox)
+                reload_due = now_m + 5.0
+            event = PANEL_BUTTON_EVENT_QUEUE.get(timeout=0.5)
+            runtime.process_physical_button_inputs(
+                current_inputs=dict(event.get("current_inputs") or {}),
+                previous_inputs=dict(event.get("previous_inputs") or {}),
+                ts=float(event.get("ts") or time.time()),
+            )
+        except queue.Empty:
+            continue
+        except Exception as e:
+            runtime = None
+            print(f"[BUTTON-IN] loop error: {repr(e)}", flush=True)
+
+
+def button_led_loop(cfg_path: str):
+    runtime = None
+    reload_due = 0.0
+    tick_s = 0.25
+    next_tick = time.monotonic()
+    while True:
+        try:
+            now_m = time.monotonic()
+            if runtime is None or now_m >= reload_due:
+                cfg = Settings.load(cfg_path)
+                db = DB(cfg.db_path)
+                params = ParamStore(db)
+                logs = LogStore(db)
+                outbox = Outbox(db)
+                io_store = IoStore(db)
+                runtime = MachineRuntime(cfg, db, params, io_store, logs, outbox)
+                reload_due = now_m + 5.0
+            runtime.refresh_button_led_outputs(ts=now_m)
+        except Exception as e:
+            runtime = None
+            print(f"[BUTTON-LED] loop error: {repr(e)}", flush=True)
+        next_tick += tick_s
+        delay = next_tick - time.monotonic()
+        if delay <= 0.0:
+            next_tick = time.monotonic() + tick_s
+            delay = tick_s
+        time.sleep(max(0.0, delay))
 
 
 def vj6530_poll_loop(cfg_path: str):
@@ -374,6 +623,7 @@ def vj6530_async_loop(cfg_path: str):
 
 
 def main():
+    install_thread_dump_signal()
     cfg_path = DEFAULT_CFG_PATH
     cfg = Settings.load(cfg_path)
     repo_master_ios_xlsx = resolve_repo_master_ios_xlsx()
@@ -389,13 +639,13 @@ def main():
 
     disable_global_esp_motor_polling(cfg)
 
-    ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True)
+    ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True, name="ntp-loop")
     ntp_t.start()
 
     for lane in sender_lanes(cfg):
-        sender_t = threading.Thread(target=sender_loop, args=(cfg_path, lane), daemon=True)
+        sender_t = threading.Thread(target=sender_loop, args=(cfg_path, lane), daemon=True, name=f"sender-{lane.name}")
         sender_t.start()
-    router_t = threading.Thread(target=router_loop, args=(cfg_path,), daemon=True)
+    router_t = threading.Thread(target=router_loop, args=(cfg_path,), daemon=True, name="router-loop")
     router_t.start()
 
     push_mgr = EspPushListenerManager(cfg)
@@ -403,10 +653,10 @@ def main():
         push_mgr.start()
     except Exception as e:
         print(f"[ESP-PUSH] manager error: {repr(e)}", flush=True)
-    push_t = threading.Thread(target=esp_push_listener_loop, args=(cfg_path, push_mgr), daemon=True)
+    push_t = threading.Thread(target=esp_push_listener_loop, args=(cfg_path, push_mgr), daemon=True, name="esp-push-reconcile")
     push_t.start()
 
-    vj6530_async_t = threading.Thread(target=vj6530_async_loop, args=(cfg_path,), daemon=True)
+    vj6530_async_t = threading.Thread(target=vj6530_async_loop, args=(cfg_path,), daemon=True, name="vj6530-async")
     vj6530_async_t.start()
     if (
         bool(getattr(cfg, "vj6530_async_enabled", True))
@@ -417,12 +667,18 @@ def main():
         # Give the async subscriber a short head start so the fallback poller
         # does not race the first live 3002 session during service startup.
         time.sleep(1.0)
-    vj6530_poll_t = threading.Thread(target=vj6530_poll_loop, args=(cfg_path,), daemon=True)
+    vj6530_poll_t = threading.Thread(target=vj6530_poll_loop, args=(cfg_path,), daemon=True, name="vj6530-poll")
     vj6530_poll_t.start()
-    io_t = threading.Thread(target=io_runtime_loop, args=(cfg_path,), daemon=True)
+    io_t = threading.Thread(target=io_runtime_loop, args=(cfg_path,), daemon=True, name="io-runtime")
     io_t.start()
-    machine_t = threading.Thread(target=machine_runtime_loop, args=(cfg_path,), daemon=True)
+    machine_t = threading.Thread(target=machine_runtime_loop, args=(cfg_path,), daemon=True, name="machine-runtime")
     machine_t.start()
+    button_sampler_t = threading.Thread(target=button_sampler_loop, args=(cfg_path,), daemon=True, name="button-sampler")
+    button_sampler_t.start()
+    button_input_t = threading.Thread(target=button_input_loop, args=(cfg_path,), daemon=True, name="button-input")
+    button_input_t.start()
+    button_led_t = threading.Thread(target=button_led_loop, args=(cfg_path,), daemon=True, name="button-led")
+    button_led_t.start()
 
     app = build_app(cfg_path)
     app.state.esp_push_listener_manager = push_mgr
@@ -431,7 +687,7 @@ def main():
         if int(cfg.device_inbox_http_port) == int(cfg.webui_port):
             print("[DEVICE-INBOX] skipped: device_inbox_http_port equals webui_port", flush=True)
         else:
-            device_inbox_t = threading.Thread(target=device_inbox_http_loop, args=(cfg_path,), daemon=True)
+            device_inbox_t = threading.Thread(target=device_inbox_http_loop, args=(cfg_path,), daemon=True, name="device-inbox-http")
             device_inbox_t.start()
 
     ssl_kwargs = {}

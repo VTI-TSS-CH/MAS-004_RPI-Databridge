@@ -19,6 +19,7 @@
 
   "peer_base_url": "http://192.168.210.10:81",
   "peer_base_url_secondary": "",
+  "diclient_adapter_key": "",
   "peer_watchdog_host": "192.168.210.10",
   "peer_health_path": "/health",
   "ntp_server": "",
@@ -40,6 +41,8 @@
   "raspi_plc_model": "RPIPLC_21",
   "raspi_io_simulation": true,
   "raspi_io_poll_interval_s": 1.0,
+  "raspi_analog_input_high_threshold": 1000.0,
+  "light_curtain_auto_reset_enabled": true,
 
   "esp_host": "192.168.2.101",
   "esp_port": 3010,
@@ -53,6 +56,9 @@
   "moxa2_host": "192.168.2.103",
   "moxa2_port": 502,
   "moxa2_simulation": true,
+  "moxa3_host": "192.168.2.104",
+  "moxa3_port": 502,
+  "moxa3_simulation": true,
   "moxa_poll_interval_s": 1.0,
 
   "vj3350_host": "192.168.210.21",

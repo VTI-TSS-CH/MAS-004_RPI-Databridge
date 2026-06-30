@@ -51,7 +51,7 @@ function Show-Plan {
     Write-Host ("Laser 3350:    {0}:20000" -f $topology.eth0.devices.vj3350_laser.host)
     Write-Host ("Abwickler:     {0}:3011" -f $topology.eth0.devices.smart_unwinder.host)
     Write-Host ("Aufwickler:    {0}:3012" -f $topology.eth0.devices.smart_rewinder.host)
-    Write-Host ("ESP/Moxa net:  Raspi {0}, ESP {1}, Moxa {2}/{3}" -f $topology.eth1.raspi_ip, $topology.eth1.devices.esp32_plc58.host, $topology.eth1.devices.moxa1_e1211.host, $topology.eth1.devices.moxa2_e1211.host)
+    Write-Host ("ESP/Moxa net:  Raspi {0}, ESP {1}, Moxa {2}/{3}/{4}" -f $topology.eth1.raspi_ip, $topology.eth1.devices.esp32_plc58.host, $topology.eth1.devices.moxa1_e1213.host, $topology.eth1.devices.moxa2_e1213.host, $topology.eth1.devices.moxa3_e1213.host)
 
     Write-Section "Recommended phase order for tomorrow"
     Write-Host "1. Connect laptop to the production Raspi network and verify SSH: $BootstrapSsh"

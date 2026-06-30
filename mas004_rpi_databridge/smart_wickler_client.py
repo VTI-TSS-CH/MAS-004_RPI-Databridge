@@ -130,28 +130,59 @@ class SmartWicklerClient:
     def device_ui_url(self) -> str:
         return f"http://{self.host}:{self.port}" if self.host and self.port > 0 else ""
 
+    def _request_context(self, method: str, path: str, data: dict[str, Any] | None, timeout_s: float) -> str:
+        safe_data = {str(key): str(value) for key, value in (data or {}).items()}
+        return (
+            f"{self.descriptor.label} ({self.descriptor.role}) {method} "
+            f"{self.device_ui_url().rstrip()}{path} timeout={timeout_s:.1f}s data={safe_data}"
+        )
+
     def _post_form(self, path: str, data: dict[str, Any] | None = None, timeout_s: float | None = None) -> dict[str, Any]:
         if not self.available():
             raise RuntimeError(f"{self.descriptor.label} endpoint missing or simulation enabled")
 
         req_timeout = float(timeout_s or max(1.0, min(10.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0))))
-        with httpx.Client(timeout=req_timeout) as client:
-            response = client.post(self.device_ui_url().rstrip("/") + path, data=data or {})
-            response.raise_for_status()
+        url = self.device_ui_url().rstrip("/") + path
+        context = self._request_context("POST", path, data, req_timeout)
+        try:
+            with httpx.Client(timeout=req_timeout) as client:
+                response = client.post(url, data=data or {})
+                response.raise_for_status()
+                try:
+                    payload = response.json()
+                except Exception:
+                    payload = {"ok": True, "text": response.text}
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"{context} failed: timeout") from exc
+        except httpx.HTTPStatusError as exc:
+            body = ""
             try:
-                payload = response.json()
+                body = (exc.response.text or "")[:300]
             except Exception:
-                payload = {"ok": True, "text": response.text}
+                body = ""
+            raise RuntimeError(f"{context} failed: HTTP {exc.response.status_code} {body}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"{context} failed: {exc.__class__.__name__}: {exc}") from exc
         return dict(payload or {})
 
     def post_mode(self, mode: str, timeout_s: float | None = None) -> dict[str, Any]:
         return self._post_form("/api/mode", {"mode": str(mode or "").strip()}, timeout_s=timeout_s)
+
+    def release_for_continuous_motion(self, timeout_s: float | None = None) -> dict[str, Any]:
+        return self._post_form(
+            "/api/mode",
+            {"mode": "ready", "allowMotion": "1"},
+            timeout_s=timeout_s,
+        )
 
     def post_master(self, values: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         return self._post_form("/api/master", values, timeout_s=timeout_s)
 
     def start_diameter_learning(self, timeout_s: float | None = None) -> dict[str, Any]:
         return self._post_form("/api/diameter/learn", {"action": "start"}, timeout_s=timeout_s)
+
+    def cancel_diameter_learning(self, timeout_s: float | None = None) -> dict[str, Any]:
+        return self._post_form("/api/diameter/learn", {"action": "cancel"}, timeout_s=timeout_s)
 
     def finish_diameter_learning(
         self,
@@ -178,7 +209,7 @@ class SmartWicklerClient:
             timeout_s=timeout_s,
         )
 
-    def fetch_state(self) -> dict[str, Any]:
+    def fetch_state(self, timeout_s: float | None = None) -> dict[str, Any]:
         if not self.available():
             return _simulation_payload(
                 role=self.descriptor.role,
@@ -189,8 +220,12 @@ class SmartWicklerClient:
             )
 
         try:
-            timeout_s = max(1.0, min(5.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0)))
-            with httpx.Client(timeout=timeout_s) as client:
+            req_timeout = (
+                float(timeout_s)
+                if timeout_s is not None
+                else max(1.0, min(5.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0)))
+            )
+            with httpx.Client(timeout=req_timeout) as client:
                 response = client.get(self.device_ui_url().rstrip("/") + "/api/state")
                 response.raise_for_status()
                 payload = response.json()

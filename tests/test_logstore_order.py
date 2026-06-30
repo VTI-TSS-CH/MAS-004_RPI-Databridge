@@ -53,6 +53,33 @@ class LogStoreOrderTests(unittest.TestCase):
             self.assertIn("MAS-004 Machine Audit Log", txt)
             self.assertIn("Virtuelle Taste Start ausgeloest", txt)
 
+    def test_mae_activation_is_classified_as_machine_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db = DB(str(base / "db.sqlite3"))
+            logs = LogStore(db, log_dir=str(base / "daily"), production_log_dir=str(base / "production"))
+
+            logs.log("raspi", "OUT", "to microtom: MAE0025=1")
+
+            items = logs.list_audit_entries(hours=1, limit=10)
+            self.assertEqual(1, len(items))
+            self.assertEqual("machine", items[0]["category"])
+            self.assertEqual("ERROR", items[0]["direction"])
+            self.assertEqual("MAE0025", items[0]["pkey"])
+
+    def test_audit_value_parser_ignores_trailing_sentence_punctuation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            db = DB(str(base / "db.sqlite3"))
+            logs = LogStore(db, log_dir=str(base / "daily"), production_log_dir=str(base / "production"))
+
+            logs.log("raspi", "INFO", "ignored ESP authoritative echo MAS0028=0; Raspi value is 0")
+
+            items = logs.list_audit_entries(hours=1, limit=10)
+            self.assertEqual(1, len(items))
+            self.assertEqual("0", items[0]["value"])
+            self.assertEqual("INFO", items[0]["direction"])
+
 
 if __name__ == "__main__":
     unittest.main()

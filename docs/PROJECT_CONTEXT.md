@@ -32,11 +32,11 @@
 - IO ownership and topology are split as follows:
   - `Raspberry PLC21` is the central orchestrator for slow supervisory IO
   - `ESP32-PLC58` stays on the realtime automation network and receives the IO snapshot/control traffic it actually needs
-  - `2x Moxa ioLogik E1211` are handled on the Raspi side as slow field IO nodes
+  - `3x Moxa ioLogik E1213` are handled on the Raspi side as slow source-output field IO nodes
   - the IO workbook can be re-imported so the project mapping stays aligned with the sheet rather than being hardcoded in only one layer
 - New network split for the merged plant basis:
   - `eth0 / 192.168.210.20`: Microtom, VJ6530, VJ3350, Abwickler, Aufwickler
-  - `eth1 / 192.168.2.100`: ESP32-PLC58 and the two Moxa E1211 modules
+  - `eth1 / 192.168.2.100`: ESP32-PLC58 and the three Moxa E1213 modules
 - The former local TEST machine is now the production/commissioning stand:
   - current/final Raspi access: `pi@10.141.94.213`, UI/API `https://10.141.94.213:8080`
   - `eth0`: Raspi `10.141.94.213/24`, gateway `10.141.94.1`
@@ -46,7 +46,7 @@
   - Laser VJ3350: `10.141.94.215:20000`
   - Abwickler: `10.141.94.216:3011`
   - Aufwickler: `10.141.94.217:3012`
-  - final `eth1` remains unchanged: Raspi `192.168.2.100/24`, ESP `192.168.2.101:3010`, Moxa `192.168.2.102:502` and `192.168.2.103:502`
+  - final `eth1` remains unchanged: Raspi `192.168.2.100/24`, ESP `192.168.2.101:3010`, Moxa E1213 `192.168.2.102:502`, `192.168.2.103:502` and `192.168.2.104:502`
   - commissioning profile files:
     - `scripts/production_topology_10_141_94.json`
     - `scripts/production_commissioning_config_patch_10_141_94.json`
@@ -113,8 +113,13 @@
 - New Machine Control / Audit surface inside Machine-Setup:
   - `/ui/machine-setup/process` shows current machine status, safety state, allowed button actions and virtual machine buttons
   - virtual Start/Pause, Stop, Einrichten, Synchronisieren, Leerfahren and Zurueckspulen use the same `MAS0002`, state and `MAP0065` rules as the physical Raspi PLC buttons
+  - Reset shares the physical Start/Pause button element and therefore uses the `MAP0065` Start bit; if that bit is locked, web Reset, physical `I0.7` reset and the Start/Pause/Reset LEDs are locked together
   - the central audit view combines Microtom/Raspi communication, device traffic, machine events and label events with parameter-master Klartext where available
   - detailed audit retention is configurable in hours through `machine_audit_keep_hours`, while daily text log retention remains day-based
+- New Motor 3 / Encoder calibration surface inside Machine-Setup:
+  - `/ui/machine-setup/calibration` wraps the 2000-mm diagnostic/calibration flow
+  - the page can prepare the Wicklers, start the 2000-mm ID3 move, display live/result values and apply measured real travel/label length to ID3 `steps_per_mm`, `MAP0077`, `MAP0078` and optionally `MAP0076`
+  - `MAP0077` and `MAP0078` are fixed machine calibration values and are not format-relevant
 - New Smart Wickler proxy surface on the Raspi web UI:
   - `/ui/machine-setup/winders/unwinder`
   - `/ui/machine-setup/winders/rewinder`
@@ -166,7 +171,7 @@
 - The fallback poller also stands down while the async owner session is healthy, even if no fresh state change happened recently.
 - Background 6530 cache warmup is skipped while async ownership is enabled, avoiding a second control client on `3002` during startup.
 - Outbox dedupe now only collapses consecutive identical values; non-consecutive state changes remain lossless.
-- `MAS0028=0` from Microtom/DIClient is a purge soft-clear and removes stale pending `MAS0028=<state>` callbacks before the ACK is queued. Device/ESP `MAS0028=1` echoes are suppressed briefly after that clear, while real machine-runtime critical causes may still reassert `MAS0028=1`.
+- Purge follows Microtom scenario B: `MAS0028=0` from Microtom/DIClient is the only purge termination command. It removes stale pending `MAS0028=<state>` callbacks before `ACK_MAS0028=0`; ESP/device-origin `MAS0028=0/1` is treated as an echo of the Raspi-authoritative state. The Raspi mirrors the clear to the ESP32-PLC only to clear its internal process latch, and real machine-runtime critical causes may still reassert `MAS0028=1`.
 - Live TEST proof on `192.168.2.103:3002`:
   - idle `AIS` without synchronous traffic closes after about 15s
   - `IRQ([])` keepalives keep the async session open
@@ -190,8 +195,9 @@
   - `POST /api/production/logfiles/ack`
 - Direct device endpoints:
   - `ESP32-PLC58`: `192.168.2.101:3010`
-  - `Moxa #1`: `192.168.2.102:502`
-  - `Moxa #2`: `192.168.2.103:502`
+  - `Moxa E1213 #1`: `192.168.2.102:502`
+  - `Moxa E1213 #2`: `192.168.2.103:502`
+  - `Moxa E1213 #3`: `192.168.2.104:502`
   - `VJ3350`: LIVE/old basis `192.168.210.21:20000`, production commissioning basis `10.141.94.215:20000`
   - `VJ6530`: LIVE/old basis `192.168.210.22:3002`, production commissioning basis `10.141.94.214:3002`
   - `Abwickler`: LIVE/old basis `192.168.210.23:3011`, production commissioning basis `10.141.94.216:3011`
@@ -234,6 +240,7 @@
   - `smart_rewinder_host = 192.168.210.24`, `smart_rewinder_port = 3012`, `smart_rewinder_simulation = true`
   - `moxa1_host = 192.168.2.102`, `moxa1_port = 502`, `moxa1_simulation = true`
   - `moxa2_host = 192.168.2.103`, `moxa2_port = 502`, `moxa2_simulation = true`
+  - `moxa3_host = 192.168.2.104`, `moxa3_port = 502`, `moxa3_simulation = true`
 - Current SSH access notes for LIVE:
   - fallback password: `raspberry`
   - preferred private key on this laptop: `C:/Users/Egli_Erwin/.ssh/mas004_rpi210_ed25519`
@@ -325,7 +332,7 @@
   - `MAS-004_VJ3350-Ultimate-Bridge`: HEAD `0e5b7aa`, working tree clean
   - `MAS-004_VJ6530-ZBC-Bridge`: HEAD `09f9397`, working tree clean
   - `MAS-004_ZBC-Library`: HEAD `c47563d`, working tree clean
-  - `MAS-004_SmartWickler`: local Git baseline exists; Wickler flash remains manual via laptop USB
+  - `MAS-004_SmartWickler`: GitHub remote exists; Wickler flash remains manual via laptop USB
   - local master workbook copy for current parameter work: `master_data/Parameterliste SAR41-MAS-004.xlsx`
 
 ## Multi-Repo Dependency Map
@@ -342,7 +349,8 @@
   - `Low` forces an output low until `Release`.
   - normal machine runtime writers must respect the override and skip physical writes while it is active.
 - Active overrides are stored in `io_values.override_*` and shown with quality `override`.
-- `GPIO0` is reserved for the ESP LED-stripe pulse output and is excluded from manual override.
+- The LED stripe is now handled by an external ESP32 LED controller. The ESP32-PLC keeps the realtime label shift-register rendering and sends `MAS004-LED-UDP/v1` RGB frames for the shortened `520 mm` strip (`75` LEDs) to `192.168.2.255:3050` by default.
+- The PLC58 must not drive TX1/GPIO17, GPIO0, or another local WS2812 pin while RS485/motor communication is active.
 - Leaving the IO page with active overrides should be a conscious decision; the UI asks whether all active overrides should be released or kept active.
 - The same IO page exposes `ESP Motorpolling` for commissioning:
   - it maps to `MOTOR POLL=1/0` on the ESP32-PLC
@@ -357,9 +365,9 @@
 - Read-only/status values can remain visible in saved profiles, but the send action skips them instead of writing them to the machine.
 
 ## Machine Safety / Reset Contract
-- The ESP32-PLC safety inputs are active-high:
-  - `ESP32-PLC58 I0.7 = 1` means hard Notaus present.
-  - `ESP32-PLC58 I0.8 = 1` means Lichtgitter interrupted.
+- The ESP32-PLC safety inputs are OK-signals:
+  - `ESP32-PLC58 I0.7 = 1` means Notaus safety circuit OK; `0` means hard Notaus active.
+  - `ESP32-PLC58 I0.8 = 1` means Lichtgitter safety circuit OK; `0` means Lichtgitter interrupted.
 - For now Notaus and Lichtgitter both latch the Raspi machine runtime into `MAS0001=21` and set `MAS0028=1`.
 - The ESP firmware handles the time-critical stop path:
   - hard Notaus releases Wickler run-level outputs and stops Motor 3 immediately.
@@ -367,8 +375,8 @@
 - Reset is a coordinated Raspi-led sequence:
   - requested by Microtom/Raspi value `MAS0002=2` or by the Raspi reset button on `raspi_plc21 I0.7`
   - the same physical/virtual Start/Pause channel is displayed as `Reset` while Safety/Purge is active, and returns to normal Start/Pause behavior once the reset context is gone
-  - Raspi pulses `ESP Q0.2` as `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
-  - ESP safety inputs must be LOW before motion devices are recovered
+  - Raspi pulses `ESP Q0.2` as `200 ms HIGH`, `1000 ms LOW`, `200 ms HIGH`, then LOW
+  - ESP safety inputs must be HIGH/OK before motion devices are recovered
   - Raspi sends `PROCESS RESET` to the ESP32-PLC to clear process-latched `MAE0027` / `MAS0028` before motor/Wickler recovery
   - `MAS0028` and resettable Safety/Purge latches are cleared before motor/Wickler recovery; if a drive recovery fault remains but no real critical reason is active, the machine may stay in `MAS0001=21` while `MAS0028=0`
   - ESP motors `1..9` receive ETO recovery / alarm reset

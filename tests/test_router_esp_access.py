@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from unittest.mock import patch
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
@@ -12,7 +13,7 @@ from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
-from mas004_rpi_databridge.machine_runtime import mark_external_purge_clear
+from mas004_rpi_databridge.machine_runtime import PRODUCTION_START_BLOCK_CODE, mark_external_purge_clear
 
 sys.modules.setdefault("ping3", SimpleNamespace(ping=lambda *_args, **_kwargs: 1.0))
 
@@ -70,6 +71,22 @@ class RouterEspAccessTests(unittest.TestCase):
             esp_port=3010,
         )
         return Router(cfg, Inbox(db), Outbox(db), ParamStore(db), LogStore(db, log_dir=str(base / "logs")))
+
+    def test_start_is_blocked_before_param_write_while_production_runtime_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0002", "MAS", "0002", "0", "W", "W", "uint8")
+
+            with patch("mas004_rpi_databridge.router.production_start_motion_enabled", return_value=False):
+                resp = router.handle_microtom_line("MAS0002=1", correlation="start-disabled")
+
+            self.assertEqual(f"MAS0002={PRODUCTION_START_BLOCK_CODE}", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAS0002"))
+            job = router.outbox.next_due()
+            self.assertIsNotNone(job)
+            body = json.loads(job.body_json)
+            self.assertEqual(f"MAS0002={PRODUCTION_START_BLOCK_CODE}", body["msg"])
 
     def test_ma_param_with_esp_rw_n_stays_local_even_when_esp_live_is_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -129,6 +146,64 @@ class RouterEspAccessTests(unittest.TestCase):
 
             self.assertEqual("MAS0001=3", resp)
             self.assertEqual([("MAS0001", "3")], mirrored)
+
+    def test_mae_read_is_answered_from_raspi_state_not_stale_esp_mirror(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAE0048", "MAE", "0048", "0", "R", "W", "bool")
+            router.params.apply_device_value("MAE0048", "1", promote_default=True)
+
+            def _unexpected_live(*_args, **_kwargs):
+                raise AssertionError("MAE read must not use the ESP live path")
+
+            mirrored = []
+            router.device_bridge._esp_live = _unexpected_live
+            router.device_bridge.mirror_to_esp = lambda pkey, value: mirrored.append((pkey, value)) or (True, "ACK")
+
+            resp = router.handle_microtom_line("MAE0048=?", correlation="corr-mae")
+
+            self.assertEqual("MAE0048=1", resp)
+            self.assertEqual([("MAE0048", "1")], mirrored)
+
+    def test_device_machine_state_echo_cannot_overwrite_raspi_runtime_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0001", "MAS", "0001", "9", "R", "W", "uint8")
+            router.params.apply_device_value("MAS0001", "9", promote_default=True)
+
+            resp = router.handle_device_line("MAS0001=21", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAS0001=9", resp)
+            self.assertEqual("9", router.params.get_effective_value("MAS0001"))
+            self.assertEqual(0, router.outbox.count())
+
+    def test_device_purge_echo_cannot_reactivate_raspi_purge_latch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0028", "MAS", "0028", "0", "W", "W", "bool")
+            router.params.apply_device_value("MAS0028", "0", promote_default=True)
+
+            resp = router.handle_device_line("MAS0028=1", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAS0028=0", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAS0028"))
+            self.assertEqual(0, router.outbox.count())
+
+    def test_device_purge_clear_cannot_terminate_scenario_b(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0028", "MAS", "0028", "1", "W", "W", "bool")
+            router.params.apply_device_value("MAS0028", "1", promote_default=True)
+
+            resp = router.handle_device_line("MAS0028=0", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAS0028=1", resp)
+            self.assertEqual("1", router.params.get_effective_value("MAS0028"))
+            self.assertEqual(0, router.outbox.count())
 
     def test_ma_param_with_esp_read_access_is_stored_locally_and_mirrored(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -273,6 +348,39 @@ class RouterEspAccessTests(unittest.TestCase):
                 router.outbox.delete(job.id)
             self.assertEqual(["ACK_MAS0028=0"], jobs)
 
+    def test_microtom_purge_start_removes_stale_pending_clear_callbacks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0028", "MAS", "0028", "0", "W", "W", "bool")
+
+            def _fake_raspi_write(pkey, op, value, actor="microtom"):
+                router.params.set_value(pkey, value, actor=actor)
+                return f"ACK_{pkey}={value}"
+
+            router.device_bridge._simulate = _fake_raspi_write
+            router.device_bridge.mirror_to_esp = lambda pkey, value: (True, f"ACK_{pkey}={value}")
+            router.outbox.enqueue(
+                "POST",
+                "https://peer-a:9090/api/inbox",
+                {},
+                {"msg": "MAS0028=0", "source": "raspi", "origin": "machine-runtime"},
+                dedupe_key="state:MAS0028:clear",
+            )
+
+            resp = router.handle_microtom_line("MAS0028=1", correlation="purge-start")
+
+            self.assertEqual("ACK_MAS0028=1", resp)
+            self.assertEqual("1", router.params.get_effective_value("MAS0028"))
+            jobs = []
+            while True:
+                job = router.outbox.next_due()
+                if not job:
+                    break
+                jobs.append(json.loads(job.body_json)["msg"])
+                router.outbox.delete(job.id)
+            self.assertEqual(["ACK_MAS0028=1"], jobs)
+
     def test_device_purge_echo_is_ignored_immediately_after_microtom_clear(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -282,7 +390,7 @@ class RouterEspAccessTests(unittest.TestCase):
 
             resp = router.handle_device_line("MAS0028=1", source="esp-plc", correlation=None)
 
-            self.assertEqual("ACK_MAS0028=1", resp)
+            self.assertEqual("ACK_MAS0028=0", resp)
             self.assertEqual("0", router.params.get_effective_value("MAS0028"))
             self.assertEqual(0, router.outbox.count())
 
@@ -298,6 +406,52 @@ class RouterEspAccessTests(unittest.TestCase):
 
             self.assertEqual("ACK_MAE0009=0", resp)
             self.assertEqual("0", router.params.get_effective_value("MAE0009"))
+            self.assertEqual(0, router.outbox.count())
+
+    def test_duplicate_inactive_device_fault_clear_is_not_forwarded_to_microtom(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAE0025", "MAE", "0025", "0", "R", "W", "bool")
+
+            resp = router.handle_device_line("MAE0025=0", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAE0025=0", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAE0025"))
+            self.assertEqual(0, router.outbox.count())
+
+    def test_device_fault_active_is_not_replaced_by_fast_clear(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAE0026", "MAE", "0026", "0", "R", "W", "bool")
+
+            self.assertEqual("MAE0026=1", router.handle_device_line("MAE0026=1", source="esp-plc", correlation=None))
+            self.assertEqual("MAE0026=0", router.handle_device_line("MAE0026=0", source="esp-plc", correlation=None))
+
+            jobs = []
+            while True:
+                job = router.outbox.next_due()
+                if not job:
+                    break
+                jobs.append((json.loads(job.body_json)["msg"], job.dedupe_key))
+                router.outbox.delete(job.id)
+            self.assertEqual(
+                [("MAE0026=1", "state:MAE0026:active"), ("MAE0026=0", "state:MAE0026:clear")],
+                jobs,
+            )
+
+    def test_wickler_dancer_clear_stays_latched_until_reset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAE0030", "MAE", "0030", "0", "R", "W", "bool")
+            router.params.apply_device_value("MAE0030", "1", promote_default=True)
+
+            resp = router.handle_device_line("MAE0030=0", source="smartwickler", correlation=None)
+
+            self.assertEqual("ACK_MAE0030=1", resp)
+            self.assertEqual("1", router.params.get_effective_value("MAE0030"))
             self.assertEqual(0, router.outbox.count())
 
 

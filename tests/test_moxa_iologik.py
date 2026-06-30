@@ -3,7 +3,7 @@ import struct
 import threading
 import unittest
 
-from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client
+from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client, MoxaE1213Client
 
 
 class _FakeMoxaServer:
@@ -15,6 +15,7 @@ class _FakeMoxaServer:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._stop = threading.Event()
         self.coils = [1, 0, 1, 0] + [0] * 12
+        self.connection_count = 0
 
     def start(self):
         self._thread.start()
@@ -35,34 +36,36 @@ class _FakeMoxaServer:
                 client, _addr = self._sock.accept()
             except Exception:
                 break
+            self.connection_count += 1
             threading.Thread(target=self._handle, args=(client,), daemon=True).start()
 
     def _handle(self, client: socket.socket):
         with client:
-            try:
-                header = self._recv_exact(client, 7)
-            except RuntimeError:
-                return
-            tx_id, proto_id, length, unit_id = struct.unpack(">HHHB", header)
-            body = self._recv_exact(client, length - 1)
-            function_code = body[0]
-            payload = body[1:]
-            if function_code == 0x01:
-                start, count = struct.unpack(">HH", payload[:4])
-                values = self.coils[start : start + count]
-                packed = bytearray(max(1, (count + 7) // 8))
-                for idx, value in enumerate(values):
-                    if value:
-                        packed[idx // 8] |= 1 << (idx % 8)
-                response_pdu = struct.pack(">BB", function_code, len(packed)) + bytes(packed)
-            elif function_code == 0x05:
-                address, raw_value = struct.unpack(">HH", payload[:4])
-                self.coils[address] = 1 if raw_value == 0xFF00 else 0
-                response_pdu = struct.pack(">BHH", function_code, address, raw_value)
-            else:
-                response_pdu = struct.pack(">BB", function_code | 0x80, 0x01)
-            response = struct.pack(">HHHB", tx_id, proto_id, len(response_pdu) + 1, unit_id) + response_pdu
-            client.sendall(response)
+            while not self._stop.is_set():
+                try:
+                    header = self._recv_exact(client, 7)
+                except RuntimeError:
+                    return
+                tx_id, proto_id, length, unit_id = struct.unpack(">HHHB", header)
+                body = self._recv_exact(client, length - 1)
+                function_code = body[0]
+                payload = body[1:]
+                if function_code == 0x01:
+                    start, count = struct.unpack(">HH", payload[:4])
+                    values = self.coils[start : start + count]
+                    packed = bytearray(max(1, (count + 7) // 8))
+                    for idx, value in enumerate(values):
+                        if value:
+                            packed[idx // 8] |= 1 << (idx % 8)
+                    response_pdu = struct.pack(">BB", function_code, len(packed)) + bytes(packed)
+                elif function_code == 0x05:
+                    address, raw_value = struct.unpack(">HH", payload[:4])
+                    self.coils[address] = 1 if raw_value == 0xFF00 else 0
+                    response_pdu = struct.pack(">BHH", function_code, address, raw_value)
+                else:
+                    response_pdu = struct.pack(">BB", function_code | 0x80, 0x01)
+                response = struct.pack(">HHHB", tx_id, proto_id, len(response_pdu) + 1, unit_id) + response_pdu
+                client.sendall(response)
 
     @staticmethod
     def _recv_exact(client: socket.socket, size: int) -> bytes:
@@ -89,6 +92,22 @@ class MoxaIoLogikClientTests(unittest.TestCase):
             client.write_output(1, True)
             outputs_after = client.read_outputs()
             self.assertEqual(1, outputs_after["DO1"])
+            self.assertEqual(1, server.connection_count)
+        finally:
+            server.stop()
+
+    def test_e1213_maps_dio_outputs_after_do_outputs(self):
+        server = _FakeMoxaServer()
+        server.start()
+        try:
+            client = MoxaE1213Client(server.host, server.port, timeout_s=1.0)
+            client.write_output_label("DIO3", True)
+
+            self.assertEqual(1, server.coils[7])
+            outputs = client.read_outputs()
+            self.assertIn("DIO3", outputs)
+            self.assertEqual(1, outputs["DIO3"])
+            self.assertNotIn("DO8", outputs)
         finally:
             server.stop()
 

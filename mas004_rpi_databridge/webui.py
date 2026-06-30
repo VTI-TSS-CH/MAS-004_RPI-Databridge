@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import html
+import math
 import subprocess
 import os
 import re
@@ -36,9 +37,15 @@ from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
-from mas004_rpi_databridge.machine_runtime import MachineRuntime
+from mas004_rpi_databridge.machine_runtime import MachineRuntime, mark_external_purge_clear
 from mas004_rpi_databridge.machine_control_ui import build_machine_control_ui_html
+from mas004_rpi_databridge.device_clients import EspPlcClient
+from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.production_setup_ui import build_production_setup_ui_html
+from mas004_rpi_databridge.production_visualization_ui import build_production_visualization_ui_html
+from mas004_rpi_databridge.mae0048_diagnostics import collect_mae0048_diagnostics
+from mas004_rpi_databridge.mae0048_diagnostics_ui import build_mae0048_diagnostics_ui_html
+from mas004_rpi_databridge.motor3_calibration_ui import build_motor3_calibration_ui_html
 from mas004_rpi_databridge.commissioning import CommissioningStore
 from mas004_rpi_databridge.commissioning_ui import build_commissioning_ui_html
 from mas004_rpi_databridge.machine_backups import MachineBackupManager
@@ -46,7 +53,15 @@ from mas004_rpi_databridge.backup_ui import build_backup_ui_html
 from mas004_rpi_databridge.format_profiles import FormatProfileStore, normalize_profile_name
 from mas004_rpi_databridge.motor_catalog import merge_motor_payload, motor_catalog
 from mas004_rpi_databridge.motor_bindings import build_motor_bindings
-from mas004_rpi_databridge.motor_master_sync import sync_motor_master_values
+from mas004_rpi_databridge.motor_master_sync import (
+    apply_motor_setup_master_config_to_client,
+    reapply_motor_setup_master_to_params,
+    sync_motor_master_values,
+)
+from mas004_rpi_databridge.motor_setup_lock import (
+    clear_motor_setup_manual_lock,
+    touch_motor_setup_manual_lock,
+)
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
@@ -60,14 +75,259 @@ ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets")
 VIDEOJET_LOGO_PATH = os.path.join(ASSET_DIR, "videojet-logo.jpg")
 REPO_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "Parameterliste SAR41-MAS-004.xlsx")
 REPO_MASTER_IOS_XLSX = os.path.join(os.path.dirname(os.path.dirname(__file__)), "master_data", "SAR41-MAS-004_SPS_I-Os.xlsx")
+WORKSPACE_MASTER_PARAMS_XLSX = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "Parameterliste SAR41-MAS-004.xlsx")
 FALLBACK_VIDEOJET_LOGO_PATH = os.path.join("/opt", "MAS-004_RPI-Databridge", "mas004_rpi_databridge", "assets", "videojet-logo.jpg")
+FALLBACK_REPO_MASTER_PARAMS_XLSX = os.path.join("/opt", "MAS-004_RPI-Databridge", "master_data", "Parameterliste SAR41-MAS-004.xlsx")
 FALLBACK_REPO_MASTER_IOS_XLSX = os.path.join("/opt", "MAS-004_RPI-Databridge", "master_data", "SAR41-MAS-004_SPS_I-Os.xlsx")
 MACHINE_SETUP_USER = "Admin"
 MACHINE_SETUP_PASSWORD = "VideojetMAS004!"
 MACHINE_SETUP_COOKIE = "mas004_machine_setup"
 MACHINE_SETUP_SESSION_MAX_AGE_S = 12 * 60 * 60
-MOTOR_REFRESH_CACHE_TTL_S = 0.75
-MOTOR_REFRESH_BUSY_WAIT_S = 0.6
+MOTOR_REFRESH_CACHE_TTL_S = 1.5
+MOTOR_REFRESH_BUSY_WAIT_S = 0.15
+MACHINE_BYPASS_PARAM_DEFS = (
+    {
+        "pkey": "MAP0035",
+        "ptype": "MAP",
+        "pid": "0035",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 1,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "name": "Bypass Drucksystem",
+        "message": "Bypass fuer das aktive Drucksystem. Der echte Drucker blockiert den Prozess dann nicht.",
+    },
+    {
+        "pkey": "MAP0036",
+        "ptype": "MAP",
+        "pid": "0036",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 1,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "name": "Bypass Material-Kontrollkamera",
+        "message": "Bei aktivem Bypass wird die Materialkamera getriggert, Rueckmeldungen werden simuliert.",
+    },
+    {
+        "pkey": "MAP0037",
+        "ptype": "MAP",
+        "pid": "0037",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 1,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "name": "Bypass Druck-Verifikationskamera",
+        "message": "Bei aktivem Bypass wird die OCR/Verifikationskamera getriggert, Rueckmeldungen werden simuliert.",
+    },
+    {
+        "pkey": "MAP0038",
+        "ptype": "MAP",
+        "pid": "0038",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 1,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "name": "Bypass Etiketten-Entnahmesensor",
+        "message": "Bei aktivem Bypass wird keine Entnahmekontrolle/Rueckspulung erzwungen.",
+    },
+    {
+        "pkey": "MAP0067",
+        "ptype": "MAP",
+        "pid": "0067",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 9999,
+        "unit": "n",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "Materialkamera Bypass-Simulation",
+        "message": "0=alle Labels gut, 1=alle schlecht, n=jede n-te Etikette schlecht.",
+    },
+    {
+        "pkey": "MAP0068",
+        "ptype": "MAP",
+        "pid": "0068",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 9999,
+        "unit": "n",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "Verifikationskamera Bypass-Simulation",
+        "message": "0=alle Labels gut, 1=alle schlecht, n=jede n-te Etikette schlecht.",
+    },
+    {
+        "pkey": "MAP0069",
+        "ptype": "MAP",
+        "pid": "0069",
+        "default_v": "2000",
+        "min_v": 0,
+        "max_v": 10000,
+        "unit": "ms",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "Laser Bypass-Druckdauer",
+        "message": "Simulierte Druckdauer in ms, wenn Laser/Drucksystem gebypasst ist.",
+    },
+    {
+        "pkey": "MAP0070",
+        "ptype": "MAP",
+        "pid": "0070",
+        "default_v": "2000",
+        "min_v": 0,
+        "max_v": 10000,
+        "unit": "ms",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "TTO Bypass-Druckdauer",
+        "message": "Simulierte Druckdauer in ms, wenn TTO/Drucksystem gebypasst ist.",
+    },
+)
+
+MACHINE_LED_PARAM_DEFS = (
+    {
+        "pkey": "MAP0071",
+        "ptype": "MAP",
+        "pid": "0071",
+        "default_v": "5200",
+        "min_v": 10,
+        "max_v": 5200,
+        "unit": "0.1mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "format_relevant": "YES",
+        "name": "LED-Streifen aktive Laenge",
+        "message": "Aktiv genutzte LED-Streifenlaenge. Aktuell 520.0 mm, der ESP sendet dafuer 75 Pixel.",
+    },
+    {
+        "pkey": "MAP0072",
+        "ptype": "MAP",
+        "pid": "0072",
+        "default_v": "8",
+        "min_v": 0,
+        "max_v": 1,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "format_relevant": "NO",
+        "name": "LED-Controller UDP aktiv",
+        "message": "1=ESP32-PLC sendet fertige LED-Frames per UDP an den Olimex ESP32-POE-ISO-IND LED-Controller.",
+    },
+    {
+        "pkey": "MAP0073",
+        "ptype": "MAP",
+        "pid": "0073",
+        "default_v": "255",
+        "min_v": 1,
+        "max_v": 255,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint8",
+        "format_relevant": "NO",
+        "name": "LED-Controller Ziel-IP letztes Oktett",
+        "message": "Letztes Oktett im ESP-Netz 192.168.2.x. 110 ist der vorbereitete Olimex-Controller, 255 bedeutet Broadcast.",
+    },
+    {
+        "pkey": "MAP0074",
+        "ptype": "MAP",
+        "pid": "0074",
+        "default_v": "3050",
+        "min_v": 1,
+        "max_v": 65535,
+        "unit": "port",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "format_relevant": "NO",
+        "name": "LED-Controller UDP-Port",
+        "message": "UDP-Port fuer MAS004-LED-UDP/v1 Frames zum externen LED-Controller.",
+    },
+    {
+        "pkey": "MAP0075",
+        "ptype": "MAP",
+        "pid": "0075",
+        "default_v": "33",
+        "min_v": 20,
+        "max_v": 1000,
+        "unit": "ms",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "format_relevant": "NO",
+        "name": "LED-Controller Frame-Intervall",
+        "message": "Minimaler Sendeabstand der LED-Frames. 33 ms entspricht ca. 30 Hz.",
+    },
+)
+
+MACHINE_PROCESS_PARAM_DEFS = (
+    {
+        "pkey": "MAP0076",
+        "ptype": "MAP",
+        "pid": "0076",
+        "default_v": "8",
+        "min_v": -50,
+        "max_v": 50,
+        "unit": "1/10mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "int16",
+        "format_relevant": "NO",
+        "name": "Label-Laengenkompensation",
+        "message": (
+            "Konstante Kompensation der vom Etikettenerfassungssensor gemessenen HIGH-Laenge. "
+            "Default 8 = +0.8 mm, Laengenfehler brauchen Roh- und kompensierten Wert ausserhalb derselben Grenze."
+        ),
+    },
+    {
+        "pkey": "MAP0077",
+        "ptype": "MAP",
+        "pid": "0077",
+        "default_v": "100765",
+        "min_v": 1000,
+        "max_v": 1000000,
+        "unit": "1/1000mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint32",
+        "format_relevant": "NO",
+        "name": "Einlaufencoder Wirkdurchmesser",
+        "message": "Fester Maschinen-Abgleichwert fuer die Einlaufencoder-Skalierung. Default 100765 = 100.765 mm.",
+    },
+    {
+        "pkey": "MAP0078",
+        "ptype": "MAP",
+        "pid": "0078",
+        "default_v": "100649",
+        "min_v": 1000,
+        "max_v": 1000000,
+        "unit": "1/1000mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint32",
+        "format_relevant": "NO",
+        "name": "Auslaufencoder Wirkdurchmesser",
+        "message": "Fester Maschinen-Abgleichwert fuer die Auslauf-/ID3-Encoder-Skalierung. Default 100649 = 100.649 mm.",
+    },
+)
 
 
 def resolve_videojet_logo_path() -> Optional[str]:
@@ -229,6 +489,7 @@ class ConfigUpdate(BaseModel):
     # Microtom
     peer_base_url: Optional[str] = None
     peer_base_url_secondary: Optional[str] = None
+    diclient_adapter_key: Optional[str] = None
     peer_watchdog_host: Optional[str] = None
     peer_health_path: Optional[str] = None
 
@@ -256,12 +517,16 @@ class ConfigUpdate(BaseModel):
     raspi_plc_model: Optional[str] = None
     raspi_io_simulation: Optional[bool] = None
     raspi_io_poll_interval_s: Optional[float] = None
+    light_curtain_auto_reset_enabled: Optional[bool] = None
     moxa1_host: Optional[str] = None
     moxa1_port: Optional[int] = None
     moxa1_simulation: Optional[bool] = None
     moxa2_host: Optional[str] = None
     moxa2_port: Optional[int] = None
     moxa2_simulation: Optional[bool] = None
+    moxa3_host: Optional[str] = None
+    moxa3_port: Optional[int] = None
+    moxa3_simulation: Optional[bool] = None
     moxa_poll_interval_s: Optional[float] = None
     vj3350_host: Optional[str] = None
     vj3350_port: Optional[int] = None
@@ -343,6 +608,7 @@ class MotorConfigReq(BaseModel):
     max_tenths_mm: Optional[int] = None
     min_enabled: Optional[bool] = None
     max_enabled: Optional[bool] = None
+    position_mm: Optional[float] = None
 
 
 class MotorSimulationReq(BaseModel):
@@ -371,8 +637,22 @@ class MachineButtonReq(BaseModel):
     button: str
 
 
+class MachineLedTestReq(BaseModel):
+    action: str = "start"
+    duration_ms: int = 0
+
+
+class Motor3CalibrationApplyReq(BaseModel):
+    actual_travel_mm: float
+    actual_label_length_mm: Optional[float] = None
+
+
 class MachineAuditRetentionReq(BaseModel):
     keep_hours: int
+
+
+class MachineBypassReq(BaseModel):
+    values: Dict[str, Any]
 
 
 class FormatProfileReq(BaseModel):
@@ -435,6 +715,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     motor_refresh_guard = threading.Lock()
     motor_refresh_locks: dict[int, threading.Lock] = {}
     motor_refresh_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+    motor3_calibration_guard = threading.Lock()
+    motor3_calibration_process: dict[str, Any] = {"proc": None, "mode": "", "started_ts": 0.0}
 
     def get_motor_client() -> EspMotorClient:
         return EspMotorClient(Settings.load(cfg_path))
@@ -468,6 +750,10 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     def remember_motor_refresh(motor_id: int, payload: dict[str, Any]) -> None:
         with motor_refresh_guard:
             motor_refresh_cache[int(motor_id)] = (time.monotonic(), json.loads(json.dumps(payload)))
+
+    def last_known_motor_payload(motor_id: int) -> Optional[dict[str, Any]]:
+        motor = get_motor_state_store().cached_motors().get(int(motor_id))
+        return json.loads(json.dumps(motor)) if isinstance(motor, dict) else None
 
     def get_commissioning_store(cfg2: Optional[Settings] = None) -> CommissioningStore:
         return CommissioningStore(db, cfg2 or Settings.load(cfg_path), cfg_path)
@@ -592,6 +878,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "message": "Globales ESP-Motor-Round-Robin ist deaktiviert; Livewerte nur explizit pro Motor.",
         }
 
+    def touch_motor_setup_authority(motor_id: Optional[int] = None, reason: str = "motor_setup_webui") -> None:
+        try:
+            touch_motor_setup_manual_lock(db, motor_id=motor_id, reason=reason, source="webui")
+        except Exception as exc:
+            logs.log("machine", "warning", f"Motor-Setup-Sperre konnte nicht gesetzt werden: {exc}")
+
     def require_motor_ack(result: dict[str, Any], action: str) -> None:
         if not isinstance(result, dict):
             raise HTTPException(status_code=502, detail=f"ESP returned invalid reply for {action}")
@@ -633,7 +925,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 if cached is not None:
                     cached["refresh_in_progress"] = True
                     return cached
-                raise RuntimeError(f"Motor {int(motor_id)} refresh already running")
+                stored = last_known_motor_payload(motor_id)
+                payload: dict[str, Any] = {
+                    "ok": True,
+                    "refresh_in_progress": True,
+                    "cached": bool(stored),
+                    "message": f"Motor {int(motor_id)} Refresh laeuft bereits",
+                }
+                if stored is not None:
+                    payload["motor"] = stored
+                return payload
             if allow_recent_cache:
                 cached = get_cached_motor_refresh(motor_id, MOTOR_REFRESH_CACHE_TTL_S)
                 if cached is not None:
@@ -766,11 +1067,222 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 response["refresh_error"] = str(exc)
         return response
 
+    def motor_status_action_response(
+        client: EspMotorClient,
+        motor_id: int,
+        action: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        require_motor_ack(result, action)
+        response: dict[str, Any] = {
+            "ok": True,
+            "action": action,
+            "reply": result.get("reply") if isinstance(result, dict) else "",
+        }
+        try:
+            status_payload = client.status(motor_id)
+            response["status"] = status_payload
+            raw_motor = status_payload.get("motor") if isinstance(status_payload, dict) else None
+            if isinstance(raw_motor, dict):
+                get_motor_state_store().remember_motors([raw_motor])
+                response["motor"] = raw_motor
+        except Exception as exc:
+            response["status_error"] = str(exc)
+        return response
+
+    def motor_config_action_response(
+        cfg2: Settings,
+        client: EspMotorClient,
+        motor_id: int,
+        action: str,
+        result: dict[str, Any],
+        *,
+        config_payload: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        require_motor_ack(result, action)
+        response: dict[str, Any] = {
+            "ok": True,
+            "action": action,
+            "reply": result.get("reply") if isinstance(result, dict) else "",
+        }
+        cfg_payload = motor_client_call("CONFIG", lambda: client.config(motor_id))
+        response["config"] = cfg_payload
+        current_config = cfg_payload.get("config") if isinstance(cfg_payload, dict) else None
+        motor: dict[str, Any] = {"id": int(motor_id)}
+        try:
+            refresh_payload = refresh_motor_snapshot(client, motor_id, allow_recent_cache=False)
+            response["refresh"] = refresh_payload
+            raw_motor = refresh_payload.get("motor") if isinstance(refresh_payload, dict) else None
+            if isinstance(raw_motor, dict):
+                motor = raw_motor
+        except Exception as exc:
+            response["refresh_error"] = str(exc)
+            try:
+                status_payload = client.status(motor_id)
+                response["status"] = status_payload
+                raw_motor = status_payload.get("motor") if isinstance(status_payload, dict) else None
+                if isinstance(raw_motor, dict):
+                    get_motor_state_store().remember_motors([raw_motor])
+                    motor = raw_motor
+            except Exception as status_exc:
+                response["status_error"] = str(status_exc)
+                motor = last_known_motor_payload(motor_id) or motor
+        if isinstance(current_config, dict):
+            motor["config"] = current_config
+        response["motor"] = motor
+        if config_payload is not None:
+            verify_motor_config_applied(motor_id, response, config_payload)
+        return sync_motor_master_from_response(cfg2, motor_id, action, response)
+
+    def _motor_config_values_equal(actual: Any, expected: Any) -> bool:
+        if isinstance(expected, bool):
+            if isinstance(actual, bool):
+                return actual is expected
+            return str(actual).strip().lower() in ("1", "true", "yes", "on") if expected else str(actual).strip().lower() in ("0", "false", "no", "off")
+        try:
+            if isinstance(expected, int) and not isinstance(expected, bool):
+                return int(round(float(actual))) == int(expected)
+            return abs(float(actual) - float(expected)) <= 0.001
+        except Exception:
+            return str(actual).strip() == str(expected).strip()
+
+    def verify_motor_config_applied(motor_id: int, response: dict[str, Any], payload: dict[str, Any]) -> None:
+        motor = response.get("motor") if isinstance(response, dict) else None
+        config = motor.get("config") if isinstance(motor, dict) else None
+        if not isinstance(config, dict):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Motor {int(motor_id)} Parameter gespeichert, aber Refresh/Config nicht lesbar",
+            )
+        mismatches: list[str] = []
+        for key, expected in payload.items():
+            if expected is None:
+                continue
+            if key not in config or not _motor_config_values_equal(config.get(key), expected):
+                mismatches.append(f"{key}: soll {expected}, ist {config.get(key)}")
+        if mismatches:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Motor {int(motor_id)} Parameter wurden vom ESP nach SAVE nicht bestaetigt: "
+                    + "; ".join(mismatches)
+                ),
+            )
+
+    def verify_motor_feedback_position(motor_id: int, response: dict[str, Any], expected_mm: float) -> None:
+        motor = response.get("motor") if isinstance(response, dict) else None
+        state = motor.get("state") if isinstance(motor, dict) else None
+        feedback = _to_int_or_none((state or {}).get("feedback_tenths_mm")) if isinstance(state, dict) else None
+        expected_tenths = int(round(float(expected_mm) * 10.0))
+        if feedback is None:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Motor {int(motor_id)} Istposition gespeichert, aber Refresh/Istwert nicht lesbar",
+            )
+        if abs(int(feedback) - expected_tenths) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Motor {int(motor_id)} Istposition wurde nicht uebernommen: "
+                    f"soll {expected_tenths / 10.0:.1f}mm, ist {int(feedback) / 10.0:.1f}mm"
+                ),
+            )
+
+    def save_and_refresh_motor_master(
+        cfg2: Settings,
+        client: EspMotorClient,
+        motor_id: int,
+        action: str,
+        result: dict[str, Any],
+        *,
+        config_payload: Optional[dict[str, Any]] = None,
+        expected_position_mm: Optional[float] = None,
+        do_save: bool = True,
+        refresh_after_save: bool = True,
+    ) -> dict[str, Any]:
+        require_motor_ack(result, action)
+        reply_parts = [str(result.get("reply") or "").strip()]
+        if do_save:
+            save_result = motor_client_call(
+                "SAVE",
+                lambda: client.save(motor_id, allow_machine_setup_write=True),
+            )
+            require_motor_ack(save_result, "SAVE")
+            reply_parts.append(str(save_result.get("reply") or "").strip())
+        combined = {"ok": True, "reply": "; ".join(part for part in reply_parts if part)}
+        if not refresh_after_save:
+            response = motor_config_action_response(
+                cfg2,
+                client,
+                motor_id,
+                action,
+                combined,
+                config_payload=config_payload,
+            )
+            if expected_position_mm is not None:
+                verify_motor_feedback_position(motor_id, response, expected_position_mm)
+            return response
+        response = motor_action_response(client, motor_id, action, combined)
+        if config_payload is not None:
+            verify_motor_config_applied(motor_id, response, config_payload)
+        if expected_position_mm is not None:
+            verify_motor_feedback_position(motor_id, response, expected_position_mm)
+        return sync_motor_master_from_response(cfg2, motor_id, action, response)
+
     def motor_master_workbook_paths(cfg2: Settings) -> list[str]:
         paths: list[str] = []
         if cfg2.master_params_xlsx_path:
             paths.append(cfg2.master_params_xlsx_path)
+        paths.extend(
+            [
+                REPO_MASTER_PARAMS_XLSX,
+                WORKSPACE_MASTER_PARAMS_XLSX,
+                FALLBACK_REPO_MASTER_PARAMS_XLSX,
+            ]
+        )
         return paths
+
+    def restore_motor_master_config_to_esp(
+        cfg2: Settings,
+        client: EspMotorClient,
+        motor_id: int,
+        *,
+        restore_position: bool = True,
+    ) -> dict[str, Any]:
+        restore = motor_client_call(
+            "RESTORE_MASTER_CONFIG",
+            lambda: apply_motor_setup_master_config_to_client(
+                params,
+                client,
+                motor_id,
+                restore_position=restore_position,
+            ),
+        )
+        require_motor_ack(restore, "RESTORE_MASTER_CONFIG")
+        payload = restore.get("payload") or {}
+        if not payload:
+            return restore
+        combined = {
+            "ok": True,
+            "reply": str(restore.get("reply") or "").strip(),
+        }
+        response = motor_action_response(client, motor_id, "RESTORE_MASTER_CONFIG", combined)
+        try:
+            verify_payload = dict(payload)
+            if restore.get("position_restored"):
+                # SET_POSITION_MM deliberately recalculates the ESP zero offset
+                # from the current AZD feedback.  The restored position is the
+                # source of truth, so the old stored zero offset must not make
+                # this verification fail immediately after a correct restore.
+                verify_payload.pop("zero_offset_steps", None)
+            verify_motor_config_applied(motor_id, response, verify_payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        response = sync_motor_master_from_response(cfg2, motor_id, "RESTORE_MASTER_CONFIG", response)
+        response["restored"] = True
+        return response
 
     def sync_motor_master_from_response(
         cfg2: Settings,
@@ -789,6 +1301,15 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 raw_motor,
                 get_motor_bindings(),
                 workbook_paths=motor_master_workbook_paths(cfg2),
+                sync_position_default=action in (
+                    "SET_POSITION_MM",
+                    "ZERO",
+                    "SET_CONFIG",
+                    "SAVE",
+                    "SET_MIN",
+                    "SET_MAX",
+                ),
+                allow_protected_position_param_write=True,
             )
             response["master_sync"] = sync_result
             if sync_result.get("updated_pkeys"):
@@ -885,6 +1406,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             ("commissioning", "/ui/machine-setup/commissioning", "Commissioning"),
             ("backups", "/ui/machine-setup/backups", "Backups"),
             ("production", "/ui/machine-setup/production", "Produktion"),
+            ("visualization", "/ui/machine-setup/visualization", "Visualisierung"),
+            ("mae0048", "/ui/machine-setup/mae0048", "MAE0048"),
+            ("calibration", "/ui/machine-setup/calibration", "Kalibrierung"),
             ("process", "/ui/machine-setup/process", "Control / Audit"),
             ("io", "/ui/machine-setup/io", "I/O"),
             ("motors", "/ui/machine-setup/motors", "Motors"),
@@ -1171,11 +1695,53 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "meta": io_store.master_info(),
         }
 
-    def get_io_snapshot() -> dict[str, Any]:
+    def io_device_configured_simulation(cfg_local: Settings, device_code: str) -> bool:
+        code = str(device_code or "").strip().lower()
+        if code == "esp32_plc58":
+            return bool(getattr(cfg_local, "esp_simulation", True))
+        if code == "raspi_plc21":
+            return bool(getattr(cfg_local, "raspi_io_simulation", True))
+        if code in {"moxa_e1211_1", "moxa_e1213_1"}:
+            return bool(getattr(cfg_local, "moxa1_simulation", True))
+        if code in {"moxa_e1211_2", "moxa_e1213_2"}:
+            return bool(getattr(cfg_local, "moxa2_simulation", True))
+        if code == "moxa_e1213_3":
+            return bool(getattr(cfg_local, "moxa3_simulation", True))
+        return False
+
+    def get_io_snapshot(*, live: bool = False) -> dict[str, Any]:
         cfg2 = Settings.load(cfg_path)
         runtime = IoRuntime(cfg2, io_store)
-        payload = runtime.refresh()
-        device_status = {item["device_code"]: item for item in (payload.get("devices") or [])}
+        if live:
+            payload = runtime.refresh()
+            device_status = {item["device_code"]: item for item in (payload.get("devices") or [])}
+        else:
+            points = io_store.list_points(include_reserved=True)
+            payload = {
+                "ok": True,
+                "changed": 0,
+                "devices": [],
+                "points": points,
+                "snapshot_only": True,
+            }
+            device_status = {}
+            grouped_points: dict[str, list[dict[str, Any]]] = {}
+            for point in points:
+                grouped_points.setdefault(str(point.get("device_code") or ""), []).append(point)
+            for device_code, device_points in grouped_points.items():
+                qualities = {str(point.get("quality") or "unknown").lower() for point in device_points}
+                host, port = runtime._device_address(device_code)
+                simulation = io_device_configured_simulation(cfg2, device_code)
+                reachable = (not simulation) and bool(qualities & {"live", "override"})
+                device_status[device_code] = {
+                    "device_code": device_code,
+                    "host": host,
+                    "port": port,
+                    "simulation": simulation,
+                    "reachable": reachable,
+                    "error": "" if simulation or reachable else "kein aktueller Live-Snapshot",
+                }
+            payload["devices"] = list(device_status.values())
         catalog = io_store.list_devices()
         for item in catalog:
             status = device_status.get(item["device_code"], {})
@@ -1192,6 +1758,693 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
         return runtime.snapshot()
+
+    def get_param_value_map(prefixes: tuple[str, ...] = ("MAP", "MAS", "MAE", "MAW")) -> dict[str, str]:
+        placeholders = ",".join("?" for _ in prefixes)
+        with db._conn() as c:
+            rows = c.execute(
+                f"""SELECT p.pkey, COALESCE(v.value, p.default_v, '0')
+                    FROM params p
+                    LEFT JOIN param_values v ON v.pkey = p.pkey
+                    WHERE p.ptype IN ({placeholders})""",
+                tuple(prefixes),
+            ).fetchall()
+        return {str(row[0]): str(row[1] if row[1] is not None else "0") for row in rows}
+
+    def safe_param_float(values: dict[str, str], key: str, default: float = 0.0) -> float:
+        try:
+            return float(str(values.get(key, default)).strip())
+        except Exception:
+            return float(default)
+
+    def safe_param_int(values: dict[str, str], key: str, default: int = 0) -> int:
+        try:
+            return int(float(str(values.get(key, default)).strip()))
+        except Exception:
+            return int(default)
+
+    def parse_esp_json_reply(reply: str, *, command: str = "") -> dict[str, Any]:
+        text = str(reply or "").strip()
+        if text.upper().startswith("JSON "):
+            text = text[5:].strip()
+        if text and not text.endswith(("}", "]")):
+            detail = f"truncated/non-complete JSON reply ({len(text)} chars)"
+            if command:
+                detail = f"{command}: {detail}"
+            detail += f", tail={text[-80:]!r}"
+            raise ValueError(detail)
+        try:
+            return json.loads(text or "{}")
+        except json.JSONDecodeError as exc:
+            detail = f"invalid ESP JSON ({len(text)} chars): {exc}"
+            if command:
+                detail = f"{command}: {detail}"
+            detail += f", tail={text[-80:]!r}"
+            raise ValueError(detail) from exc
+
+    def read_esp_json(client: EspPlcClient, command: str, *, read_timeout_s: float = 2.0, read_limit: int = 4096) -> dict[str, Any]:
+        reply = client.exchange_line(command, read_timeout_s=read_timeout_s, read_limit=read_limit)
+        stripped = str(reply or "").strip()
+        if stripped.upper().startswith("NAK"):
+            raise RuntimeError(f"{command}: {stripped}")
+        return parse_esp_json_reply(reply, command=command)
+
+    def read_compact_esp_visualization(client: EspPlcClient) -> tuple[dict[str, Any], list[str]]:
+        visualization_error = ""
+        try:
+            snapshot = read_esp_json(client, "PROCESS VISUALIZATION?", read_timeout_s=2.0, read_limit=32768)
+            if isinstance(snapshot, dict) and snapshot:
+                return snapshot, []
+        except Exception as exc:
+            visualization_error = str(exc)
+
+        snapshot: dict[str, Any] = {
+            "ok": True,
+            "labels": [],
+        }
+        errors: list[str] = []
+        success_count = 0
+        for key, command in (
+            ("production", "PROCESS PRODUCTION STATUS?"),
+            ("setup_measure", "PROCESS SETUP_MEASURE STATUS?"),
+            ("led_test", "PROCESS LED_TEST STATUS?"),
+        ):
+            try:
+                snapshot[key] = read_esp_json(client, command, read_timeout_s=2.0, read_limit=8192)
+                success_count += 1
+            except Exception as exc:
+                errors.append(str(exc))
+        production = snapshot.get("production") if isinstance(snapshot.get("production"), dict) else {}
+        setup_measure = snapshot.get("setup_measure") if isinstance(snapshot.get("setup_measure"), dict) else {}
+        snapshot["infeed_mm"] = setup_measure.get("infeed_mm", production.get("label_acquire_mm", 0.0))
+        snapshot["drive_mm"] = setup_measure.get("drive_mm", 0.0)
+        snapshot["infeed_speed_mm_s"] = setup_measure.get("command_speed_mm_s", production.get("speed_mm_s", 0.0))
+        snapshot["drive_speed_mm_s"] = snapshot.get("infeed_speed_mm_s", 0.0)
+        snapshot["faults"] = {
+            "label_short": False,
+            "label_long": False,
+            "sensor_fault": False,
+            "band_break": False,
+        }
+        snapshot["compact_fallback"] = True
+        if visualization_error:
+            snapshot["fallback_reason"] = visualization_error
+        if success_count > 0:
+            return snapshot, errors
+        if visualization_error:
+            errors.insert(0, visualization_error)
+        return snapshot, errors
+
+    def recent_completed_labels(limit: int = 80) -> list[dict[str, Any]]:
+        with db._conn() as c:
+            rows = c.execute(
+                """SELECT production_label,label_no,created_ts,completed_ts,zero_mm,exit_mm,
+                          material_ok,print_ok,verify_ok,removed,production_ok,payload_json
+                   FROM label_register
+                   ORDER BY COALESCE(completed_ts, created_ts) DESC, label_no DESC
+                   LIMIT ?""",
+                (int(limit),),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row[11] or "{}")
+            except Exception:
+                payload = {}
+            out.append(
+                {
+                    "production_label": row[0],
+                    "label_no": int(row[1] or 0),
+                    "created_ts": float(row[2] or 0.0),
+                    "completed_ts": float(row[3] or 0.0),
+                    "zero_mm": float(row[4] or 0.0),
+                    "exit_mm": float(row[5] or 0.0),
+                    "material_ok": bool(row[6]),
+                    "print_ok": bool(row[7]),
+                    "verify_ok": bool(row[8]),
+                    "removed": bool(row[9]),
+                    "production_ok": bool(row[10]),
+                    "payload": payload,
+                }
+            )
+        return out
+
+    def build_production_track(values: dict[str, str]) -> dict[str, Any]:
+        material_mm = (safe_param_float(values, "MAP0017", 2200.0) + safe_param_float(values, "MAP0011", 0.0)) / 10.0
+        use_laser = str(values.get("MAP0016", "0")).strip() not in ("", "0", "false", "False", "FALSE")
+        print_key = "MAP0018" if use_laser else "MAP0019"
+        print_mm = (
+            safe_param_float(values, print_key, 7000.0 if use_laser else 11000.0)
+            + safe_param_float(values, "MAP0004", 100.0)
+            + safe_param_float(values, "MAP0006", 0.0)
+        ) / 10.0
+        verify_mm = (safe_param_float(values, "MAP0020", 12700.0) + safe_param_float(values, "MAP0012", 0.0)) / 10.0
+        control_mm = safe_param_float(values, "MAP0021", 19300.0) / 10.0
+        exit_mm = control_mm + 50.0
+        led_offset_mm = safe_param_float(values, "MAP0066", 8000.0) / 10.0
+        led_length_mm = max(1.0, min(520.0, safe_param_float(values, "MAP0071", 5200.0) / 10.0))
+        components = [
+            {"key": "detect", "kind": "detect", "label": "Erfassung", "mm": 0.0},
+            {"key": "material", "kind": "material", "label": "Materialkamera", "mm": material_mm},
+            {"key": "print", "kind": "print", "label": "Druck", "mm": print_mm, "param": print_key},
+            {"key": "verify", "kind": "verify", "label": "Verifikation", "mm": verify_mm},
+            {"key": "control", "kind": "control", "label": "Entnahmesensor", "mm": control_mm},
+            {"key": "exit", "kind": "exit", "label": "Bahn verlassen", "mm": exit_mm},
+            {"key": "led_start", "kind": "detect", "label": "LED 1", "mm": led_offset_mm},
+            {"key": "led_end", "kind": "detect", "label": "LED Ende", "mm": led_offset_mm + led_length_mm},
+        ]
+        length_mm = max(item["mm"] for item in components) + 120.0
+        return {
+            "length_mm": length_mm,
+            "components": sorted(components, key=lambda item: float(item["mm"])),
+        }
+
+    def get_production_visualization_payload() -> dict[str, Any]:
+        cfg2 = Settings.load(cfg_path)
+        machine = get_machine_overview()
+        values = get_param_value_map()
+        format_plan = build_format_plan(values)
+        label = format_plan.get("label") or {}
+        process = format_plan.get("process") or {}
+        esp_snapshot: dict[str, Any] = {}
+        esp_errors: list[str] = []
+        machine_info = dict((machine or {}).get("info") or {})
+        production_info = dict(machine_info.get("production_runtime") or {})
+        start_window = int((machine or {}).get("current_state") or 0) == 4 or bool(
+            production_info.get("pending_start")
+        )
+        if start_window:
+            esp_errors.append("ESP-Liveabfrage waehrend Produktionsstart zur Kanalentlastung pausiert")
+        elif bool(getattr(cfg2, "esp_simulation", False)) or not str(getattr(cfg2, "esp_host", "") or "").strip():
+            esp_errors.append("ESP-Simulation aktiv" if bool(getattr(cfg2, "esp_simulation", False)) else "ESP-Endpunkt fehlt")
+        else:
+            try:
+                timeout_s = float(getattr(cfg2, "http_timeout_s", 1.5) or 1.5)
+                client = EspPlcClient(cfg2.esp_host, int(cfg2.esp_port), timeout_s=timeout_s)
+                esp_snapshot, esp_errors = read_compact_esp_visualization(client)
+            except Exception as exc:
+                esp_errors.append(repr(exc))
+        active_labels = list(esp_snapshot.get("labels") or [])
+        esp_error = "; ".join(str(item) for item in esp_errors if str(item).strip())
+        led_offset_mm = safe_param_float(values, "MAP0066", 8000.0) / 10.0
+        led_length_mm = max(1.0, min(520.0, safe_param_float(values, "MAP0071", 5200.0) / 10.0))
+        led_pitch_mm = 6.95
+        led_count = max(1, min(75, int(math.ceil(led_length_mm / led_pitch_mm))))
+        led_physical_length_mm = led_count * led_pitch_mm
+        led_controller_last_octet = safe_param_int(values, "MAP0073", 255)
+        led_controller_port = safe_param_int(values, "MAP0074", 3050)
+        led_controller_enabled = safe_param_int(values, "MAP0072", 1) != 0
+        return {
+            "ok": not bool(esp_error and not esp_snapshot),
+            "ts": time.time(),
+            "machine": machine,
+            "esp_snapshot": esp_snapshot,
+            "esp_error": esp_error,
+            "active_labels": active_labels,
+            "completed_labels": recent_completed_labels(limit=80),
+            "format": {
+                "label_length_mm": float(label.get("length_tenths_mm") or 0) / 10.0,
+                "label_tolerance_mm": float(label.get("length_tolerance_tenths_mm") or 0) / 10.0,
+                "transport_speed_mm_s": process.get("transport_speed_mm_s"),
+                "active_printer": (format_plan.get("printer") or {}).get("active"),
+                "print_distance_mm": float((format_plan.get("printer") or {}).get("stop_distance_tenths_mm") or 0) / 10.0,
+            },
+            "track": build_production_track(values),
+            "led": {
+                "pin": None,
+                "pin_label": "Olimex ESP32-POE-ISO-IND LED-Controller",
+                "documented_io_pin": "UDP",
+                "documented_io_pin_id": "MAS004-LED-UDP/v1",
+                "documented_io_pin_label": "ESP32-PLC Schieberegister -> UDP -> Olimex WS2812-Controller",
+                "fastled_requires_raw_gpio": False,
+                "documented_io_pin_fastled_capable": False,
+                "output": "external_udp",
+                "protocol": "MAS004-LED-UDP/v1",
+                "controller_source": "ESP32-PLC Prozess-Schieberegister",
+                "controller_target": f"192.168.2.{led_controller_last_octet}:{led_controller_port}",
+                "controller_broadcast": led_controller_last_octet == 255,
+                "controller_enabled": led_controller_enabled,
+                "frame_interval_ms": safe_param_int(values, "MAP0075", 33),
+                "warning": (
+                    "Die PLC58 treibt keinen WS2812-Pin mehr. Sie sendet fertige RGB-Frames "
+                    "direkt aus dem ESP-Schieberegister per UDP an den Olimex ESP32-POE-ISO-IND LED-Controller."
+                ),
+                "count": led_count,
+                "max_count": 75,
+                "pitch_mm": led_pitch_mm,
+                "offset_mm": led_offset_mm,
+                "length_mm": led_length_mm,
+                "physical_length_mm": led_physical_length_mm,
+                "first_led_distance_tenths_mm": safe_param_int(values, "MAP0066", 8000),
+                "strip_length_tenths_mm": safe_param_int(values, "MAP0071", 5200),
+            },
+        }
+
+    def execute_led_test_command(cfg2: Settings, body: MachineLedTestReq) -> dict[str, Any]:
+        action = (body.action or "start").strip().lower()
+        if action == "stop":
+            command = "PROCESS LED_TEST STOP"
+        elif action == "status":
+            command = "PROCESS LED_TEST STATUS?"
+        elif action in ("high", "static_high", "tx1_high"):
+            duration_ms = int(body.duration_ms or 0)
+            if duration_ms <= 0:
+                command = "PROCESS LED_TEST HIGH DURATION_MS=0"
+            else:
+                duration_ms = max(250, min(10000, duration_ms))
+                command = f"PROCESS LED_TEST HIGH DURATION_MS={duration_ms}"
+        elif action in ("", "start", "red"):
+            duration_ms = int(body.duration_ms or 0)
+            if duration_ms <= 0:
+                command = "PROCESS LED_TEST RED DURATION_MS=0"
+            else:
+                duration_ms = max(250, min(10000, duration_ms))
+                command = f"PROCESS LED_TEST RED DURATION_MS={duration_ms}"
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown LED test action {body.action!r}")
+
+        if bool(getattr(cfg2, "esp_simulation", False)) or not str(getattr(cfg2, "esp_host", "") or "").strip():
+            return {
+                "ok": True,
+                "simulation": True,
+                "command": command,
+                "reply": "SIM_PROCESS_LED_TEST",
+            }
+
+        try:
+            timeout_s = float(getattr(cfg2, "http_timeout_s", 1.5) or 1.5)
+            client = EspPlcClient(cfg2.esp_host, int(cfg2.esp_port), timeout_s=timeout_s)
+            reply = client.exchange_line(command, read_timeout_s=2.0, read_limit=4096)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"ESP LED test failed: {exc!r}") from exc
+
+        payload: dict[str, Any] = {"ok": True, "command": command, "reply": reply}
+        if str(reply or "").strip().upper().startswith("NAK"):
+            raise HTTPException(status_code=409, detail=payload)
+        if str(reply or "").strip().upper().startswith("JSON "):
+            try:
+                payload["status"] = parse_esp_json_reply(reply)
+            except Exception:
+                pass
+        return payload
+
+    def ensure_machine_bypass_params() -> None:
+        ts = time.time()
+        with db._conn() as c:
+            for spec in MACHINE_BYPASS_PARAM_DEFS:
+                exists = c.execute("SELECT 1 FROM params WHERE pkey=?", (spec["pkey"],)).fetchone()
+                if not exists:
+                    c.execute(
+                        """INSERT INTO params(
+                           pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                           message,possible_cause,effects,remedy,ai_instructions,updated_ts
+                           )
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            spec["pkey"],
+                            spec["ptype"],
+                            spec["pid"],
+                            spec.get("min_v"),
+                            spec.get("max_v"),
+                            spec.get("default_v"),
+                            spec.get("unit"),
+                            spec.get("rw"),
+                            spec.get("esp_rw"),
+                            spec.get("dtype"),
+                            spec.get("name"),
+                            "NO",
+                            spec.get("message"),
+                            "",
+                            "",
+                            "",
+                            (
+                                "KI: Ich verstehe diesen Parameter als produktionsrelevante "
+                                "Bypass-/Simulationsvorgabe. Er wird ueber die Prozessseite "
+                                "oder Microtom gesetzt und zur ESP32-PLC gespiegelt."
+                            ),
+                            ts,
+                        ),
+                    )
+                c.execute(
+                    "UPDATE params SET rw=?, esp_rw=?, format_relevant=?, name=?, message=?, updated_ts=? WHERE pkey=?",
+                    (
+                        spec.get("rw"),
+                        spec.get("esp_rw"),
+                        "NO",
+                        spec.get("name"),
+                        spec.get("message"),
+                        ts,
+                        spec["pkey"],
+                    ),
+                )
+
+    def ensure_machine_led_params() -> None:
+        ts = time.time()
+        with db._conn() as c:
+            for spec in MACHINE_LED_PARAM_DEFS:
+                exists = c.execute("SELECT 1 FROM params WHERE pkey=?", (spec["pkey"],)).fetchone()
+                if not exists:
+                    c.execute(
+                        """INSERT INTO params(
+                           pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                           message,possible_cause,effects,remedy,ai_instructions,updated_ts
+                           )
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            spec["pkey"],
+                            spec["ptype"],
+                            spec["pid"],
+                            spec.get("min_v"),
+                            spec.get("max_v"),
+                            spec.get("default_v"),
+                            spec.get("unit"),
+                            spec.get("rw"),
+                            spec.get("esp_rw"),
+                            spec.get("dtype"),
+                            spec.get("name"),
+                            spec.get("format_relevant", "NO"),
+                            spec.get("message"),
+                            "",
+                            "",
+                            "",
+                            (
+                                "KI: Ich verstehe diesen Parameter als LED-Controller-Vorgabe. "
+                                "Der ESP32-PLC Prozess rendert daraus fertige UDP-Frames fuer "
+                                "einen externen WS2812-Controller."
+                            ),
+                            ts,
+                        ),
+                    )
+                c.execute(
+                    """UPDATE params
+                       SET rw=?, esp_rw=?, format_relevant=?, name=?, message=?, min_v=?, max_v=?, default_v=?, updated_ts=?
+                       WHERE pkey=?""",
+                    (
+                        spec.get("rw"),
+                        spec.get("esp_rw"),
+                        spec.get("format_relevant", "NO"),
+                        spec.get("name"),
+                        spec.get("message"),
+                        spec.get("min_v"),
+                        spec.get("max_v"),
+                        spec.get("default_v"),
+                        ts,
+                        spec["pkey"],
+                    ),
+                )
+
+    def ensure_machine_process_params() -> None:
+        ts = time.time()
+        with db._conn() as c:
+            for spec in MACHINE_PROCESS_PARAM_DEFS:
+                exists = c.execute("SELECT 1 FROM params WHERE pkey=?", (spec["pkey"],)).fetchone()
+                if not exists:
+                    c.execute(
+                        """INSERT INTO params(
+                           pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                           message,possible_cause,effects,remedy,ai_instructions,updated_ts
+                           )
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            spec["pkey"],
+                            spec["ptype"],
+                            spec["pid"],
+                            spec.get("min_v"),
+                            spec.get("max_v"),
+                            spec.get("default_v"),
+                            spec.get("unit"),
+                            spec.get("rw"),
+                            spec.get("esp_rw"),
+                            spec.get("dtype"),
+                            spec.get("name"),
+                            spec.get("format_relevant", "NO"),
+                            spec.get("message"),
+                            "",
+                            "",
+                            "",
+                            (
+                                "KI: Ich verstehe diesen Parameter als Prozess-/Sensor-Kalibrierwert. "
+                                "Er wird vom Raspi zur ESP32-PLC gespiegelt und beeinflusst die "
+                                "bewertete Etikettenlaenge, nicht die Encoder-Wegskalierung."
+                            ),
+                            ts,
+                        ),
+                    )
+                c.execute(
+                    """UPDATE params
+                       SET rw=?, esp_rw=?, format_relevant=?, name=?, message=?, min_v=?, max_v=?, default_v=?, updated_ts=?
+                       WHERE pkey=?""",
+                    (
+                        spec.get("rw"),
+                        spec.get("esp_rw"),
+                        spec.get("format_relevant", "NO"),
+                        spec.get("name"),
+                        spec.get("message"),
+                        spec.get("min_v"),
+                        spec.get("max_v"),
+                        spec.get("default_v"),
+                        ts,
+                        spec["pkey"],
+                    ),
+                )
+
+    ensure_machine_bypass_params()
+    ensure_machine_led_params()
+    ensure_machine_process_params()
+
+    def get_machine_bypass_payload() -> dict[str, Any]:
+        ensure_machine_bypass_params()
+        items = []
+        for spec in MACHINE_BYPASS_PARAM_DEFS:
+            pkey = str(spec["pkey"])
+            meta = params.get_meta(pkey) or {}
+            items.append(
+                {
+                    "pkey": pkey,
+                    "value": params.get_effective_value(pkey),
+                    "default_v": meta.get("default_v"),
+                    "min_v": meta.get("min_v"),
+                    "max_v": meta.get("max_v"),
+                    "unit": meta.get("unit") or spec.get("unit") or "",
+                    "dtype": meta.get("dtype") or spec.get("dtype") or "",
+                    "name": meta.get("name") or spec.get("name") or pkey,
+                    "message": meta.get("message") or spec.get("message") or "",
+                    "can_write_microtom": params.can_actor_write(pkey, actor="microtom"),
+                }
+            )
+        return {"ok": True, "parameters": items}
+
+    def write_machine_bypass_values(values: Dict[str, Any]) -> dict[str, Any]:
+        ensure_machine_bypass_params()
+        allowed = {str(item["pkey"]) for item in MACHINE_BYPASS_PARAM_DEFS}
+        router = Router(Settings.load(cfg_path), inbox, outbox, params, logs)
+        results = []
+        for raw_key, raw_value in sorted((values or {}).items()):
+            pkey = str(raw_key or "").strip().upper()
+            if pkey not in allowed:
+                results.append({"pkey": pkey, "ok": False, "error": "NAK_NotBypassParam"})
+                continue
+            meta = params.get_meta(pkey) or {}
+            if not params.can_actor_write(pkey, actor="microtom"):
+                results.append({"pkey": pkey, "ok": False, "error": "NAK_ReadOnly"})
+                continue
+            try:
+                value = int(float(str(raw_value).strip()))
+            except Exception:
+                results.append({"pkey": pkey, "ok": False, "error": "NAK_Syntax"})
+                continue
+            min_v = meta.get("min_v")
+            max_v = meta.get("max_v")
+            if min_v is not None and value < int(float(min_v)):
+                results.append({"pkey": pkey, "ok": False, "error": "NAK_OutOfRange"})
+                continue
+            if max_v is not None and value > int(float(max_v)):
+                results.append({"pkey": pkey, "ok": False, "error": "NAK_OutOfRange"})
+                continue
+            line = f"{pkey}={value}"
+            response = router.handle_microtom_line(line, correlation=f"machine-bypass:{pkey}")
+            results.append({"pkey": pkey, "line": line, "response": response, "ok": bool(response) and "NAK" not in str(response).upper()})
+        return {"ok": all(bool(item.get("ok")) for item in results), "results": results, "bypass": get_machine_bypass_payload()}
+
+    def motor3_calibration_script_path() -> str:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(repo_root, "scripts", "diagnose_motor3_travel_2000.py")
+
+    def motor3_calibration_result_path() -> str:
+        return "/tmp/mas004_motor3_travel_2000_result.json"
+
+    def read_motor3_calibration_result() -> dict[str, Any]:
+        path = motor3_calibration_result_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            return payload if isinstance(payload, dict) else {}
+        except Exception as exc:
+            return {"error": repr(exc), "path": path}
+
+    def esp_json(cfg2: Settings, line: str, timeout_s: float = 5.0) -> dict[str, Any]:
+        client = EspPlcClient(
+            cfg2.esp_host,
+            cfg2.esp_port,
+            timeout_s=cfg2.get_float("esp_connect_timeout_s", 1.5),
+        )
+        text = client.exchange_line(line, read_timeout_s=timeout_s)
+        raw = str(text or "").strip()
+        if raw.upper().startswith("JSON "):
+            raw = raw[5:].strip()
+        try:
+            return dict(json.loads(raw))
+        except Exception:
+            return {"raw": raw}
+
+    def motor3_calibration_status(cfg2: Settings) -> dict[str, Any]:
+        with motor3_calibration_guard:
+            proc = motor3_calibration_process.get("proc")
+            if proc is not None and proc.poll() is not None:
+                motor3_calibration_process["returncode"] = proc.returncode
+                motor3_calibration_process["proc"] = None
+                proc = None
+            running = proc is not None
+            process_info = {
+                "running": running,
+                "mode": motor3_calibration_process.get("mode") or "",
+                "started_ts": motor3_calibration_process.get("started_ts") or 0.0,
+                "returncode": motor3_calibration_process.get("returncode"),
+            }
+        ensure_machine_process_params()
+        result = read_motor3_calibration_result()
+        live: dict[str, Any] = {}
+        motor3: dict[str, Any] = {}
+        try:
+            live = esp_json(cfg2, "PROCESS TRAVEL_DIAG STATUS?", timeout_s=5.0)
+        except Exception as exc:
+            live = {"error": repr(exc)}
+        try:
+            motor3_payload = esp_json(cfg2, "MOTOR 3 REFRESH", timeout_s=5.0)
+            motor3 = motor3_payload.get("motor") if isinstance(motor3_payload.get("motor"), dict) else motor3_payload
+        except Exception as exc:
+            motor3 = {"error": repr(exc)}
+        return {
+            "ok": True,
+            **process_info,
+            "script": motor3_calibration_script_path(),
+            "result_path": motor3_calibration_result_path(),
+            "result": result,
+            "travel_diag": live,
+            "motor3": motor3,
+            "params": {
+                key: params.get_effective_value(key)
+                for key in ("MAP0076", "MAP0077", "MAP0078")
+            },
+        }
+
+    def start_motor3_calibration_process(mode: str) -> dict[str, Any]:
+        script = motor3_calibration_script_path()
+        if not os.path.exists(script):
+            raise RuntimeError(f"Kalibrier-Script nicht gefunden: {script}")
+        if mode not in {"prepare", "run"}:
+            raise RuntimeError(f"Ungueltiger Kalibriermodus: {mode}")
+        with motor3_calibration_guard:
+            proc = motor3_calibration_process.get("proc")
+            if proc is not None and proc.poll() is None:
+                raise RuntimeError(f"Kalibrierung laeuft bereits: {motor3_calibration_process.get('mode')}")
+            python_exe = shutil.which("python3") or shutil.which("python") or "python3"
+            proc = subprocess.Popen(
+                [python_exe, script, mode],
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            motor3_calibration_process.update(
+                {"proc": proc, "mode": mode, "started_ts": time.time(), "returncode": None}
+            )
+            return {"ok": True, "mode": mode, "pid": proc.pid, "script": script}
+
+    def _safe_float_value(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(str(value).strip())
+        except Exception:
+            return float(default)
+
+    def apply_motor3_calibration(cfg2: Settings, body: Motor3CalibrationApplyReq) -> dict[str, Any]:
+        ensure_machine_process_params()
+        result = read_motor3_calibration_result()
+        final_snapshot = result.get("final_snapshot") if isinstance(result.get("final_snapshot"), dict) else {}
+        final_motor = result.get("final_motor") if isinstance(result.get("final_motor"), dict) else {}
+        start_motor = result.get("start_motor") if isinstance(result.get("start_motor"), dict) else {}
+        actual_travel = float(body.actual_travel_mm)
+        if not math.isfinite(actual_travel) or actual_travel < 100.0:
+            raise RuntimeError("Real gefahrene Strecke ungueltig")
+        target_mm = _safe_float_value(result.get("target_mm"), 2000.0)
+        measured_infeed = _safe_float_value(final_snapshot.get("infeed_mm"), 0.0)
+        measured_drive = _safe_float_value(final_snapshot.get("drive_mm"), 0.0)
+        if abs(measured_infeed) < 100.0 or abs(measured_drive) < 100.0:
+            raise RuntimeError(f"Keine nutzbare 2000-mm-Messung vorhanden: {final_snapshot}")
+        current_infeed_um = _safe_float_value(params.get_effective_value("MAP0077"), 100765.0)
+        current_drive_um = _safe_float_value(params.get_effective_value("MAP0078"), 100649.0)
+        config = final_motor.get("config") if isinstance(final_motor.get("config"), dict) else {}
+        start_config = start_motor.get("config") if isinstance(start_motor.get("config"), dict) else {}
+        current_steps = _safe_float_value(
+            config.get("steps_per_mm") or final_motor.get("steps_per_mm") or start_config.get("steps_per_mm"),
+            31.627315,
+        )
+        new_infeed_um = int(round(current_infeed_um * (actual_travel / measured_infeed)))
+        new_drive_um = int(round(current_drive_um * (actual_travel / measured_drive)))
+        new_steps = current_steps * (target_mm / actual_travel)
+
+        labels = result.get("labels_first_10") if isinstance(result.get("labels_first_10"), list) else []
+        raw_lengths = [
+            _safe_float_value(item.get("raw_length_mm"), 0.0)
+            for item in labels
+            if isinstance(item, dict) and _safe_float_value(item.get("raw_length_mm"), 0.0) > 1.0
+        ]
+        calculated: dict[str, Any] = {
+            "motor3_steps_per_mm": round(new_steps, 6),
+            "MAP0077": new_infeed_um,
+            "MAP0078": new_drive_um,
+            "measured_infeed_mm": measured_infeed,
+            "measured_drive_mm": measured_drive,
+            "actual_travel_mm": actual_travel,
+        }
+        actual_label_length = (
+            _safe_float_value(body.actual_label_length_mm, 0.0)
+            if body.actual_label_length_mm is not None
+            else 0.0
+        )
+        if actual_label_length > 1.0 and raw_lengths:
+            raw_avg = sum(raw_lengths) / len(raw_lengths)
+            label_comp_tenths = int(round((actual_label_length - raw_avg) * 10.0))
+            calculated["raw_label_avg_mm"] = round(raw_avg, 4)
+            calculated["MAP0076"] = max(-50, min(50, label_comp_tenths))
+
+        if abs(new_steps / current_steps - 1.0) > 0.05:
+            raise RuntimeError(f"ID3-Korrektur >5% gesperrt: alt={current_steps}, neu={new_steps}")
+        if abs(new_infeed_um / current_infeed_um - 1.0) > 0.05:
+            raise RuntimeError(f"Einlaufencoder-Korrektur >5% gesperrt: alt={current_infeed_um}, neu={new_infeed_um}")
+        if abs(new_drive_um / current_drive_um - 1.0) > 0.05:
+            raise RuntimeError(f"Auslaufencoder-Korrektur >5% gesperrt: alt={current_drive_um}, neu={new_drive_um}")
+
+        router = Router(cfg2, inbox, outbox, params, logs)
+        esp = EspPlcClient(
+            cfg2.esp_host,
+            cfg2.esp_port,
+            timeout_s=cfg2.get_float("esp_connect_timeout_s", 1.5),
+        )
+        writes: list[dict[str, Any]] = []
+        motor_set = esp.exchange_line(f"MOTOR 3 SET steps_per_mm={new_steps:.6f}", read_timeout_s=5.0)
+        motor_save = esp.exchange_line("MOTOR 3 SAVE", read_timeout_s=5.0)
+        writes.append({"target": "MOTOR3", "set": motor_set, "save": motor_save})
+        for key in ("MAP0077", "MAP0078", "MAP0076"):
+            if key not in calculated:
+                continue
+            value = str(int(calculated[key]))
+            response = router.handle_microtom_line(f"{key}={value}", correlation=f"motor3-calibration:{key}")
+            sync_response = esp.exchange_line(f"SYNC {key}={value}", read_timeout_s=5.0)
+            writes.append({"pkey": key, "value": value, "response": response, "sync": sync_response})
+        return {"ok": True, "calculated": calculated, "writes": writes, "result": result}
 
     def is_format_relevant(value: Any) -> bool:
         text = str(value or "").strip().lower()
@@ -1345,6 +2598,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     "simulation": bool(getattr(cfg2, "moxa2_simulation", True)),
                     "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
                 },
+                "moxa3": {
+                    "host": getattr(cfg2, "moxa3_host", ""),
+                    "port": int(getattr(cfg2, "moxa3_port", 0) or 0),
+                    "simulation": bool(getattr(cfg2, "moxa3_simulation", True)),
+                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
+                },
                 "vj3350": {
                     "host": cfg2.vj3350_host,
                     "port": cfg2.vj3350_port,
@@ -1394,6 +2653,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         d = cfg2.__dict__.copy()
         d["ui_token"] = "***"
         d["shared_secret"] = "***" if (cfg2.shared_secret or "") else ""
+        d["diclient_adapter_key"] = "***" if (getattr(cfg2, "diclient_adapter_key", "") or "") else ""
         return {"ok": True, "config": d}
 
     @app.post("/api/config")
@@ -1585,6 +2845,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                             logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
                         elif event and event.get("event") == "stop":
                             logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
+                        if pkey == "MAS0028" and rhs.strip().lower() in ("", "0", "false", "off", "no", "none", "null"):
+                            mark_external_purge_clear(db, source=src)
+                            deleted = outbox.delete_status_updates("MAS0028")
+                            if deleted:
+                                logs.log("raspi", "info", f"cleared {deleted} pending stale MAS0028 status callback(s)")
 
             if src == "raspi":
                 logs.log("raspi", "out", f"manual->microtom: {line}")
@@ -1731,6 +2996,13 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     master_path = cfg2.master_params_xlsx_path
                     os.makedirs(os.path.dirname(master_path), exist_ok=True)
                     shutil.copyfile(tmp_path, master_path)
+                    motor_restore = reapply_motor_setup_master_to_params(
+                        params,
+                        cfg2,
+                        get_motor_bindings(),
+                        workbook_paths=motor_master_workbook_paths(cfg2),
+                    )
+                    res["motor_setup_master_reapplied"] = motor_restore
                     res["master_workbook"] = get_master_workbook_info()
                 return res
             finally:
@@ -1853,10 +3125,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         request: Request,
         device: Optional[str] = Query(default=None),
         include_reserved: bool = Query(default=True),
+        live: bool = Query(default=False),
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
-        payload = get_io_snapshot()
+        payload = get_io_snapshot(live=live)
         if device:
             payload["points"] = [
                 item
@@ -2063,18 +3336,21 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(reason="motors_overview")
         return get_motor_overview_payload()
 
     @app.get("/api/motors/poll")
     def api_motor_poll_state(request: Request):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(reason="motors_poll_state")
         return get_motor_poll_payload(cfg2)
 
     @app.post("/api/motors/poll")
     def api_motor_poll_set(request: Request, body: MotorPollReq):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(reason="motors_poll_set")
         client = EspMotorClient(cfg2)
         if not client.available():
             raise HTTPException(status_code=503, detail="ESP motor endpoint missing or simulation enabled")
@@ -2099,6 +3375,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_status")
         if not motor_live_allowed(motor_id, cfg2):
             merged = get_motor_overview_payload()
             for motor in merged.get("motors") or []:
@@ -2127,6 +3404,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_move")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         mode = (body.mode or "").strip().lower()
@@ -2136,13 +3414,13 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "MOVE_REL_STEPS",
                 lambda: client.move_relative_steps(motor_id, int(round(body.value))),
             )
-            return motor_action_response(client, motor_id, "MOVE_REL_STEPS", result)
+            return motor_status_action_response(client, motor_id, "MOVE_REL_STEPS", result)
         if mode == "relative_mm":
             result = motor_client_call("MOVE_REL_MM", lambda: client.move_relative_mm(motor_id, float(body.value)))
-            return motor_action_response(client, motor_id, "MOVE_REL_MM", result)
+            return motor_status_action_response(client, motor_id, "MOVE_REL_MM", result)
         if mode == "absolute_mm":
             result = motor_client_call("MOVE_ABS_MM", lambda: client.move_absolute_mm(motor_id, float(body.value)))
-            return motor_action_response(client, motor_id, "MOVE_ABS_MM", result)
+            return motor_status_action_response(client, motor_id, "MOVE_ABS_MM", result)
         raise HTTPException(status_code=400, detail="Unsupported motor move mode")
 
     @app.post("/api/motors/{motor_id}/position")
@@ -2155,20 +3433,29 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_position")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         result = motor_client_call(
             "SET_POSITION_MM",
-            lambda: client.set_current_position_mm(motor_id, float(body.value)),
+            lambda: client.set_current_position_mm(
+                motor_id,
+                float(body.value),
+                allow_machine_setup_write=True,
+            ),
         )
         require_motor_ack(result, "SET_POSITION_MM")
-        save_result = motor_client_call("SAVE", lambda: client.save(motor_id))
+        save_result = motor_client_call(
+            "SAVE",
+            lambda: client.save(motor_id, allow_machine_setup_write=True),
+        )
         require_motor_ack(save_result, "SAVE")
         combined = {
             "ok": True,
             "reply": f"{result.get('reply', '')}; {save_result.get('reply', '')}".strip("; "),
         }
         response = motor_action_response(client, motor_id, "SET_POSITION_MM", combined)
+        verify_motor_feedback_position(motor_id, response, float(body.value))
         return sync_motor_master_from_response(cfg2, motor_id, "SET_POSITION_MM", response)
 
     @app.post("/api/motors/{motor_id}/config")
@@ -2181,7 +3468,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_config")
         payload = body.model_dump(exclude_none=True)
+        position_mm = payload.pop("position_mm", None)
         if int(motor_id) != 3:
             if payload.get("min_enabled") is False:
                 raise HTTPException(
@@ -2210,8 +3499,40 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 raise HTTPException(status_code=409, detail="Min-Grenze darf nicht groesser als Max-Grenze sein")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = motor_client_call("SET_CONFIG", lambda: client.set_config(motor_id, payload))
-        return motor_action_response(client, motor_id, "SET_CONFIG", result)
+        result = motor_client_call(
+            "SET_CONFIG",
+            lambda: client.set_config(motor_id, payload, allow_machine_setup_write=True),
+        )
+        response = save_and_refresh_motor_master(
+            cfg2,
+            client,
+            motor_id,
+            "SET_CONFIG",
+            result,
+            config_payload=payload,
+            refresh_after_save=False,
+        )
+        if position_mm is None:
+            return response
+
+        position_result = motor_client_call(
+            "SET_POSITION_MM",
+            lambda: client.set_current_position_mm(
+                motor_id,
+                float(position_mm),
+                allow_machine_setup_write=True,
+            ),
+        )
+        position_response = save_and_refresh_motor_master(
+            cfg2,
+            client,
+            motor_id,
+            "SET_POSITION_MM",
+            position_result,
+            expected_position_mm=float(position_mm),
+        )
+        position_response["config_save"] = response
+        return position_response
 
     @app.post("/api/motors/{motor_id}/save")
     def api_motor_save(
@@ -2222,11 +3543,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_save")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = motor_client_call("SAVE", lambda: client.save(motor_id))
-        response = motor_action_response(client, motor_id, "SAVE", result)
-        return sync_motor_master_from_response(cfg2, motor_id, "SAVE", response)
+        result = motor_client_call(
+            "SAVE",
+            lambda: client.save(motor_id, allow_machine_setup_write=True),
+        )
+        return motor_config_action_response(cfg2, client, motor_id, "SAVE", result)
 
     @app.post("/api/motors/{motor_id}/zero")
     def api_motor_zero(
@@ -2237,10 +3561,11 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_zero")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = motor_client_call("ZERO", lambda: client.zero(motor_id))
-        return motor_action_response(client, motor_id, "ZERO", result)
+        result = motor_client_call("ZERO", lambda: client.zero(motor_id, allow_machine_setup_write=True))
+        return save_and_refresh_motor_master(cfg2, client, motor_id, "ZERO", result, expected_position_mm=0.0)
 
     @app.post("/api/motors/{motor_id}/min")
     def api_motor_min(
@@ -2251,10 +3576,18 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_min")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = motor_client_call("SET_MIN", lambda: client.set_min(motor_id))
-        return motor_action_response(client, motor_id, "SET_MIN", result)
+        result = motor_client_call("SET_MIN", lambda: client.set_min(motor_id, allow_machine_setup_write=True))
+        return save_and_refresh_motor_master(
+            cfg2,
+            client,
+            motor_id,
+            "SET_MIN",
+            result,
+            refresh_after_save=False,
+        )
 
     @app.post("/api/motors/{motor_id}/max")
     def api_motor_max(
@@ -2265,10 +3598,18 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_max")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
-        result = motor_client_call("SET_MAX", lambda: client.set_max(motor_id))
-        return motor_action_response(client, motor_id, "SET_MAX", result)
+        result = motor_client_call("SET_MAX", lambda: client.set_max(motor_id, allow_machine_setup_write=True))
+        return save_and_refresh_motor_master(
+            cfg2,
+            client,
+            motor_id,
+            "SET_MAX",
+            result,
+            refresh_after_save=False,
+        )
 
     @app.post("/api/motors/{motor_id}/reset-alarm")
     def api_motor_reset_alarm(
@@ -2279,6 +3620,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_reset_alarm")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         result = motor_client_call("RESET_ALARM", lambda: client.reset_alarm(motor_id))
@@ -2293,6 +3635,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_refresh")
         require_live_motor_or_raise(motor_id, cfg2)
         client = EspMotorClient(cfg2)
         return motor_client_call("REFRESH", lambda: refresh_motor_snapshot(client, motor_id))
@@ -2307,6 +3650,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        touch_motor_setup_authority(motor_id=motor_id, reason="motor_simulation")
         store = get_motor_state_store()
         ids = sorted(store.set_simulation(motor_id, bool(body.enabled)))
         merged = get_motor_overview_payload()
@@ -2333,15 +3677,83 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         require_machine_setup_session(request, cfg2)
         return get_machine_overview()
 
+    @app.get("/api/machine/production-visualization")
+    def api_machine_production_visualization(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_production_visualization_payload()
+
+    @app.get("/api/machine/mae0048-diagnostics")
+    def api_machine_mae0048_diagnostics(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return collect_mae0048_diagnostics(cfg2, db)
+
+    @app.get("/api/machine/motor3-calibration/status")
+    def api_machine_motor3_calibration_status(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return motor3_calibration_status(cfg2)
+
+    @app.post("/api/machine/motor3-calibration/prepare")
+    def api_machine_motor3_calibration_prepare(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return start_motor3_calibration_process("prepare")
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/api/machine/motor3-calibration/start")
+    def api_machine_motor3_calibration_start(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return start_motor3_calibration_process("run")
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/api/machine/motor3-calibration/apply")
+    def api_machine_motor3_calibration_apply(request: Request, body: Motor3CalibrationApplyReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            return apply_motor3_calibration(cfg2, body)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/machine/led-test")
+    def api_machine_led_test(request: Request, body: MachineLedTestReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return execute_led_test_command(cfg2, body)
+
     @app.post("/api/machine/button")
     def api_machine_button(request: Request, body: MachineButtonReq):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
+        clear_motor_setup_manual_lock(db, reason=f"machine_button:{body.button}")
         runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
         try:
             return runtime.press_virtual_button(body.button)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/machine/bypass")
+    def api_machine_bypass(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return get_machine_bypass_payload()
+
+    @app.post("/api/machine/bypass")
+    def api_machine_bypass_update(request: Request, body: MachineBypassReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        payload = write_machine_bypass_values(body.values)
+        if not bool(payload.get("ok")):
+            failed = [item for item in payload.get("results", []) if not item.get("ok")]
+            raise HTTPException(status_code=400, detail={"message": "Bypass write failed", "failed": failed})
+        return payload
 
     @app.get("/api/machine/audit")
     def api_machine_audit(
@@ -2657,6 +4069,33 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     def ui_process_redirect():
         return RedirectResponse(url="/ui/machine-setup/process", status_code=303)
 
+    @app.get("/ui/machine-setup/visualization", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_production_visualization(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/visualization"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("visualization")
+        return build_production_visualization_ui_html(nav)
+
+    @app.get("/ui/machine-setup/mae0048", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_mae0048_diagnostics(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/mae0048"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("mae0048")
+        return build_mae0048_diagnostics_ui_html(nav)
+
+    @app.get("/ui/machine-setup/calibration", response_class=HTMLResponse, include_in_schema=False)
+    def ui_machine_motor3_calibration(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        if not has_machine_setup_session(request, cfg2):
+            target = "/ui/machine-setup/calibration"
+            return RedirectResponse(url=f"/ui/machine-setup/login?next={target}", status_code=303)
+        nav = nav_html("machine_setup") + machine_setup_nav_html("calibration")
+        return build_motor3_calibration_ui_html(nav)
+
     @app.get("/ui/machine-setup/process", response_class=HTMLResponse, include_in_schema=False)
     def ui_machine_process(request: Request):
         cfg2 = Settings.load(cfg_path)
@@ -2848,6 +4287,7 @@ setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
     __NAV__
     <div class="toolbar">
       <button class="btn" onclick="reloadAll()">Reload</button>
+      <button class="btn" onclick="reloadAll(false,true)">Live lesen</button>
       <button class="btn" onclick="downloadWorkbook()">IO Workbook herunterladen</button>
       <label class="btn" for="io_file">IO Workbook importieren</label>
       <input id="io_file" type="file" accept=".xlsx" style="display:none" onchange="uploadWorkbook(this.files[0])"/>
@@ -2898,7 +4338,7 @@ async function api(path, opt={}){
 function esc(v){ return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;"); }
 function qualityClass(v){ return `quality-${String(v || "default").toLowerCase()}`; }
 function valueClass(v){ return Number(v || 0) ? "state-1" : "state-0"; }
-function isPulseOnly(item){ return String(item.pin_label || "").trim().toUpperCase() === "GPIO0"; }
+function isPulseOnly(item){ return false; }
 function canOverride(item){ return (item.io_dir === "output" || item.io_dir === "gpio") && !isPulseOnly(item); }
 function overrideLabel(item){
   if(!item.override_active){ return ""; }
@@ -2973,9 +4413,9 @@ function scheduleRefresh(data){
   }, desiredMs);
 }
 
-async function reloadAll(silent=false){
+async function reloadAll(silent=false, live=false){
   if(!silent){ document.getElementById("status").textContent = "loading..."; }
-  const data = await api("/api/io/overview");
+  const data = await api(`/api/io/overview${live ? "?live=1" : ""}`);
   window.__io = data;
   window.__activeOverrides = (data.points || []).filter(item => !!item.override_active);
   renderWorkbook(data);
@@ -3326,8 +4766,13 @@ load();
     .toolbar,.row,.actions{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
     .toolbar{margin-bottom:12px}
     .muted{color:var(--muted)}
+    .status-panel{display:flex; flex-direction:column; gap:4px; min-width:min(760px,100%)}
+    #status{font-weight:600}
+    #status-log{max-height:86px; overflow:auto; font-size:12px; line-height:1.35; color:#334155; background:#f8fafc; border:1px solid var(--border); border-radius:8px; padding:6px 8px; min-width:min(760px,100%)}
+    #status-log div{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
     .btn{min-height:38px; padding:8px 12px; border:1px solid #aec4db; border-radius:10px; background:#e8f0f8; color:#17324b; font-weight:600; cursor:pointer}
     .btn:hover{background:#dce8f5}
+    .btn:disabled{opacity:.55; cursor:not-allowed}
     .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(470px,1fr)); gap:12px}
     .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:14px}
     .card h3{margin:0 0 6px 0}
@@ -3355,7 +4800,10 @@ load();
     <div class="toolbar">
       <button class="btn" onclick="reloadAll()">Reload</button>
       <button class="btn" onclick="refreshAllLive()">Live-Status aktualisieren</button>
-      <span id="status" class="muted">loading...</span>
+      <div class="status-panel">
+        <span id="status" class="muted">loading...</span>
+        <div id="status-log"></div>
+      </div>
     </div>
     <div class="cards" id="cards"></div>
   </div>
@@ -3364,8 +4812,11 @@ const TOKEN_KEY = "mas004_ui_token";
 const dirtyFields = new Set();
 const renderedIds = new Set();
 const motorPollHandles = new Map();
+const motorActionInFlight = new Set();
+const motorRefreshInFlight = new Set();
 let autoRefreshHandle = null;
 let currentAutoRefreshMs = null;
+let statusHoldUntilMs = 0;
 
 function token(){ try { return localStorage.getItem(TOKEN_KEY) || ""; } catch(e){ return ""; } }
 function fieldKey(id, name){ return `${id}:${name}`; }
@@ -3380,7 +4831,10 @@ async function api(path, opt={}){
   const r = await fetch(path, opt);
   const txt = await r.text();
   let j = null; try { j = JSON.parse(txt); } catch(e) {}
-  if(!r.ok){ throw new Error((j && j.detail) ? j.detail : (`HTTP ${r.status} ${txt}`)); }
+  if(!r.ok){
+    const detail = j && j.detail !== undefined ? j.detail : (`HTTP ${r.status} ${txt}`);
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
   return j;
 }
 
@@ -3420,8 +4874,31 @@ function setMotorSimulationUi(id, enabled){
   });
 }
 
-function setStatus(text){
-  document.getElementById("status").textContent = text || "";
+function setStatus(text, opts = {}){
+  const now = Date.now();
+  if(opts.soft && now < statusHoldUntilMs){ return; }
+  const value = text || "";
+  const statusEl = document.getElementById("status");
+  if(statusEl){ statusEl.textContent = value; }
+  const holdMs = Number(opts.holdMs || 0);
+  if(holdMs > 0){ statusHoldUntilMs = now + holdMs; }
+  if(value && opts.log !== false){
+    const log = document.getElementById("status-log");
+    if(log){
+      const row = document.createElement("div");
+      row.textContent = `${new Date().toLocaleTimeString()} ${value}`;
+      log.prepend(row);
+      while(log.childElementCount > 8){ log.removeChild(log.lastElementChild); }
+    }
+  }
+}
+
+function setMotorControlsBusy(id, busy){
+  const simEl = document.getElementById(`m-${id}-simulation`);
+  const simulated = !!(simEl && simEl.checked);
+  document.querySelectorAll(`button[data-motor-id="${id}"][data-live-only="1"]`).forEach(el => {
+    el.disabled = !!busy || simulated;
+  });
 }
 
 function renderCard(motor){
@@ -3568,23 +5045,32 @@ function applyMotorResult(id, result){
 }
 
 async function runMotorAction(id, label, action){
-  setStatus(`Motor ${id}: ${label}...`);
+  if(motorActionInFlight.has(id)){
+    setStatus(`Motor ${id}: Aktion laeuft bereits`, {holdMs:5000});
+    return null;
+  }
+  motorActionInFlight.add(id);
+  setMotorControlsBusy(id, true);
+  setStatus(`Motor ${id}: ${label}...`, {holdMs:3000});
   try{
     const result = await action();
     applyMotorResult(id, result);
     const detail = result && result.refresh_error ? `, Refresh: ${result.refresh_error}` : "";
-    setStatus(`Motor ${id}: ${label} OK${detail}`);
+    setStatus(`Motor ${id}: ${label} OK${detail}`, {holdMs:10000});
     return result || {ok:true};
   }catch(e){
     const msg = e && e.message ? e.message : String(e);
     updateLiveText(id, "msg", msg);
-    setStatus(`Motor ${id}: ${label} fehlgeschlagen: ${msg}`);
+    setStatus(`Motor ${id}: ${label} fehlgeschlagen: ${msg}`, {holdMs:15000});
     return null;
+  }finally{
+    motorActionInFlight.delete(id);
+    setMotorControlsBusy(id, false);
   }
 }
 
 function configPayload(id){
-  return {
+  const payload = {
     steps_per_mm: numOrNull(document.getElementById(`m-${id}-steps_per_mm`).value),
     speed_mm_s: numOrNull(document.getElementById(`m-${id}-speed_mm_s`).value),
     accel_mm_s2: numOrNull(document.getElementById(`m-${id}-accel_mm_s2`).value),
@@ -3597,16 +5083,14 @@ function configPayload(id){
     min_enabled: boolFromInput(`m-${id}-min_enabled`),
     max_enabled: boolFromInput(`m-${id}-max_enabled`)
   };
+  return payload;
 }
 
 async function saveConfig(id){
-  const writeResult = await runMotorAction(id, "Parameter schreiben", () => post(`/api/motors/${id}/config`, configPayload(id)));
-  if(!writeResult){ return; }
-  const saveResult = await runMotorAction(id, "Parameter speichern", () => post(`/api/motors/${id}/save`, {}));
+  const saveResult = await runMotorAction(id, "Parameter speichern", () => post(`/api/motors/${id}/config`, configPayload(id)));
   if(!saveResult){ return; }
-  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","hold_current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
-  await refreshOne(id, {silent:true});
-  setStatus(`Motor ${id}: Parameter gespeichert und aktualisiert`);
+  ["steps_per_mm","speed_mm_s","accel_mm_s2","decel_mm_s2","current_pct","hold_current_pct","invert_direction","min_tenths_mm","max_tenths_mm","min_enabled","max_enabled","position_mm"].forEach(f => dirtyFields.delete(fieldKey(id, f)));
+  setStatus(`Motor ${id}: Parameter gespeichert`, {holdMs:10000});
 }
 
 function askDirectionCorrect(id){
@@ -3698,17 +5182,31 @@ async function setMax(id){ await runMotorAction(id, "Max setzen", () => post(`/a
 async function resetAlarm(id){ await runMotorAction(id, "Alarm Reset", () => post(`/api/motors/${id}/reset-alarm`, {})); }
 async function refreshOne(id, opts = {}){
   const silent = !!opts.silent;
-  if(!silent){ setStatus(`Motor ${id}: Status aktualisieren...`); }
+  if(motorActionInFlight.has(id)){
+    if(!silent){ setStatus(`Motor ${id}: Aktion laeuft, Refresh uebersprungen`, {holdMs:5000}); }
+    return null;
+  }
+  if(motorRefreshInFlight.has(id)){
+    if(!silent){ setStatus(`Motor ${id}: Refresh laeuft bereits`, {holdMs:5000}); }
+    return null;
+  }
+  motorRefreshInFlight.add(id);
+  if(!silent){ setStatus(`Motor ${id}: Status aktualisieren...`, {holdMs:3000}); }
   try{
     const result = await post(`/api/motors/${id}/refresh`, {});
     applyMotorResult(id, result);
-    if(!silent){ setStatus(`Motor ${id}: Status aktualisiert`); }
+    if(!silent){
+      const suffix = result && result.refresh_in_progress ? " (alter Wert, Refresh laeuft)" : (result && result.cached ? " (Cache)" : "");
+      setStatus(`Motor ${id}: Status aktualisiert${suffix}`, {holdMs:8000});
+    }
     return result;
   }catch(e){
     const msg = e && e.message ? e.message : String(e);
     updateLiveText(id, "msg", msg);
-    if(!silent){ setStatus(`Motor ${id}: Status fehlgeschlagen: ${msg}`); }
+    if(!silent){ setStatus(`Motor ${id}: Status fehlgeschlagen: ${msg}`, {holdMs:12000}); }
     return null;
+  }finally{
+    motorRefreshInFlight.delete(id);
   }
 }
 
@@ -3717,11 +5215,12 @@ async function refreshAllLive(){
   for(const id of ids){
     const simEl = document.getElementById(`m-${id}-simulation`);
     if(simEl && simEl.checked){ continue; }
+    if(motorActionInFlight.has(id) || motorRefreshInFlight.has(id)){ continue; }
     setStatus(`refresh motor ${id}/${ids.length}...`);
     try { await refreshOne(id, {silent:true}); }
     catch(e){ console.warn(e); }
   }
-  await reloadAll();
+  await reloadAll({silent:true});
 }
 
 function stopMotorPolling(id){
@@ -3740,6 +5239,7 @@ function toggleMotorPolling(id, enabled){
   refreshOne(id, {silent:true});
   const handle = setInterval(() => {
     if(document.hidden){ return; }
+    if(motorActionInFlight.has(id) || motorRefreshInFlight.has(id)){ return; }
     refreshOne(id, {silent:true}).catch(err => { console.warn(err); });
   }, 1000);
   motorPollHandles.set(id, handle);
@@ -3767,7 +5267,7 @@ async function reloadAll(opts = {}){
   }
   const allSimulated = (data.motors || []).length > 0 && (data.motors || []).every(m => !!m.simulation);
   const suffix = data.message ? ` | ${data.message}` : (allSimulated ? " | nur Simulation" : "");
-  setStatus(`${(data.motors || []).length} Motoren geladen${suffix}`);
+  setStatus(`${(data.motors || []).length} Motoren geladen${suffix}`, {soft:silent, log:!silent});
   const desiredMs = 0;
   if(currentAutoRefreshMs !== desiredMs){
     scheduleAutoRefresh(desiredMs);
@@ -4000,9 +5500,15 @@ reloadAll().catch(err => { setStatus(err.message); });
         <input id="shared_secret" placeholder="(leer = aus)"/>
         <div id="shared_secret_state" class="muted">(leer = aus)</div>
       </div>
+      <div class="field">
+        <label>X-DIClient-Adapter-Key</label>
+        <input id="diclient_adapter_key" placeholder="(leer = kein Header)"/>
+        <div id="diclient_adapter_key_state" class="muted">(leer = kein Header)</div>
+      </div>
     </div>
     <div class="actions">
       <label class="checkline"><input type="checkbox" id="clear_shared_secret"/>shared_secret loeschen (auf leer setzen)</label>
+      <label class="checkline"><input type="checkbox" id="clear_diclient_adapter_key"/>DIClient-Key loeschen</label>
     </div>
     <div class="actions">
       <button onclick="saveBridge()">Save Bridge + Restart</button>
@@ -4012,7 +5518,7 @@ reloadAll().catch(err => { setStatus(err.message); });
 
   <fieldset>
     <legend>Device Endpoints (ETH0 / ETH1)</legend>
-    <div class="muted">ETH0 ist das Hauptnetz fuer Microtom, Laser, TTO und die beiden Wickler. ETH1 ist das Maschinen-LAN fuer ESP32-PLC58 und die beiden Moxa ioLogik E1211. Das alte Port-Forwarding wurde entfernt; alle Geraete werden direkt ueber ihre Ziel-IP angesprochen.</div>
+    <div class="muted">ETH0 ist das Hauptnetz fuer Microtom, Laser, TTO und die beiden Wickler. ETH1 ist das Maschinen-LAN fuer ESP32-PLC58 und die drei Moxa ioLogik E1213. Das alte Port-Forwarding wurde entfernt; alle Geraete werden direkt ueber ihre Ziel-IP angesprochen.</div>
     <div class="grid cols-device">
       <div class="field"><label>Raspi PLC model</label><input id="raspi_plc_model" placeholder="RPIPLC_21"/></div>
       <div class="field"><label>Raspi IO poll interval (s)</label><input id="raspi_io_poll_interval_s" type="number" min="0.2" max="60" step="0.1"/></div>
@@ -4027,6 +5533,10 @@ reloadAll().catch(err => { setStatus(err.message); });
       <div class="field"><label>ESP IO poll interval (s)</label><input id="esp_io_poll_interval_s" type="number" min="0.2" max="60" step="0.1"/></div>
       <label class="checkline"><input type="checkbox" id="esp_simulation"/>Simulation</label>
     </div>
+    <div class="actions">
+      <label class="checkline"><input type="checkbox" id="light_curtain_auto_reset_enabled"/>Lichtgitter Auto-Reset alle 5s aktiv</label>
+      <span class="muted">Nur wenn ausschliesslich das Lichtgitter ausgeloest hat und Not-Aus OK ist; pulst ESP Q0.2 ohne Purge/Statuswechsel.</span>
+    </div>
     <div class="grid cols-device">
       <div class="field"><label>Moxa #1 host</label><input id="moxa1_host"/></div>
       <div class="field"><label>Moxa #1 port</label><input id="moxa1_port"/></div>
@@ -4040,6 +5550,13 @@ reloadAll().catch(err => { setStatus(err.message); });
       <div class="field empty"><label>&nbsp;</label><input disabled placeholder="Modbus/TCP direkt, default 502"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled/></div>
       <label class="checkline"><input type="checkbox" id="moxa2_simulation"/>Simulation</label>
+    </div>
+    <div class="grid cols-device">
+      <div class="field"><label>Moxa #3 host</label><input id="moxa3_host"/></div>
+      <div class="field"><label>Moxa #3 port</label><input id="moxa3_port"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled placeholder="Modbus/TCP direkt, default 502"/></div>
+      <div class="field empty"><label>&nbsp;</label><input disabled/></div>
+      <label class="checkline"><input type="checkbox" id="moxa3_simulation"/>Simulation</label>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>VJ3350 host</label><input id="vj3350_host"/></div>
@@ -4290,6 +5807,19 @@ async function reloadAll(){
     secStateEl.textContent = secEl.value ? "gesetzt" : "(leer = aus)";
   }
   document.getElementById("clear_shared_secret").checked = false;
+  const adapterKeyEl = document.getElementById("diclient_adapter_key");
+  const adapterKeyStateEl = document.getElementById("diclient_adapter_key_state");
+  const hasMaskedAdapterKey = c.diclient_adapter_key === "***";
+  if(hasMaskedAdapterKey){
+    adapterKeyEl.value = "********";
+    adapterKeyEl.placeholder = "gesetzt (versteckt)";
+    adapterKeyStateEl.textContent = "gesetzt (versteckt)";
+  }else{
+    adapterKeyEl.value = (c.diclient_adapter_key || "").trim();
+    adapterKeyEl.placeholder = "(leer = kein Header)";
+    adapterKeyStateEl.textContent = adapterKeyEl.value ? "gesetzt" : "(leer = kein Header)";
+  }
+  document.getElementById("clear_diclient_adapter_key").checked = false;
 
   document.getElementById("raspi_plc_model").value = c.raspi_plc_model || "RPIPLC_21";
   document.getElementById("raspi_io_poll_interval_s").value = c.raspi_io_poll_interval_s ?? 1.0;
@@ -4299,12 +5829,16 @@ async function reloadAll(){
   document.getElementById("esp_watchdog_host").value = c.esp_watchdog_host || "";
   document.getElementById("esp_io_poll_interval_s").value = c.esp_io_poll_interval_s ?? 1.0;
   document.getElementById("esp_simulation").checked = !!c.esp_simulation;
+  document.getElementById("light_curtain_auto_reset_enabled").checked = !!(c.light_curtain_auto_reset_enabled ?? true);
   document.getElementById("moxa1_host").value = c.moxa1_host || "";
   document.getElementById("moxa1_port").value = c.moxa1_port ?? 502;
   document.getElementById("moxa1_simulation").checked = !!(c.moxa1_simulation ?? true);
   document.getElementById("moxa2_host").value = c.moxa2_host || "";
   document.getElementById("moxa2_port").value = c.moxa2_port ?? 502;
   document.getElementById("moxa2_simulation").checked = !!(c.moxa2_simulation ?? true);
+  document.getElementById("moxa3_host").value = c.moxa3_host || "";
+  document.getElementById("moxa3_port").value = c.moxa3_port ?? 502;
+  document.getElementById("moxa3_simulation").checked = !!(c.moxa3_simulation ?? true);
   document.getElementById("moxa_poll_interval_s").value = c.moxa_poll_interval_s ?? 1.0;
   document.getElementById("vj3350_host").value = c.vj3350_host || "";
   document.getElementById("vj3350_port").value = c.vj3350_port ?? "";
@@ -4418,6 +5952,9 @@ async function saveBridge(){
   const secEl = document.getElementById("shared_secret");
   const secretRaw = secEl.value.trim();
   const clearSecret = document.getElementById("clear_shared_secret").checked;
+  const adapterKeyEl = document.getElementById("diclient_adapter_key");
+  const adapterKeyRaw = adapterKeyEl.value.trim();
+  const clearAdapterKey = document.getElementById("clear_diclient_adapter_key").checked;
   const ntpIntervalRaw = Number(document.getElementById("ntp_sync_interval_min").value.trim());
   const ntpInterval = Number.isFinite(ntpIntervalRaw) ? ntpIntervalRaw : 60;
   let sharedSecretValue = null; // null => unveraendert lassen
@@ -4425,6 +5962,12 @@ async function saveBridge(){
     sharedSecretValue = "";
   }else if(secretRaw && secretRaw !== "********"){
     sharedSecretValue = secretRaw;
+  }
+  let adapterKeyValue = null; // null => unveraendert lassen
+  if(clearAdapterKey){
+    adapterKeyValue = "";
+  }else if(adapterKeyRaw && adapterKeyRaw !== "********"){
+    adapterKeyValue = adapterKeyRaw;
   }
 
   const payload = {
@@ -4437,7 +5980,8 @@ async function saveBridge(){
     eth0_source_ip: document.getElementById("eth0_source_ip").value.trim(),
     ntp_server: document.getElementById("ntp_server").value.trim(),
     ntp_sync_interval_min: ntpInterval,
-    shared_secret: sharedSecretValue
+    shared_secret: sharedSecretValue,
+    diclient_adapter_key: adapterKeyValue
   };
   await api("/api/config", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
   document.getElementById("bridge_status").textContent = "saved (service restarted)";
@@ -4454,12 +5998,16 @@ async function saveDevices(){
     esp_watchdog_host: document.getElementById("esp_watchdog_host").value.trim(),
     esp_io_poll_interval_s: Number(document.getElementById("esp_io_poll_interval_s").value.trim()),
     esp_simulation: document.getElementById("esp_simulation").checked,
+    light_curtain_auto_reset_enabled: document.getElementById("light_curtain_auto_reset_enabled").checked,
     moxa1_host: document.getElementById("moxa1_host").value.trim(),
     moxa1_port: Number(document.getElementById("moxa1_port").value.trim()),
     moxa1_simulation: document.getElementById("moxa1_simulation").checked,
     moxa2_host: document.getElementById("moxa2_host").value.trim(),
     moxa2_port: Number(document.getElementById("moxa2_port").value.trim()),
     moxa2_simulation: document.getElementById("moxa2_simulation").checked,
+    moxa3_host: document.getElementById("moxa3_host").value.trim(),
+    moxa3_port: Number(document.getElementById("moxa3_port").value.trim()),
+    moxa3_simulation: document.getElementById("moxa3_simulation").checked,
     moxa_poll_interval_s: Number(document.getElementById("moxa_poll_interval_s").value.trim()),
     vj3350_host: document.getElementById("vj3350_host").value.trim(),
     vj3350_port: Number(document.getElementById("vj3350_port").value.trim()),

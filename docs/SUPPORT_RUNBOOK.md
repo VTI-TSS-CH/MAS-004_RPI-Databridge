@@ -26,7 +26,7 @@
   - Laser VJ3350: `10.141.94.215:20000`
   - Abwickler: `10.141.94.216:3011`
   - Aufwickler: `10.141.94.217:3012`
-  - ESP and Moxa on `eth1` stay unchanged: `192.168.2.101:3010`, `192.168.2.102:502`, `192.168.2.103:502`
+  - ESP and Moxa on `eth1`: ESP `192.168.2.101:3010`, Moxa E1213 #1 `192.168.2.102:502`, Moxa E1213 #2 `192.168.2.103:502`, Moxa E1213 #3 `192.168.2.104:502`
 - Prepared files:
   - `scripts/production_topology_10_141_94.json`
   - `scripts/production_commissioning_config_patch_10_141_94.json`
@@ -51,6 +51,7 @@
   - The production config uses `peer_base_url = http://10.141.94.202:5000` for Microtom/DIClient.
   - The optional engineering callback lane uses `peer_base_url_secondary = https://10.141.94.212:9090` for the laptop Microtom simulator/testtool.
   - The secondary peer is diagnostic-only; it may be offline without filling or blocking the primary Microtom outbox lane.
+  - If Microtom endpoint protection is active, set `diclient_adapter_key` in `/etc/mas004_rpi_databridge/config.json`; all Raspi -> Microtom callbacks then include `X-DIClient-Adapter-Key`.
 - Internal device inbox note:
   - Browser/UI/API stay on HTTPS `https://10.141.94.213:8080`.
   - ESP32/W5500 devices that cannot speak HTTPS post machine events to `http://10.141.94.213:8081/api/inbox`.
@@ -92,10 +93,12 @@
     - user notes before `KI:` are folded into regenerated `KI:` texts
     - the full `KI-Anweisungen:` column is rewritten with `KI:` texts
 - Purge clear / `MAS0028` anti-echo check:
+  - Scenario B is active: Microtom/DIClient is responsible for terminating the purge process.
   - `MAS0028=0` from Microtom/DIClient is treated as an external soft clear of the Purge latch.
   - On a successful `MAS0028=0` write, the Raspi removes stale pending `MAS0028=<state>` callbacks from the Outbox before queuing `ACK_MAS0028=0`.
-  - Immediate ESP/device-origin `MAS0028=1` echoes are ignored for a short grace window after this external clear.
-  - This grace window only suppresses stale echoes. If a real critical reason is still active, the machine runtime may correctly reassert `MAS0028=1`.
+  - ESP/device-origin `MAS0028=0` or `MAS0028=1` is treated as an echo of the Raspi-authoritative state and must not terminate or restart the purge process.
+  - The Raspi still mirrors Microtom `MAS0028=0` to the ESP32-PLC so its internal process purge latch is cleared without creating an ESP-origin callback.
+  - If a real critical reason is still active, the machine runtime may correctly reassert `MAS0028=1`.
   - Typical real reassertion causes are active Notaus/Lichtgitter inputs, resettable safety errors such as `MAE0027`, or any runtime critical reason listed in the machine state.
   - Production diagnostics:
     - `sqlite3 /var/lib/mas004_rpi_databridge/databridge.db "select pkey,value,updated_ts from param_values where pkey in ('MAS0028','MAE0027');"`
@@ -136,8 +139,13 @@
 
 ## 2.1 Einricht-Wicklerworkflow
 - Die frueheren temporaeren Microtom-Testbefehle fuer Wickler-/Transporttests sind entfernt.
-- Beim Einrichten faehrt der Raspi zuerst die formatrelevanten Anschlagachsen ID9/ID8 auf die Rezeptbreite und danach ID6/ID7/ID5 auf die Rezeptpositionen fuer Etikettensensoren und Materialkamera.
-- Wickler-Einmessen und 1000-mm-Durchmesser-Messfahrt werden nur noch intern durch den Raspi-Maschinenzustand gestartet, wenn die Anlage in den Einrichtmodus wechselt.
+- Beim Einrichten sendet der Raspi die formatrelevanten Achsen ID5/ID6/ID7/ID8/ID9 als einen gemeinsamen ESP-Positionssatz. Der ESP laedt die Direktdaten in die AZD-Controller und triggert die Bewegungen anschliessend gemeinsam; erst danach wird gemeinsam verifiziert.
+- Wickler-Einmessen und die ESP-Setup-Messfahrt werden nur noch intern durch den Raspi-Maschinenzustand gestartet, wenn die Anlage in den Einrichtmodus wechselt.
+- Vor der ersten ID3-Bewegung setzt der Raspi den Teach-Eingang des Etikettenerfassungssensors auf Moxa #3 `DIO3` fuer 3.5 s high und startet die ESP-Messfahrt erst nach der fallenden Teach-Flanke.
+- Die ESP-Messfahrt nutzt absolute ID3-Zielpositionen: `500 mm` vor, absolut zurueck auf `0 mm`, danach absolut auf `2500 mm`. Waehrend dieser 2500-mm-Fahrt werden erste Labelkante, Label-Laenge, Schlupf und Kontrollsensor-Teach erfasst. Danach faehrt ID3 absolut auf `erste Labelreferenz - 10 mm`, sodass die erste Etikettenkante 10 mm vor dem Etikettensensor steht.
+- Die Setup-Schlupfdiagnose vergleicht Einlauf- und Drive-Encoder mit mindestens 8.0 mm Reserve, weil die Teachfahrt mehrere Meter kumulierte Vor-/Rueckbewegung enthalten kann.
+- `diameter_learn_travel_mm` bleibt trotz Encoder-Nullung am Messfahrtende erhalten und ist die einzige Distanzbasis fuer das anschliessende SmartWickler-Durchmesserlernen.
+- Die 2000-mm-ID3-/Encoder-Kalibrierfahrt liegt separat in Machine-Setup `/ui/machine-setup/calibration`. Sie schreibt bei Anwendung `steps_per_mm`, `MAP0077`, `MAP0078` und optional `MAP0076`; diese Werte sind Maschinenabgleich und nicht formatrelevant.
 - Die Wickler-Messfahrt wird bei jedem Einrichten neu ausgefuehrt, auch wenn noch gespeicherte Durchmesser oder alte Messwerte vorhanden sind.
 - Reset/Purge-Recovery muss bewegungsarm bleiben: nur `stop`, `resetAlarm`, `etoRecovery`, `stop`; dabei darf keine Wicklerkalibrierung und keine Messfahrt gestartet werden.
 - Current production reset behavior is intentionally passive for Wicklers: a standing Wippe at the lower/upper end is accepted as safe stop, not as a reason to start regulation.
@@ -224,7 +232,7 @@
   - controller / field network:
     - ESP endpoint
     - ESP realtime IO/process image
-    - Moxa 1 / Moxa 2
+    - Moxa 1 / Moxa 2 / Moxa 3
     - Moxa field IOs
   - printers:
     - VJ6530 endpoint + TTO handshake
@@ -373,9 +381,10 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
 - For hardware IO / Moxa integration:
   - `/ui/machine-setup/io` must show the imported IO workbook catalog even if the field hardware is offline
   - `ESP32-PLC58` stays on the realtime side and should only receive the IO snapshot/control traffic it actually needs
-  - the two `Moxa ioLogik E1211` modules are handled as slow field IO on the Raspi side
+  - the three `Moxa ioLogik E1213` modules are handled as slow source-output field IO on the Raspi side
   - Moxa simulation should stay enabled by default on live/test until the networked hardware is intentionally validated
-  - on validated production hardware, both Moxa modules can use port `502` because they are addressed through different IPs (`192.168.2.102` and `192.168.2.103`)
+  - on validated production hardware, all Moxa modules use port `502` because they are addressed through different IPs (`192.168.2.102`, `192.168.2.103` and `192.168.2.104`)
+  - E1213 output labels are mapped as `DO0..DO3` followed by `DIO0..DIO3`; the DIO channels are configured/used as outputs
   - Moxa Modbus/TCP access is serialized per endpoint; unchanged output values are not rewritten
   - status-lamp writes are best-effort and use a short cooldown after timeouts so they cannot block the machine runtime or ESP motor communication path
   - Raspberry PLC21 IOs require either the official Industrial Shields `rpiplc_lib` Python module or the project-local `rpiplc_compat` fallback against `/usr/lib/librpiplc.so`
@@ -385,7 +394,9 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - manual output checks on `/ui/machine-setup/io` must use `High` / `Low` / `Release`, not one-shot writes
   - an active `High` or `Low` override has priority over normal machine-state LED/status writers until `Release` is pressed
   - before leaving the IO page, release active overrides unless the commissioning/test procedure explicitly requires them to stay forced
-  - `GPIO0` is the ESP LED-stripe pulse output and is intentionally not overrideable from the IO page
+  - The LED stripe is driven by a separate ESP32 LED controller. The ESP32-PLC sends `MAS004-LED-UDP/v1` frames from the label shift register; default target is `192.168.2.255:3050`.
+  - The shortened strip is configured as `520.0 mm`, `75` LEDs at `6.95 mm` pitch. The PLC58 does not drive TX1/GPIO17 or GPIO0 as WS2812 data.
+  - If the LED test is ACKed while the strip stays dark, check the external controller power, common GND, controller network reachability, UDP port, LED data direction, and LED type/order.
   - the `ESP Motorpolling` checkbox on the same page toggles `MOTOR POLL=1/0` on the ESP32-PLC
   - enabled motor polling must remain a paced ESP-side round-robin: motor `1` through `9`, `100 ms` pause between individual motor polls, then repeat
 - For the motor setup page:
@@ -417,17 +428,17 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - high parallel latency includes intentional queue wait behind the endpoint lock; it is backpressure, not lost commands
   - if errors appear, first verify the Databridge service is active and that ESP firmware includes the 2026-05-01 W5500 hardening
 - For Notaus / Lichtgitter / Reset:
-  - ESP `I0.7` and `I0.8` are active-high safety inputs.
-  - `I0.7=1` is hard Notaus; the external safety circuit removes torque immediately.
-  - `I0.8=1` is Lichtgitter; the ESP firmware must release Wickler run-levels and stop AZD-CD motors `1`, `2`, `3` before the delayed ETO relay removes torque.
-  - Raspi runtime should latch `MAS0001=21` and `MAS0028=1` on either input.
+  - ESP `I0.7` and `I0.8` are safety-OK inputs: `HIGH=OK`, `LOW=fault active`.
+  - `I0.7=0` is hard Notaus; the external safety circuit removes torque immediately.
+  - `I0.8=0` is Lichtgitter; the ESP firmware must release Wickler run-levels and stop AZD-CD motors `1`, `2`, `3` before the delayed ETO relay removes torque.
+  - Raspi runtime should latch `MAS0001=21` and `MAS0028=1` on either LOW input.
   - Reset may be started with `MAS0002=2` or the Raspi reset button `I0.7`.
   - In Machine Control the physical/virtual `Start/Pause` channel is shown as `Reset` while Safety/Purge is active. After the reset clears the Safety/Purge context, the same channel returns to normal `Start`/`Pause` behavior.
   - Expected reset sequence:
     - Raspi sets `MAS0001=8`
-    - Raspi pulses ESP `Q0.2`: `200 ms HIGH`, `100 ms LOW`, `200 ms HIGH`, then LOW
-    - Raspi verifies `ESP I0.7=0` and `ESP I0.8=0`
-    - Raspi sends `PROCESS RESET` to the ESP32-PLC to clear process latches and sensor/runtime purge states such as `MAE0027` / `MAS0028`
+    - Raspi pulses ESP `Q0.2`: `200 ms HIGH`, `1000 ms LOW`, `200 ms HIGH`, then LOW
+    - Raspi verifies `ESP I0.7=1` and `ESP I0.8=1`
+    - Raspi sends `PROCESS RESET` to the ESP32-PLC to clear process latches and sensor/runtime purge state locally; the ESP32-PLC must not originate a `MAS0028=0` purge termination callback
     - Raspi clears `MAS0028` and resettable Safety/Purge errors at this point, before motion recovery, so a later drive recovery fault does not keep an old Purge latch alive without a real critical reason
     - Raspi runs `MOTOR APPLY_ETO_RECOVERY`, `MOTOR RECOVER_ETO`, then `MOTOR <id> RESET_ALARM` for `1..9`
     - Raspi posts `stop`, `resetAlarm`, `etoRecovery`, `stop` to both Wicklers if they are live
@@ -449,6 +460,7 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - `Haltestrom [%]` maps to ESP `hold_current_pct` and AZD `Stop current`; if Haltestrom is below Fahrstrom, the ESP enables AZD automatic current cutback with the standard switching time.
   - `Aufloesung definieren` moves by the configured test steps, asks for measured travel, then asks whether the direction was correct.
   - Select `Nein, Richtung drehen` if the mechanical direction was wrong; the UI toggles `invert_direction`.
+  - For Motor ID3, `invert_direction=true` is the current production machine mapping: positive Motor-3 mm/s means label feed / Vorzug, negative means rewind. Do not toggle ID3 direction to compensate encoder sign; the ESP normalizes the line encoders separately.
   - The calculated `steps/mm` and direction setting are saved persistently immediately, so an extra `Parameter speichern` click is not required after this calibration.
   - `Istposition setzen [mm]` captures the current live motor position as the entered absolute position and saves the resulting offset persistently.
   - `Absolut fahren nach [mm]` commands the axis to an entered absolute millimeter position via `MOVE_ABS_MM`.
@@ -468,6 +480,9 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - Smart Wickler pushes to `/api/inbox` must include `source=smartwickler`; these messages are device status updates and must not be validated as Microtom writes.
   - If Microtom receives `MAS0008/MAS0009/MAS0026/MAS0027/MAE* = NAK_ReadOnly` after a Wickler status change, verify that the deployed Router includes the device-origin inbox path from 2026-04-30.
   - The setup measuring run performs Wickler calibration plus a 1000 mm forward/reverse diameter measurement; if only about 500 mm is travelled, inspect Motor-3 busy/position feedback and the minimum travel-time wait.
+  - Production start prepares both Wicklers for continuous regulation, not indexed travel: `/api/master indexedModeEnabled=0`, then `/api/mode mode=ready&allowMotion=1`, with `continuousModeReady=true` and dancer position inside 8..92 % before Motor 3 is started.
+  - During any setup measuring movement, a red Wickler state, AZD alarm, dancer MAE, or dancer position near the mechanical end stops must stop Motor 3 immediately. Expected abort commands are `PROCESS SETUP_MEASURE STOP`, `PROCESS WICKLER CANCEL`, `PROCESS INDEXED STOP`, `PROCESS PROFILE STOP`, `MOTOR 3 MOVE_VEL_MM_S=0`, followed by both Wicklers `mode=stop`.
+  - If Motor 3 continues after a Wickler fault, inspect the Raspi event `fault_motion_stop` and the orchestrator error `Wickler fault during Motor 3 movement` first; this is a safety regression and must be fixed before more motion tests.
 - The measuring run expects ESP firmware support for `MOTOR 3 MOVE_REL_MM_OP=...` on the setup-only Operation-Data start path. Keep `MOVE_REL_MM` reserved for the productive hardware-synchronised takt path.
 - For commissioning/backup handling:
   - protected `Machine-Setup` login must be required before commissioning or backup APIs are usable

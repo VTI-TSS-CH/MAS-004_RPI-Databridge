@@ -13,9 +13,12 @@ from mas004_rpi_databridge.machine_runtime import (
     BAND_BREAK_ERROR_KEYS,
     MachineRuntime,
     PROCESS_SENSOR_FAULT_STATES,
+    PRODUCTION_START_BLOCK_CODE,
+    PRODUCTION_START_BLOCK_REASON,
     band_break_monitoring_active,
+    microtom_state_queue_options,
     parse_machine_event_line,
-    recent_external_purge_clear,
+    production_start_motion_enabled,
 )
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
@@ -24,6 +27,16 @@ from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
+
+
+RPI_AUTHORITATIVE_MA_KEYS = {
+    "MAS0001",
+    "MAS0002",
+    "MAS0028",
+    "MAS0030",
+}
+
+ESP_PUSH_CONNECTION_LOG = False
 
 
 def _is_ipv4(s: str) -> bool:
@@ -65,6 +78,17 @@ def _current_machine_state(params: ParamStore) -> int:
         return int(float(str(params.get_effective_value("MAS0001") or "1").strip()))
     except Exception:
         return 1
+
+
+def _duplicate_inactive_fault_clear(params: ParamStore, pkey: str, value: object) -> bool:
+    if _truthy_value(value):
+        return False
+    if not (pkey.startswith("MAE") or pkey.startswith("MAW")):
+        return False
+    try:
+        return not _truthy_value(params.get_effective_value(pkey))
+    except Exception:
+        return False
 
 
 class EspPushListener:
@@ -123,7 +147,8 @@ class EspPushListener:
     def _handle_client(self, client: socket.socket, addr):
         peer = f"{addr[0]}:{addr[1]}"
         buffer = b""
-        self.log(f"[ESP-PUSH] open {peer}")
+        if ESP_PUSH_CONNECTION_LOG:
+            self.log(f"[ESP-PUSH] open {peer}")
         try:
             while not self._stop.is_set():
                 try:
@@ -147,7 +172,8 @@ class EspPushListener:
                 client.close()
             except Exception:
                 pass
-            self.log(f"[ESP-PUSH] close {peer}")
+            if ESP_PUSH_CONNECTION_LOG:
+                self.log(f"[ESP-PUSH] close {peer}")
 
     def _process_line(self, line: str) -> str:
         db = DB(self.cfg.db_path)
@@ -200,6 +226,11 @@ class EspPushListener:
             return resp
 
         if pkey == "MAS0002" and str(value).strip() == "1":
+            if not production_start_motion_enabled():
+                resp = f"{pkey}={PRODUCTION_START_BLOCK_CODE}"
+                logs.log("machine", "warning", f"Start blockiert: {PRODUCTION_START_BLOCK_REASON}")
+                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+                return resp
             allowed, reason = production_logs.can_start_new_production()
             if not allowed:
                 resp = f"{pkey}={reason}"
@@ -207,12 +238,20 @@ class EspPushListener:
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")
                 return resp
 
-        if pkey == "MAS0028" and str(value or "").strip().lower() not in ("", "0", "false", "off", "no", "none", "null"):
-            if recent_external_purge_clear(db):
-                resp = f"ACK_{pkey}=1"
-                logs.log("raspi", "info", "ignored stale ESP MAS0028=1 immediately after external clear")
-                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
-                return resp
+        if pkey in RPI_AUTHORITATIVE_MA_KEYS:
+            # The ESP receives these values mirrored from the Raspi. If it
+            # echoes an old state/purge bit back later, it must not overwrite
+            # the Raspi runtime latch and restart setup as a false purge. In
+            # Purge scenario B only Microtom/DIClient may terminate MAS0028.
+            current = params.get_effective_value(pkey)
+            resp = f"ACK_{pkey}={current}"
+            logs.log(
+                "raspi",
+                "info",
+                f"ignored ESP authoritative echo {pkey}={value}; Raspi value is {current}",
+            )
+            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            return resp
 
         if pkey == "MAE0027" and _truthy_value(value) and _current_machine_state(params) not in PROCESS_SENSOR_FAULT_STATES:
             params.apply_device_value("MAE0027", "0")
@@ -229,6 +268,12 @@ class EspPushListener:
             params.apply_device_value(pkey, "0")
             resp = f"ACK_{pkey}=0"
             logs.log("raspi", "info", f"ignored ESP {pkey}=1 outside band-break monitor states")
+            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            return resp
+
+        if _duplicate_inactive_fault_clear(params, pkey, value):
+            resp = f"ACK_{pkey}=0"
+            logs.log("raspi", "info", f"ignored duplicate ESP clear {pkey}=0")
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")
             return resp
 
@@ -266,12 +311,10 @@ class EspPushListener:
             logs.log("raspi", "error", f"no peer_base_url configured; cannot forward ESP push {line}")
         else:
             dedupe_key = None
-            drop_if_duplicate = False
+            replace_existing = False
             if ptype in {"MAS", "MAE", "MAW"}:
-                dedupe_key = f"state:{pkey}"
-                drop_if_duplicate = True
+                dedupe_key, replace_existing = microtom_state_queue_options(pkey, value)
             for url in targets:
-                state_signal = ptype in {"MAS", "MAE", "MAW"}
                 outbox.enqueue(
                     "POST",
                     url,
@@ -280,8 +323,8 @@ class EspPushListener:
                     None,
                     priority=100,
                     dedupe_key=dedupe_key,
-                    drop_if_duplicate=drop_if_duplicate,
-                    replace_existing=state_signal,
+                    drop_if_duplicate=bool(dedupe_key),
+                    replace_existing=replace_existing,
                 )
             logs.log("raspi", "out", f"forward to microtom: {forwarded_line}")
 

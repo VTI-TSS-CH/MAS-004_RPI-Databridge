@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS param_values (
   FOREIGN KEY(pkey) REFERENCES params(pkey) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS motor_setup_master (
+  motor_id INTEGER PRIMARY KEY,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  state_json TEXT NOT NULL DEFAULT '{}',
+  updated_ts REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS format_profiles (
   name TEXT PRIMARY KEY,
   note TEXT NOT NULL DEFAULT '',

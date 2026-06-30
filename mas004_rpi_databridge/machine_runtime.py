@@ -4,7 +4,7 @@ import json
 import re
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.device_clients import EspPlcClient
@@ -17,6 +17,8 @@ from mas004_rpi_databridge.machine_semantics import (
     BUTTON_INPUTS,
     BUTTON_LED_OUTPUTS,
     STATUS_LAMP_OUTPUTS,
+    TRANSITION_FINALS,
+    action_for_button,
     button_led_plan,
     button_to_command,
     command_to_target_state,
@@ -28,10 +30,19 @@ from mas004_rpi_databridge.machine_semantics import (
     state_label,
     target_state_for_button,
 )
+from mas004_rpi_databridge.motor_master_sync import apply_motor_setup_master_config_to_client
+from mas004_rpi_databridge.motor_setup_lock import (
+    clear_motor_setup_manual_lock,
+    motor_setup_manual_lock_status,
+)
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
-from mas004_rpi_databridge.production_logs import ProductionLogManager, sanitize_production_label
+from mas004_rpi_databridge.production_logs import (
+    DEFAULT_PRODUCTION_LOG_DIR,
+    ProductionLogManager,
+    sanitize_production_label,
+)
 from mas004_rpi_databridge.setup_wickler_orchestrator import SetupWicklerOrchestrator
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
 
@@ -47,23 +58,86 @@ def _truthy(raw: Any) -> bool:
 
 def _safe_int(raw: Any, default: int = 0) -> int:
     try:
-        return int(float(str(raw or "").strip()))
+        if raw is None:
+            return int(default)
+        text = str(raw).strip()
+        if text == "":
+            return int(default)
+        return int(float(text))
     except Exception:
         return int(default)
 
 
+def _safe_float(raw: Any, default: float = 0.0) -> float:
+    try:
+        if raw is None:
+            return float(default)
+        text = str(raw).strip()
+        if text == "":
+            return float(default)
+        return float(text)
+    except Exception:
+        return float(default)
+
+
+def _event_float_key(raw: Any, digits: int = 3) -> str:
+    try:
+        return f"{float(raw):.{int(digits)}f}"
+    except Exception:
+        return str(raw or "")
+
+
+def _active_mae_keys(param_map: dict[str, str]) -> list[str]:
+    return sorted(str(key) for key, value in (param_map or {}).items() if str(key).startswith("MAE") and _truthy(value))
+
+
 PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026"}
+POSITION_AXIS_MAE_BY_MOTOR = {
+    1: "MAE0004",
+    2: "MAE0005",
+    3: "MAE0046",
+    4: "MAE0047",
+    5: "MAE0010",
+    6: "MAE0006",
+    7: "MAE0007",
+    8: "MAE0009",
+    9: "MAE0008",
+}
 RESETTABLE_SAFETY_ERROR_KEYS = {
     "MAE0001",  # Not-Aus
     "MAE0024",  # Etikettenbandriss
     "MAE0027",  # Etikettensensor prellt
+    "MAE0028",  # Abwickler Taenzerarm blockiert
+    "MAE0029",  # Abwickler Taenzerarm zu hoch
     "MAE0030",  # Abwickler Taenzerarm zu tief
+    "MAE0032",  # Aufwickler Taenzerarm blockiert
+    "MAE0033",  # Aufwickler Taenzerarm zu hoch
     "MAE0034",  # Aufwickler Taenzerarm zu tief
     "MAE0048",  # Etikettenantrieb Nachpositionierung fehlgeschlagen
 }
+WICKLER_DANCER_ERROR_KEYS = {
+    "MAE0028",  # Abwickler Taenzerarm blockiert
+    "MAE0029",  # Abwickler Taenzerarm zu hoch
+    "MAE0030",  # Abwickler Taenzerarm zu tief
+    "MAE0032",  # Aufwickler Taenzerarm blockiert
+    "MAE0033",  # Aufwickler Taenzerarm zu hoch
+    "MAE0034",  # Aufwickler Taenzerarm zu tief
+}
+WICKLER_ROLE_DANCER_MAE = {
+    "unwinder": {"blocked": "MAE0028", "high": "MAE0029", "low": "MAE0030"},
+    "rewinder": {"blocked": "MAE0032", "high": "MAE0033", "low": "MAE0034"},
+}
 PROCESS_SENSOR_FAULT_STATES = {2, 3, 4, 5, 10, 11, 12, 13, 16, 17}
-PROCESS_BAND_BREAK_MONITOR_STATES = {3, 4, 5, 6, 7, 10, 11, 12, 13, 16, 17}
-BAND_BREAK_ERROR_KEYS = {"MAE0008", "MAE0009"}
+# Bandriss-/Entnahmesensorik ist erst im echten Produktionsfenster
+# prozesskritisch. Die Zwischenzustaende 4/6 duerfen keine alten oder noch
+# nicht geteachten Sensorbits verriegeln, bevor der Runner sauber startet bzw.
+# bevor der Setup-to-Pause-Uebergang abgeschlossen ist.
+PROCESS_BAND_BREAK_MONITOR_STATES = {5, 10, 11, 12, 13, 16, 17}
+ESP_CRITICAL_IO_MAX_AGE_S = 0.75
+ESP_CRITICAL_IO_PINS = {"I0.4", "I0.7", "I0.8", "I0.11"}
+ESP_BAND_BREAK_IO_PINS = {"I0.4", "I0.11"}
+WICKLER_DANCER_MONITOR_STATES = {2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 16, 17}
+BAND_BREAK_ERROR_KEYS = {"MAE0008", "MAE0009", "MAE0024"}
 CONDITIONAL_RESETTABLE_SAFETY_ERRORS = {
     # These are latched machine errors. Clear them only if the matching live
     # inputs are quiet while the process sensor monitoring window is active.
@@ -77,9 +151,81 @@ SAFETY_PHASE_LATCHED = "latched"
 SAFETY_PHASE_RESETTING = "resetting"
 SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
+ESP_RESET_PULSE_HIGH_S = 0.2
+ESP_RESET_PULSE_GAP_S = 1.0
+LIGHT_CURTAIN_AUTO_RESET_INTERVAL_S = 5.0
 PURGE_EXTERNAL_CLEAR_GRACE_S = 3.0
 _SAFETY_RESET_LOCK = threading.Lock()
+_RESET_MOTION_RECOVERY_LOCK = threading.Lock()
 _SETUP_WICKLER_LOCK = threading.Lock()
+_PRODUCTION_MOTION_LOCK = threading.Lock()
+_MACHINE_REFRESH_LOCK = threading.RLock()
+
+_SETUP_PAUSE_RECOVERY_WINDOW_S = 2 * 60 * 60
+MACHINE_STATE_HEARTBEAT_WRITE_INTERVAL_S = 5.0
+PRODUCTION_RUNTIME_INFO_KEY = "production_runtime"
+PRODUCTION_START_MOTION_ENABLED = True
+PRODUCTION_START_BLOCK_CODE = "NAK_ProductionRuntimeNotReleased"
+PRODUCTION_START_BLOCK_REASON = (
+    "Produktionsablauf noch nicht freigegeben: "
+    "vollstaendige Label-/Druck-/Wickler-Runtime fehlt"
+)
+PRODUCTION_START_REQUIRED_RUNTIME = (
+    "kontinuierlicher Vorzug mit Label-Schieberegister",
+    "Druckpositions-Stopp mit Nachkorrektur",
+    "Kamera-/Drucker-Bypasslogik",
+    "synchronisierte Wickler-Regelung",
+    "Entnahme-/Kontrollsensor-Ablauf",
+)
+PRODUCTION_MOTOR3_RAMP_MM_S2 = 300.0
+PRODUCTION_WICKLER_STANDBY_PERCENT = 50.0
+PRODUCTION_WICKLER_MIN_PERCENT = 8.0
+PRODUCTION_WICKLER_MAX_PERCENT = 92.0
+PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM = 1200.0
+PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S = 0.35
+PRODUCTION_WICKLER_MONITOR_INTERVAL_S = 0.5
+PRODUCTION_ESP_SYNC_KEYS = (
+    "MAP0001",
+    "MAP0002",
+    "MAP0003",
+    "MAP0004",
+    "MAP0005",
+    "MAP0006",
+    "MAP0011",
+    "MAP0012",
+    "MAP0014",
+    "MAP0016",
+    "MAP0017",
+    "MAP0018",
+    "MAP0019",
+    "MAP0020",
+    "MAP0021",
+    "MAP0035",
+    "MAP0036",
+    "MAP0037",
+    "MAP0038",
+    "MAP0040",
+    "MAP0041",
+    "MAP0042",
+    "MAP0043",
+    "MAP0044",
+    "MAP0045",
+    "MAP0046",
+    "MAP0066",
+    "MAP0067",
+    "MAP0068",
+    "MAP0069",
+    "MAP0070",
+    "MAP0071",
+    "MAP0072",
+    "MAP0073",
+    "MAP0074",
+    "MAP0075",
+    "MAP0076",
+)
+WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
+WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
+WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
 STOP_MODE_AXIS_TARGETS_MM = {
     5: 0.0,    # Material-Kontrollkamera TV1
     6: -20.0,  # Sensor Etikettenerfassung
@@ -92,10 +238,40 @@ STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
 STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 30.0
 STOP_MODE_POSITION_VERIFY_POLL_S = 0.5
-STOP_MODE_POSITION_LOGIC_VERSION = 6
+STOP_MODE_POSITION_LOGIC_VERSION = 10
+STOP_MODE_POSITION_LIMIT_MARGIN_TENTHS = 1
 SETUP_AXIS_POSITION_TOLERANCE_TENTHS = 1
 SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S = 45.0
 SETUP_AXIS_POSITION_VERIFY_POLL_S = 0.25
+SETUP_AXIS_MOVE_SET_MAX_ATTEMPTS = 3
+SETUP_AXIS_MOVE_SET_SHORT_VERIFY_TIMEOUT_S = 3.0
+MOTOR_HARDWARE_FEEDBACK_IO = {
+    # AZD DOUT0 is commissioned as MOVE (function 134).  Where OUT1 is wired,
+    # AZD DOUT1 stays IN-POS (function 138) for the positioning-complete edge.
+    1: {"move": ("esp32_plc58", "I1.0"), "in_pos": ("esp32_plc58", "I1.1")},
+    2: {"move": ("esp32_plc58", "I1.2"), "in_pos": ("esp32_plc58", "I1.3")},
+    4: {"move": ("esp32_plc58", "I0.9")},
+    5: {"move": ("esp32_plc58", "I0.10")},
+    6: {"move": ("esp32_plc58", "I2.0")},
+    7: {"move": ("esp32_plc58", "I2.1")},
+    8: {"move": ("esp32_plc58", "I2.3")},
+    9: {"move": ("esp32_plc58", "I2.2")},
+}
+
+
+def production_start_motion_enabled() -> bool:
+    return bool(PRODUCTION_START_MOTION_ENABLED)
+
+
+def microtom_state_queue_options(pkey: str, value: object) -> tuple[str | None, bool]:
+    key = str(pkey or "").strip().upper()
+    ptype = key[:3]
+    if ptype not in {"MAS", "MAE", "MAW"}:
+        return None, False
+    if ptype in {"MAE", "MAW"} or key == "MAS0028":
+        suffix = "active" if _truthy(value) else "clear"
+        return f"state:{key}:{suffix}", not _truthy(value)
+    return f"state:{key}", True
 
 
 def _command_action_name(command: int, current_state: int) -> str | None:
@@ -116,13 +292,32 @@ def _command_action_name(command: int, current_state: int) -> str | None:
     return None
 
 
+_LIGHT_CURTAIN_BLOCKED_ACTIONS = {"start", "setup", "sync", "empty", "rewind"}
+
+
 def mark_external_purge_clear(db: DB, *, source: str = "microtom"):
     state = _machine_state_row_from_db(db)
     info = dict(state.get("info") or {})
     purge_info = dict(info.get("purge") or {})
     purge_info["external_clear_ts"] = now_ts()
     purge_info["external_clear_source"] = str(source or "microtom")
+    purge_info.pop("external_active_ts", None)
+    purge_info.pop("external_active_source", None)
     info["purge"] = purge_info
+    safety_info = dict(info.get("safety") or {})
+    if safety_info.get("latched") or safety_info.get("phase") in (SAFETY_PHASE_LATCHED, SAFETY_PHASE_FAILED):
+        safety_info = {
+            **safety_info,
+            "latched": False,
+            "phase": SAFETY_PHASE_READY,
+            "external_clear_ts": purge_info["external_clear_ts"],
+            "external_clear_source": purge_info["external_clear_source"],
+        }
+        info["safety"] = safety_info
+    try:
+        ParamStore(db).apply_device_value("MAS0028", "0", promote_default=True)
+    except Exception:
+        pass
     _write_machine_state_to_db(
         db,
         current_state=state["current_state"],
@@ -136,6 +331,64 @@ def mark_external_purge_clear(db: DB, *, source: str = "microtom"):
     )
 
 
+def mark_external_purge_start(db: DB, *, source: str = "microtom"):
+    state = _machine_state_row_from_db(db)
+    info = dict(state.get("info") or {})
+    purge_info = dict(info.get("purge") or {})
+    purge_info["external_active_ts"] = now_ts()
+    purge_info["external_active_source"] = str(source or "microtom")
+    purge_info.pop("external_clear_ts", None)
+    purge_info.pop("external_clear_source", None)
+    info["purge"] = purge_info
+    try:
+        ParamStore(db).apply_device_value("MAS0028", "1", promote_default=True)
+    except Exception:
+        pass
+    _write_machine_state_to_db(
+        db,
+        current_state=state["current_state"],
+        requested_state=state["requested_state"],
+        state_source=state["state_source"],
+        warning_active=state["warning_active"],
+        purge_active=True,
+        production_label=state["production_label"],
+        last_label_no=state["last_label_no"],
+        info=info,
+    )
+
+
+def external_purge_active(info: dict[str, Any] | None) -> bool:
+    purge_info = dict((info or {}).get("purge") or {})
+    active_ts, clear_ts = _purge_marker_times(purge_info)
+    return active_ts > 0.0 and active_ts >= clear_ts
+
+
+def _purge_marker_times(purge_info: dict[str, Any] | None) -> tuple[float, float]:
+    purge_info = dict(purge_info or {})
+    try:
+        active_ts = float(purge_info.get("external_active_ts") or 0.0)
+    except Exception:
+        active_ts = 0.0
+    try:
+        clear_ts = float(purge_info.get("external_clear_ts") or 0.0)
+    except Exception:
+        clear_ts = 0.0
+    return active_ts, clear_ts
+
+
+def _merge_newer_purge_info(base_info: dict[str, Any], latest_info: dict[str, Any]) -> dict[str, Any]:
+    info = dict(base_info or {})
+    latest_purge = dict((latest_info or {}).get("purge") or {})
+    if not latest_purge:
+        return info
+    current_purge = dict(info.get("purge") or {})
+    latest_ts = max(_purge_marker_times(latest_purge))
+    current_ts = max(_purge_marker_times(current_purge))
+    if latest_ts > current_ts:
+        info["purge"] = latest_purge
+    return info
+
+
 def recent_external_purge_clear(db: DB, *, max_age_s: float = PURGE_EXTERNAL_CLEAR_GRACE_S) -> bool:
     state = _machine_state_row_from_db(db)
     try:
@@ -147,6 +400,18 @@ def recent_external_purge_clear(db: DB, *, max_age_s: float = PURGE_EXTERNAL_CLE
 
 def band_break_monitoring_active(machine_state: int) -> bool:
     return int(machine_state or 0) in PROCESS_BAND_BREAK_MONITOR_STATES
+
+
+def quick_setup_band_break_bypass_active(info: dict[str, Any] | None) -> bool:
+    setup_info = dict((info or {}).get("setup") or {})
+    result = setup_info.get("last_result") if isinstance(setup_info.get("last_result"), dict) else {}
+    return bool((result or {}).get("quick_setup_band_break_bypass"))
+
+
+def quick_setup_log_bypass_active(info: dict[str, Any] | None) -> bool:
+    setup_info = dict((info or {}).get("setup") or {})
+    result = setup_info.get("last_result") if isinstance(setup_info.get("last_result"), dict) else {}
+    return bool((result or {}).get("quick_setup_log_bypass"))
 
 
 def _machine_state_row_from_db(db: DB) -> dict[str, Any]:
@@ -243,44 +508,153 @@ class MachineRuntime:
         self.io_store = io_store
         self.logs = logs
         self.outbox = outbox
-        self.production_logs = ProductionLogManager(db, cfg=cfg, outbox=outbox)
+        self._button_led_points_cache: list[tuple[str, dict[str, Any]]] | None = None
+        self._button_led_last_plan: dict[str, bool] | None = None
+        self._status_lamp_points_cache: dict[str, dict[str, Any]] | None = None
+        self._status_lamp_last_plan: dict[str, bool] | None = None
+        production_log_dir = getattr(getattr(logs, "_production", None), "log_dir", None)
+        self.production_logs = ProductionLogManager(
+            db,
+            cfg=cfg,
+            outbox=outbox,
+            log_dir=production_log_dir or DEFAULT_PRODUCTION_LOG_DIR,
+        )
 
-    def refresh(self) -> dict[str, Any]:
+    def refresh(self, *, include_snapshot: bool = True) -> dict[str, Any]:
+        with _MACHINE_REFRESH_LOCK:
+            return self._refresh_unlocked(include_snapshot=include_snapshot)
+
+    def _refresh_unlocked(self, *, include_snapshot: bool = True) -> dict[str, Any]:
+        refresh_entered_ts = now_ts()
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
+        esp_critical_io_refresh = self._refresh_esp_critical_io_if_stale()
+        if esp_critical_io_refresh:
+            info["esp_critical_io_refresh"] = esp_critical_io_refresh
         io_map = self._io_values()
         param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         ts = now_ts()
 
+        monitor_state = _safe_int(param_map.get("MAS0001", snapshot["current_state"]), _safe_int(snapshot["current_state"], 0))
+        wickler_hard_monitor = self._monitor_wickler_hard_endstops(info, monitor_state, ts)
+        if wickler_hard_monitor and not bool(wickler_hard_monitor.get("ok", True)):
+            param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        if self._clear_setup_uncalibrated_wickler_latches(
+            monitor_state,
+            wickler_hard_monitor,
+            param_map,
+        ):
+            param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+
         button_mask = parse_button_mask(param_map.get("MAP0065", "1111111"))
         warning_active = self._warning_active(param_map)
         pause_active, pause_reasons = self._pause_state(param_map)
-        critical_active, critical_reasons = self._critical_state(io_map, param_map)
+        band_break_bypass = quick_setup_band_break_bypass_active(info)
+        critical_active, critical_reasons = self._critical_state(
+            io_map,
+            param_map,
+            band_break_bypass=band_break_bypass,
+        )
         format_plan = build_format_plan(param_map)
         safety_status = self._safety_status(io_map)
+        if recent_external_purge_clear(self.db) and not _truthy(param_map.get("MAS0028", "0")) and critical_active:
+            cleared_after_external_purge = self._clear_resettable_fault_latches_after_external_purge_clear(
+                io_map=io_map,
+                param_map=param_map,
+                critical_reasons=critical_reasons,
+                ts=ts,
+            )
+            if cleared_after_external_purge:
+                param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+                warning_active = self._warning_active(param_map)
+                critical_active, critical_reasons = self._critical_state(
+                    io_map,
+                    param_map,
+                    band_break_bypass=band_break_bypass,
+                )
         button_inputs = self._button_inputs(io_map)
         previous_button_inputs = info.get("button_inputs") or {}
-        reset_button_rising = bool(button_inputs.get(SAFETY_RESET_BUTTON)) and not bool(
-            previous_button_inputs.get(SAFETY_RESET_BUTTON)
-        )
         safety_info = dict(info.get("safety") or {})
-        safety_latched = bool(safety_info.get("latched")) or bool(safety_status["active"])
+        blocking_safety_active = self._blocking_safety_active(safety_status)
+        mas0028_active = _truthy(param_map.get("MAS0028", "0"))
+        safety_latched = bool(safety_info.get("latched")) or blocking_safety_active
 
         requested_command = _safe_int(param_map.get("MAS0002", info.get("requested_command", 0)), info.get("requested_command", 0))
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
         reset_command_active = requested_command == 2
         reset_command_ts = self._param_updated_ts("MAS0002") if reset_command_active else 0.0
         reset_command_seen_ts = float(safety_info.get("mas0002_reset_seen_ts") or 0.0)
         reset_command_rising = reset_command_active and reset_command_ts > reset_command_seen_ts
-        reset_needed = (
-            bool(safety_latched)
-            or bool(safety_status["active"])
-            or bool(critical_active)
-            or _truthy(param_map.get("MAS0028", "0"))
-            or int(snapshot["current_state"] or 0) in (20, 21)
-        )
-        safety_reset_requested = bool(reset_needed) and (reset_button_rising or reset_command_rising)
         forced_state: int | None = None
         forced_source: str | None = None
+        if self._stale_light_curtain_only_latch(
+            safety_status=safety_status,
+            critical_reasons=critical_reasons,
+            safety_info=safety_info,
+            info=info,
+            mas0028_active=mas0028_active,
+        ):
+            self.params.apply_device_value("MAS0028", "0", promote_default=True)
+            param_map["MAS0028"] = "0"
+            mas0028_active = False
+            safety_latched = False
+            safety_info = {
+                **safety_info,
+                "latched": False,
+                "phase": SAFETY_PHASE_READY,
+                "last_reasons": [],
+                "stale_light_curtain_latch_cleared_ts": ts,
+            }
+            info["safety"] = safety_info
+            if int(snapshot["current_state"] or 0) == 21:
+                forced_state = 9
+                forced_source = "stale_light_curtain_latch_cleared"
+        # Scenario B: a purge started by Microtom/DIClient remains active until
+        # Microtom/DIClient sends MAS0028=0.  Do not auto-clear MAS0028 merely
+        # because the local safety inputs are quiet; stale local latches are
+        # cleared by the explicit reset path instead.
+        reset_needed = (
+            bool(safety_latched)
+            or blocking_safety_active
+            or bool(critical_active)
+            or mas0028_active
+            or int(snapshot["current_state"] or 0) in (20, 21)
+        )
+        if requested_command == 2 and not reset_needed and int(snapshot["current_state"] or 0) == 9:
+            self.params.apply_device_value("MAS0002", "0", promote_default=True)
+            requested_command = 0
+            reset_command_active = False
+            reset_command_ts = 0.0
+        physical_reset_seen_ts = float(safety_info.get("physical_reset_seen_ts") or 0.0)
+        safety_reset_requested = bool(reset_needed) and bool(reset_command_rising)
+        light_curtain_auto_reset_result = None
+        if (
+            not safety_reset_requested
+            and self._light_curtain_auto_reset_due(
+                safety_status=safety_status,
+                critical_reasons=critical_reasons,
+                safety_info=safety_info,
+                info=info,
+                mas0028_active=mas0028_active,
+                ts=ts,
+            )
+        ):
+            safety_info = dict(safety_info)
+            light_curtain_auto_reset_result = self._perform_light_curtain_auto_reset(ts)
+            self._remember_light_curtain_auto_reset(
+                safety_info,
+                ts,
+                light_curtain_auto_reset_result,
+            )
+        hard_stop_reasons = list(critical_reasons)
+        if mas0028_active:
+            hard_stop_reasons.append("MAS0028")
+        if hard_stop_reasons:
+            self._force_stop_process_motion_on_fault(info, hard_stop_reasons, ts)
+        else:
+            info.pop("last_fault_motion_stop_signature", None)
+            info.pop("last_fault_motion_stop_ts", None)
+            info.pop("fault_motion_stop_state", None)
 
         if safety_reset_requested:
             if not _SAFETY_RESET_LOCK.acquire(blocking=False):
@@ -295,6 +669,7 @@ class MachineRuntime:
                     "last_reset": {
                         "ok": False,
                         "in_progress": True,
+                        "source": "manual",
                         "started_ts": (
                             safety_info.get("last_reset", {}).get("started_ts")
                             if isinstance(safety_info.get("last_reset"), dict)
@@ -303,10 +678,15 @@ class MachineRuntime:
                     },
                     "mas0002_reset_seen": reset_command_active,
                     "mas0002_reset_seen_ts": reset_command_seen_ts if reset_command_active else 0.0,
+                    "physical_reset_seen_ts": physical_reset_seen_ts,
                 }
             else:
                 try:
+                    reset_command_consumed = bool(reset_command_active)
                     reset_result = self._perform_safety_reset(safety_status, ts)
+                    self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                    requested_command = 0
+                    reset_command_active = False
                     io_map = self._io_values()
                     param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
                     critical_active, critical_reasons = self._critical_state(io_map, param_map)
@@ -315,8 +695,9 @@ class MachineRuntime:
                         "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
                         "last_reasons": list(safety_status.get("reasons") or []),
                         "last_reset": reset_result,
-                        "mas0002_reset_seen": reset_command_active,
-                        "mas0002_reset_seen_ts": reset_command_ts if reset_command_active else 0.0,
+                        "mas0002_reset_seen": reset_command_consumed,
+                        "mas0002_reset_seen_ts": reset_command_ts if reset_command_consumed else 0.0,
+                        "physical_reset_seen_ts": physical_reset_seen_ts,
                     }
                     if reset_result.get("ok"):
                         safety_latched = False
@@ -344,27 +725,56 @@ class MachineRuntime:
                 "last_reasons": list(safety_status.get("reasons") or safety_info.get("last_reasons") or []),
                 "mas0002_reset_seen": reset_command_active,
                 "mas0002_reset_seen_ts": reset_command_seen_ts if reset_command_active else 0.0,
+                "physical_reset_seen_ts": physical_reset_seen_ts,
             }
             forced_state = 21
             forced_source = "safety_latched"
         else:
-            button_request = self._button_requested_command(
-                current_state=snapshot["current_state"],
-                io_map=io_map,
-                previous_inputs=previous_button_inputs,
-                button_mask=button_mask,
-            )
-            if button_request is not None:
-                requested_command = button_request
-                self.params.apply_device_value("MAS0002", str(requested_command), promote_default=True)
-                self.logs.log("machine", "info", f"button requested command -> {requested_command}")
+            if requested_command:
+                clear_motor_setup_manual_lock(self.db, reason=f"machine_command:{requested_command}")
             if safety_info.get("phase") not in (SAFETY_PHASE_READY,):
-                safety_info = {"latched": False, "phase": "idle", "last_reasons": []}
+                auto_reset_fields = {
+                    key: value
+                    for key, value in safety_info.items()
+                    if key.startswith("light_curtain_auto_reset") or key == "last_auto_reset"
+                }
+                safety_info = {"latched": False, "phase": "idle", "last_reasons": [], **auto_reset_fields}
             safety_info["mas0002_reset_seen"] = reset_command_active
             safety_info["mas0002_reset_seen_ts"] = reset_command_ts if reset_command_active else 0.0
+            safety_info["physical_reset_seen_ts"] = physical_reset_seen_ts
+            if light_curtain_auto_reset_result is not None:
+                safety_info["last_auto_reset"] = {
+                    **dict(safety_info.get("last_auto_reset") or {}),
+                    "state_changed": False,
+                    "purge_changed": False,
+                }
 
         if forced_state is None and not safety_latched and requested_command not in (0, 2):
             command_action = _command_action_name(requested_command, int(snapshot["current_state"] or 0))
+            if command_action:
+                if self._motion_action_blocked_by_live_light_curtain(
+                    command_action,
+                    {**info, "safety_status": safety_status},
+                ):
+                    self.logs.log(
+                        "machine",
+                        "warning",
+                        f"MAS0002={requested_command} ignored while light curtain is active ({command_action})",
+                    )
+                    self._record_event(
+                        "machine_command_blocked",
+                        "warning",
+                        f"Maschinenkommando {command_action} wegen aktivem Lichtgitter blockiert",
+                        {
+                            "command": int(requested_command),
+                            "action": command_action,
+                            "from_state": int(snapshot["current_state"] or 0),
+                            "reason": "light_curtain_active",
+                        },
+                    )
+                    self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                    requested_command = 0
+                    command_action = None
             if command_action:
                 allowed_actions = state_actions(snapshot["current_state"])
                 if not allowed_actions.get(command_action, False):
@@ -383,25 +793,108 @@ class MachineRuntime:
                     )
                     self.params.apply_device_value("MAS0002", "0", promote_default=True)
                     requested_command = 0
+                elif requested_command == 1:
+                    if not production_start_motion_enabled():
+                        reason = PRODUCTION_START_BLOCK_REASON
+                        self.logs.log("machine", "warning", f"Start blockiert: {reason}")
+                        self._record_event(
+                            "production_start_blocked",
+                            "warning",
+                            f"Produktionsstart blockiert: {reason}",
+                            {
+                                "reason": reason,
+                                "required_runtime": list(PRODUCTION_START_REQUIRED_RUNTIME),
+                            },
+                        )
+                        self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                        production_info["last_start"] = {
+                            "ok": False,
+                            "blocked": True,
+                            "reason": reason,
+                            "ts": now_ts(),
+                        }
+                        production_info.pop("pending_start", None)
+                        requested_command = 0
+                    else:
+                        quick_setup_log_bypass = quick_setup_log_bypass_active(info)
+                        if quick_setup_log_bypass:
+                            allowed, reason = True, "OK_QUICK_SETUP_LOG_BYPASS"
+                        else:
+                            allowed, reason = self.production_logs.can_start_new_production()
+                        if not allowed:
+                            self.logs.log("machine", "warning", f"Start blockiert: {reason}")
+                            self._record_event(
+                                "production_start_blocked",
+                                "warning",
+                                f"Produktionsstart blockiert: {reason}",
+                                {"reason": reason},
+                            )
+                            self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                            production_info["last_start"] = {
+                                "ok": False,
+                                "blocked": True,
+                                "reason": reason,
+                                "ts": now_ts(),
+                            }
+                            production_info.pop("pending_start", None)
+                            requested_command = 0
+                        else:
+                            event = None
+                            if quick_setup_log_bypass:
+                                production_info["quick_setup_log_bypass"] = True
+                            else:
+                                production_info.pop("quick_setup_log_bypass", None)
+                                event = self.production_logs.handle_param_change("MAS0002", "1")
+                            if event and event.get("event") == "start":
+                                self.logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
+                            cleared_pause_errors = self._clear_pause_errors_for_production_start()
+                            if cleared_pause_errors:
+                                for pkey in cleared_pause_errors:
+                                    param_map[pkey] = "0"
+                                pause_active, pause_reasons = self._pause_state(param_map)
+                            production_info["pending_start"] = {
+                                "request_ts": now_ts(),
+                                "command_ts": self._param_updated_ts("MAS0002"),
+                                "from_state": int(snapshot["current_state"] or 0),
+                                "cleared_pause_errors": cleared_pause_errors,
+                            }
+                            self._record_event(
+                                "production_start_accepted",
+                                "info",
+                                "Produktionsstart akzeptiert: Wechsel nach Produktionsbetrieb wird vorbereitet",
+                                dict(production_info["pending_start"]),
+                            )
+                            production_info.pop("last_stop", None)
+                        # MAS0002 is a command byte. Once Start is accepted
+                        # from Pause, consume it immediately so the next
+                        # refresh in transition state 4 does not re-interpret
+                        # the same stale value as a new, invalid Start request.
+                        self.params.apply_device_value("MAS0002", "0", promote_default=True)
+            if requested_command in (2, 7):
+                production_info.pop("pending_start", None)
 
         setup_info = dict(info.get("setup") or {})
         setup_command_active = requested_command == 3
+        requested_state_override: int | None = None
         setup_command_ts = self._param_updated_ts("MAS0002") if setup_command_active else 0.0
         setup_seen_ts = float(setup_info.get("mas0002_setup_seen_ts") or 0.0)
-        setup_is_current_state = int(snapshot["current_state"] or 0) in (2, 3)
         # On software start/deploy while MAS0002 is already 3, do not start a
         # motion workflow implicitly. The next fresh Einrichten command still
         # has a newer param timestamp and will run the calibration sequence.
         stale_setup_command = (
             setup_command_active
             and setup_seen_ts == 0.0
-            and setup_is_current_state
             and setup_command_ts > 0.0
-            and (ts - setup_command_ts) > 5.0
+            and (refresh_entered_ts - setup_command_ts) > 5.0
         )
         if stale_setup_command:
             setup_seen_ts = setup_command_ts
             setup_info["mas0002_setup_seen_ts"] = setup_seen_ts
+            setup_info["stale_setup_command_dropped_ts"] = now_ts()
+            self.params.apply_device_value("MAS0002", "0", promote_default=True)
+            requested_command = 0
+            setup_command_active = False
+            self.logs.log("machine", "warning", "Alter Einrichten-Befehl nach Neustart verworfen")
         setup_rising = setup_command_active and setup_command_ts > setup_seen_ts
         if setup_rising:
             setup_info["mas0002_setup_seen_ts"] = setup_command_ts
@@ -415,15 +908,51 @@ class MachineRuntime:
                 }
                 self.logs.log("machine", "warning", "Einrichten-Wicklerworkflow wegen Safety/Purge nicht gestartet")
             else:
+                # Consume the command before the long-running setup workflow.
+                # Otherwise a second refresh/UI poll can see the same MAS0002=3
+                # while the first setup run is still moving axes and start a
+                # competing setup attempt.  MAS0001=2 keeps the orchestrator's
+                # setup-active guard true while MAS0002 is already idle.
+                setup_info.pop("completed_ts", None)
+                setup_info.pop("failed_ts", None)
+                setup_info.pop("pause_pending", None)
+                setup_info.pop("pause_pending_ts", None)
+                setup_info.pop("pause_completed_ts", None)
+                setup_info["last_result"] = {
+                    "running": True,
+                    "response": "SETUP_WICKLER=RUNNING",
+                    "started_ts": now_ts(),
+                }
+                self.params.apply_device_value("MAS0001", "2", promote_default=True)
+                self._notify_microtom("MAS0001", "2", dedupe_key="machine:MAS0001")
+                self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                info["setup"] = setup_info
+                self._write_state(
+                    current_state=2,
+                    requested_state=3,
+                    state_source="setup_started",
+                    warning_active=warning_active,
+                    purge_active=False,
+                    production_label=self._current_production_label(),
+                    last_label_no=snapshot["last_label_no"],
+                    info=info,
+                )
                 setup_info["last_result"] = self._perform_setup_wickler_calibration()
                 if bool((setup_info.get("last_result") or {}).get("ok")):
                     format_ready, missing_format = self._format_ready_for_pause(param_map)
                     setup_info["parameters_ready"] = format_ready
                     setup_info["missing_parameters"] = missing_format
                     if format_ready:
-                        self.params.apply_device_value("MAS0002", "7", promote_default=True)
-                        requested_command = 7
+                        # This is an internal setup-complete transition, not a
+                        # Microtom/user Pause command. Keep MAS0002 idle so the
+                        # next refresh does not reject a stale MAS0002=7 while
+                        # the state machine is still in transition state 2.
+                        self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                        requested_command = 0
+                        requested_state_override = 7
                         setup_info["completed_ts"] = now_ts()
+                        setup_info["pause_pending"] = True
+                        setup_info["pause_pending_ts"] = setup_info["completed_ts"]
                         self._record_event(
                             "setup_complete",
                             "info",
@@ -455,9 +984,81 @@ class MachineRuntime:
                         )
         info["setup"] = setup_info
 
-        requested_state = command_to_target_state(requested_command, snapshot["current_state"])
-        if pause_active and int(snapshot["current_state"] or 0) in (4, 5, 6):
+        setup_complete_ts = max(
+            _safe_float(setup_info.get("completed_ts"), 0.0),
+            self._latest_machine_event_ts("setup_complete"),
+        )
+        setup_seen_ts = _safe_float(setup_info.get("mas0002_setup_seen_ts"), 0.0)
+        setup_pause_recovery_due = (
+            requested_state_override is None
+            and requested_command == 0
+            and int(snapshot["current_state"] or 0) in (2, 3, 6)
+            and setup_complete_ts > 0.0
+            and setup_complete_ts >= setup_seen_ts
+            and (ts - setup_complete_ts) <= _SETUP_PAUSE_RECOVERY_WINDOW_S
+            and forced_state is None
+            and not safety_latched
+            and not critical_active
+            and not _truthy(param_map.get("MAS0028", "0"))
+        )
+        if setup_pause_recovery_due:
+            requested_state_override = 7
+            setup_info["pause_pending"] = True
+            setup_info["pause_pending_ts"] = setup_complete_ts
+            setup_info["pause_recovery_ts"] = ts
+            info["setup"] = setup_info
+
+        requested_state = (
+            requested_state_override
+            if requested_state_override is not None
+            else command_to_target_state(requested_command, snapshot["current_state"])
+        )
+        if requested_command == 0 and requested_state_override is None:
+            try:
+                transition_state = int(snapshot["current_state"] or 0)
+                previous_requested_state = int(snapshot.get("requested_state") or 0)
+            except Exception:
+                transition_state = 0
+                previous_requested_state = 0
+            expected_final_state = TRANSITION_FINALS.get(transition_state)
+            if expected_final_state is not None and previous_requested_state == expected_final_state:
+                requested_state = expected_final_state
+        pending_start = production_info.get("pending_start") if isinstance(production_info.get("pending_start"), dict) else {}
+        start_transition_pending = bool(pending_start) and int(snapshot["current_state"] or 0) == 4
+        pause_reasons_are_label_only = bool(pause_reasons) and set(str(reason) for reason in pause_reasons).issubset(
+            PAUSE_ERROR_KEYS
+        )
+        pause_forces_state = (
+            pause_active
+            and int(snapshot["current_state"] or 0) in (4, 5, 6)
+            and not (start_transition_pending and pause_reasons_are_label_only)
+        )
+        if pause_forces_state:
+            pause_signature = ",".join(str(reason) for reason in pause_reasons)
+            if (
+                int(snapshot["current_state"] or 0) in (4, 5)
+                and pause_signature
+                and str(production_info.get("last_pause_reason_signature") or "") != pause_signature
+            ):
+                reason_text = self._describe_runtime_reasons(pause_reasons)
+                self.logs.log("machine", "warning", f"Produktionspause angefordert: {reason_text}")
+                self._record_event(
+                    "production_pause_requested",
+                    "warning",
+                    f"Produktionspause angefordert: {reason_text}",
+                    {
+                        "pause_reasons": list(pause_reasons),
+                        "reason_text": reason_text,
+                        "from_state": int(snapshot["current_state"] or 0),
+                        "requested_state_before_pause": requested_state,
+                    },
+                )
+                production_info["last_pause_reason_signature"] = pause_signature
+                production_info["last_pause_reason_ts"] = ts
             requested_state = 7
+        elif not pause_active:
+            production_info.pop("last_pause_reason_signature", None)
+            production_info.pop("last_pause_reason_ts", None)
 
         purge_active = critical_active or _truthy(param_map.get("MAS0028", "0"))
         if purge_active != _truthy(param_map.get("MAS0028", "0")):
@@ -475,15 +1076,154 @@ class MachineRuntime:
                 snapshot["current_state"],
                 estop_ok=not bool(safety_status["estop_active"]),
                 light_curtain_ok=not bool(safety_status["light_curtain_active"]),
-                ups_ok=self._bool_io(io_map, "raspi_plc21", "I0.6", default=True),
+                ups_ok=bool(safety_status.get("ups_ok", True)),
                 purge_active=purge_active,
             )
+            if state_source == "light_curtain_pause":
+                requested_state = 7
 
+        previous_state = int(snapshot["current_state"] or 0)
+        production_state_synced_to_esp = False
+        pending_start_ts = _safe_float((pending_start or {}).get("request_ts"), 0.0)
+        pending_start_age_s = max(0.0, float(ts) - pending_start_ts) if pending_start_ts > 0.0 else 0.0
+        if pending_start and (pending_start_age_s > 120.0 or int(new_state or 0) not in (4, 5)):
+            if pending_start_age_s <= 120.0:
+                self._record_event(
+                    "production_start_aborted_before_runner",
+                    "warning",
+                    (
+                        "Produktionsstart vor Runner-Start abgebrochen: "
+                        f"Status {previous_state} -> {int(new_state or 0)}, "
+                        f"Pausegruende {self._describe_runtime_reasons(pause_reasons) if pause_reasons else '-'}"
+                    ),
+                    {
+                        "pending_start": dict(pending_start),
+                        "from_state": previous_state,
+                        "to_state": int(new_state or 0),
+                        "state_source": state_source,
+                        "pause_reasons": list(pause_reasons),
+                        "critical_reasons": list(critical_reasons),
+                        "safety_status": dict(safety_status),
+                    },
+                )
+            production_info.pop("pending_start", None)
+            pending_start = {}
+
+        light_curtain_motion_pause_due = (
+            state_source == "light_curtain_pause"
+            and previous_state in (5, 10, 11)
+            and int(new_state or 0) == 7
+        )
+        production_stop_due = (
+            (previous_state == 5 and int(new_state or 0) != 5)
+            or (bool(production_info.get("active")) and int(new_state or 0) not in (4, 5))
+            or light_curtain_motion_pause_due
+        )
+        if production_stop_due:
+            stop_reason = f"state_{previous_state}_to_{int(new_state or 0)}"
+            if light_curtain_motion_pause_due:
+                stop_reason = "light_curtain_pause"
+            elif pause_active and int(new_state or 0) in (6, 7):
+                stop_reason = "pause:" + (",".join(pause_reasons) or "unknown")
+            stop_result = self._stop_production_motion(
+                reason=stop_reason,
+                target_state=int(new_state or 0),
+            )
+            production_info["last_stop"] = stop_result
+            production_info["active"] = False
+            production_info.pop("pending_start", None)
+            event = self.production_logs.handle_param_change("MAS0002", "2")
+            if event and event.get("event") == "stop":
+                self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
+            if not bool(stop_result.get("ok")):
+                self.params.apply_device_value("MAS0028", "1", promote_default=True)
+                self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+                new_state = 21
+                requested_state = 21
+                state_source = "production_stop_failed"
+                purge_active = True
+                self._record_event(
+                    "production_stop_failed",
+                    "error",
+                    "Produktionsstop nicht vollstaendig bestaetigt: Motion- oder Wickler-Stopverifikation fehlgeschlagen",
+                    stop_result,
+                )
+
+        production_start_due = int(new_state or 0) == 5 and bool(pending_start)
+        if production_start_due:
+            start_result = self._start_production_motion(param_map, format_plan)
+            production_info["last_start"] = start_result
+            production_info.pop("pending_start", None)
+            production_state_synced_to_esp = bool(start_result.get("synced_state") == 5)
+            if bool(start_result.get("ok")):
+                production_info["active"] = True
+                production_info["active_since_ts"] = now_ts()
+                production_info["plan"] = dict(start_result.get("plan") or {})
+            else:
+                self.logs.log("machine", "error", f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
+                self._record_event(
+                    "production_start_failed",
+                    "error",
+                    f"Produktionsstart fehlgeschlagen: {start_result.get('error')}",
+                    start_result,
+                )
+                fail_stop = self._stop_production_motion(reason="production_start_failed", target_state=7)
+                production_info["last_stop"] = fail_stop
+                production_info["active"] = False
+                event = self.production_logs.handle_param_change("MAS0002", "2")
+                if event and event.get("event") == "stop":
+                    self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
+                new_state = 7
+                requested_state = 7
+                state_source = "production_start_failed"
+                purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
+
+        if bool(production_info.get("active")) and int(new_state or 0) == 5:
+            wickler_monitor = self._monitor_active_production_wicklers(production_info, ts)
+            if wickler_monitor is not None:
+                production_info["active"] = False
+                production_info["last_stop"] = dict(wickler_monitor.get("stop") or {})
+                production_info.pop("pending_start", None)
+                new_state = 21
+                requested_state = 21
+                state_source = "production_wickler_fault"
+                purge_active = True
+
+        esp_machine_state_sync = dict(info.get("esp_machine_state_sync") or {})
+        esp_sync_failed_state = _safe_int(esp_machine_state_sync.get("failed_state"), -1)
+        esp_sync_failed_ts = _safe_float(esp_machine_state_sync.get("failed_ts"), 0.0)
+        esp_sync_retry_due = (
+            esp_sync_failed_state != int(new_state or 0)
+            or esp_sync_failed_ts <= 0.0
+            or (float(ts) - esp_sync_failed_ts) >= 10.0
+        )
+        esp_state_sync_due = (
+            int(new_state or 0) not in (4, 5)
+            and _safe_int(esp_machine_state_sync.get("state"), -1) != int(new_state or 0)
+            and esp_sync_retry_due
+        )
         state_changed = new_state != snapshot["current_state"]
         mas0001_value_changed = str(new_state) != str(param_map.get("MAS0001", ""))
+        if light_curtain_auto_reset_result is not None:
+            last_auto_reset = dict(safety_info.get("last_auto_reset") or {})
+            if last_auto_reset:
+                last_auto_reset["state_changed"] = bool(state_source == "light_curtain_pause" and state_changed)
+                last_auto_reset["purge_changed"] = False
+                safety_info["last_auto_reset"] = last_auto_reset
         if state_changed or mas0001_value_changed:
             self.params.apply_device_value("MAS0001", str(new_state), promote_default=True)
             self._notify_microtom("MAS0001", str(new_state), dedupe_key="machine:MAS0001")
+        if (state_changed or mas0001_value_changed or esp_state_sync_due) and not production_state_synced_to_esp:
+            if self._sync_esp_machine_state(int(new_state)):
+                esp_machine_state_sync = {"state": int(new_state), "ts": now_ts()}
+            elif esp_state_sync_due:
+                esp_machine_state_sync = {
+                    **esp_machine_state_sync,
+                    "failed_state": int(new_state or 0),
+                    "failed_ts": now_ts(),
+                }
+        elif production_state_synced_to_esp:
+            esp_machine_state_sync = {"state": int(new_state), "ts": now_ts()}
         if state_changed:
             self._record_event(
                 "state_change",
@@ -493,20 +1233,36 @@ class MachineRuntime:
                     "from_state": snapshot["current_state"],
                     "to_state": new_state,
                     "source": state_source,
+                    "purge_active": bool(purge_active),
+                    "critical_reasons": list(critical_reasons),
+                    "pause_reasons": list(pause_reasons),
+                    "requested_command": int(requested_command or 0),
+                    "requested_state": int(requested_state or 0),
+                    "mas0028": str(param_map.get("MAS0028", "")),
+                    "safety_status": dict(safety_status),
                 },
             )
             self.logs.log("machine", "info", f"state {snapshot['current_state']} -> {new_state} ({state_source})")
 
+        if int(new_state or 0) == 7 and bool(setup_info.get("pause_pending")):
+            setup_info["pause_pending"] = False
+            setup_info["pause_completed_ts"] = ts
+            info["setup"] = setup_info
+
         actions = state_actions(new_state)
         self._apply_stop_mode_axis_targets(new_state, info, state_changed=state_changed, ts=ts)
-        self._apply_button_leds(new_state, button_mask, ts)
-        self._apply_safety_button_leds(new_state, safety_info, ts)
-        self._apply_status_lamp(new_state, warning_active=warning_active, ts=ts)
         button_leds = button_led_plan(new_state, button_mask, ts=ts)
         if self._safety_led_override_active(new_state, safety_info):
-            button_leds.update(self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts))
+            button_leds.update(self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts, button_mask))
+        # Physical button LEDs are driven by the dedicated button LED tick in
+        # service.py.  The machine refresh only publishes the calculated plan
+        # for the HMI/snapshot; writing here as well makes the blink cadence
+        # race against the tick when refresh() work takes longer than usual.
+        self._apply_status_lamp(new_state, warning_active=warning_active, ts=ts)
 
         machine_label = self._current_production_label()
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        info["esp_machine_state_sync"] = esp_machine_state_sync
         info.update(
             {
                 "requested_command": requested_command,
@@ -517,8 +1273,8 @@ class MachineRuntime:
                 "safety": safety_info,
                 "safety_status": safety_status,
                 "pause_reasons": pause_reasons,
-                "warning_keys": self._active_param_keys("MAW"),
-                "error_keys": self._active_param_keys("MAE"),
+                "warning_keys": sorted(pkey for pkey, value in param_map.items() if pkey.startswith("MAW") and _truthy(value)),
+                "error_keys": sorted(pkey for pkey, value in param_map.items() if pkey.startswith("MAE") and _truthy(value)),
                 "status_lamp": lamp_outputs_for_state(new_state, warning_active=warning_active, ts=ts),
                 "button_leds": button_leds,
                 "format_plan": format_plan,
@@ -535,7 +1291,149 @@ class MachineRuntime:
             info=info,
         )
 
-        return self.snapshot()
+        if include_snapshot:
+            return self.snapshot()
+        return {
+            "ok": True,
+            "current_state": int(new_state or 0),
+            "requested_state": int(requested_state or 0),
+            "state_source": state_source,
+        }
+
+    def refresh_button_led_outputs(self, *, ts: float | None = None) -> dict[str, Any]:
+        ts = now_ts() if ts is None else float(ts)
+        snapshot = self._state_row()
+        state = int(snapshot.get("current_state") or 1)
+        info = dict(snapshot.get("info") or {})
+        button_mask = parse_button_mask(self.params.get_effective_value("MAP0065"))
+        safety_info = dict(info.get("safety") or {})
+
+        button_leds = button_led_plan(state, button_mask, ts=ts)
+        if self._safety_led_override_active(state, safety_info):
+            button_leds.update(self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts, button_mask))
+
+        self._apply_button_led_plan(button_leds, force=True, source="button-led-tick")
+
+        if dict(info.get("button_leds") or {}) != button_leds:
+            info["button_leds"] = button_leds
+            self._write_state(
+                current_state=state,
+                requested_state=int(snapshot.get("requested_state") or state),
+                state_source=str(snapshot.get("state_source") or "runtime"),
+                warning_active=bool(snapshot.get("warning_active")),
+                purge_active=bool(snapshot.get("purge_active")),
+                production_label=str(snapshot.get("production_label") or ""),
+                last_label_no=int(snapshot.get("last_label_no") or 0),
+                info=info,
+            )
+
+        return {
+            "ok": True,
+            "state": state,
+            "button_mask": button_mask,
+            "button_leds": button_leds,
+            "safety_override": self._safety_led_override_active(state, safety_info),
+        }
+
+    def refresh_physical_button_inputs(
+        self,
+        *,
+        previous_inputs: dict[str, Any] | None = None,
+        ts: float | None = None,
+        refresh_hardware: bool = True,
+    ) -> dict[str, Any]:
+        ts = now_ts() if ts is None else float(ts)
+        button_pin_labels = {pin_label for device_code, pin_label in BUTTON_INPUTS.values() if device_code == "raspi_plc21"}
+        if refresh_hardware:
+            self._refresh_single_io_device("raspi_plc21", pin_labels=button_pin_labels)
+        io_map = self._io_values_for_pins(BUTTON_INPUTS.values())
+        current_inputs = self._button_inputs(io_map)
+        return self.process_physical_button_inputs(
+            current_inputs=current_inputs,
+            previous_inputs=previous_inputs,
+            ts=ts,
+        )
+
+    def process_physical_button_inputs(
+        self,
+        *,
+        current_inputs: dict[str, Any],
+        previous_inputs: dict[str, Any] | None = None,
+        ts: float | None = None,
+    ) -> dict[str, Any]:
+        ts = now_ts() if ts is None else float(ts)
+        snapshot = self._state_row()
+        info = dict(snapshot.get("info") or {})
+        normalized_current = {name: bool(current_inputs.get(name)) for name in BUTTON_INPUTS}
+        io_map = {
+            (device_code, pin_label.upper()): ("1" if normalized_current.get(name) else "0")
+            for name, (device_code, pin_label) in BUTTON_INPUTS.items()
+        }
+        current_inputs = self._button_inputs(io_map)
+        previous = dict(previous_inputs if previous_inputs is not None else (info.get("button_inputs") or {}))
+        button_mask = parse_button_mask(self.params.get_effective_value("MAP0065"))
+
+        request: dict[str, Any] | None = self._physical_button_request(
+            snapshot=snapshot,
+            info=info,
+            io_map=io_map,
+            previous_inputs=previous,
+            button_mask=button_mask,
+        )
+        accepted = False
+        error = ""
+        if request is not None:
+            ok, msg = self.params.set_value("MAS0002", str(request["command"]), actor="physical-panel")
+            if ok:
+                accepted = True
+                self.logs.log(
+                    "machine",
+                    "info",
+                    f"physical button {request['button']} -> MAS0002={request['command']}",
+                )
+                self._record_event(
+                    "physical_button",
+                    "info",
+                    f"Physische Taste {request['button']} ausgeloest -> {state_label(request['target_state'])}",
+                    {
+                        **request,
+                        "actor": "physical-panel",
+                    },
+                )
+                info["last_physical_button_request"] = {**request, "ts": ts}
+                if int(request.get("command") or 0) == 2:
+                    safety_info = dict(info.get("safety") or {})
+                    safety_info["physical_reset_seen_ts"] = ts
+                    info["safety"] = safety_info
+            else:
+                error = str(msg)
+                self.logs.log(
+                    "machine",
+                    "warning",
+                    f"physical button {request['button']} rejected: {msg}",
+                )
+
+        if current_inputs != dict(info.get("button_inputs") or {}) or request is not None:
+            info["button_inputs"] = current_inputs
+            self._write_state(
+                current_state=int(snapshot.get("current_state") or 1),
+                requested_state=int(snapshot.get("requested_state") or snapshot.get("current_state") or 1),
+                state_source=str(snapshot.get("state_source") or "runtime"),
+                warning_active=bool(snapshot.get("warning_active")),
+                purge_active=bool(snapshot.get("purge_active")),
+                production_label=str(snapshot.get("production_label") or ""),
+                last_label_no=int(snapshot.get("last_label_no") or 0),
+                info=info,
+            )
+
+        return {
+            "ok": True,
+            "current_inputs": current_inputs,
+            "previous_inputs": previous,
+            "request": request,
+            "accepted": accepted,
+            "error": error,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         row = self._state_row()
@@ -561,6 +1459,122 @@ class MachineRuntime:
         if event_type == "label_complete":
             result = self._handle_label_complete(payload)
             return {"ok": True, "accepted": True, "event": event_type, "result": result}
+        if event_type == "label_length_fault":
+            result = self._handle_label_length_fault(payload)
+            return {"ok": True, "accepted": True, "event": event_type, "result": result}
+        if event_type == "production_fault":
+            result = self._handle_production_fault(payload)
+            return {"ok": True, "accepted": True, "event": event_type, "result": result}
+        if event_type in ("production_registration_late", "production_registration_fault"):
+            result = self._handle_registration_diagnostic_event(event_type, payload)
+            return {"ok": True, "accepted": True, "event": event_type, "result": result}
+        if event_type == "production_velocity_stop_for_print":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            remaining = _safe_float(payload.get("remaining_mm"), 0.0)
+            speed = _safe_float(payload.get("infeed_speed_mm_s"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Velocity-Handover vor Druckposition: Label {label_no}, Restweg {remaining:.3f}mm, "
+                f"Einlaufgeschwindigkeit {speed:.3f}mm/s",
+                dict(payload or {}),
+            )
+            return {
+                "ok": True,
+                "accepted": True,
+                "event": event_type,
+                "wickler_prepare": {
+                    "ok": True,
+                    "skipped": "wait_until_print_position_reached",
+                    "label_no": label_no,
+                },
+                **event_result,
+            }
+        if event_type == "production_print_position_commanded":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            target = _safe_float(payload.get("target_abs_mm"), 0.0)
+            remaining = _safe_float(payload.get("remaining_mm"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Druckposition befohlen: Label {label_no}, Ziel {target:.3f}mm, Restweg {remaining:.3f}mm",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_print_position_reached":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            infeed_speed = _safe_float(payload.get("infeed_speed_mm_s"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Druckposition erreicht: Label {label_no}, Einlaufgeschwindigkeit {infeed_speed:.3f}mm/s",
+                dict(payload or {}),
+            )
+            next_wickler_takt = (
+                self._prepare_next_production_wickler_takt(
+                    label_no=label_no,
+                    reason="after_print_position_reached",
+                )
+                if bool(event_result.get("recorded"))
+                else {"ok": True, "skipped": "duplicate_print_position_reached", "label_no": label_no}
+            )
+            return {"ok": True, "accepted": True, "event": event_type, "next_wickler_takt": next_wickler_takt, **event_result}
+        if event_type == "production_wickler_runline_released":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            speed = _safe_float(payload.get("infeed_speed_mm_s"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Wickler-Runline vor Druckstop geloest: Label {label_no}, Einlaufgeschwindigkeit {speed:.3f}mm/s",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_print_trigger":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            bypass = bool(payload.get("bypass"))
+            duration = _safe_int(payload.get("duration_ms"), 0)
+            error_mm = _safe_float(payload.get("position_error_mm"), 0.0)
+            mode = "Bypass" if bypass else "real"
+            suffix = f", Dauer {duration}ms" if duration > 0 else ""
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Drucktrigger {mode}: Label {label_no}, Positionsfehler {error_mm:.4f}mm{suffix}",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_print_resolved":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            bypass = bool(payload.get("bypass"))
+            mode = "Bypass" if bypass else "real"
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Druck abgeschlossen {mode}: Label {label_no}",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_print_position_failed":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            reason = str(payload.get("reason") or "unknown")
+            remaining = _safe_float(payload.get("remaining_mm"), 0.0)
+            self._record_event(
+                event_type,
+                "warning",
+                f"Druckposition nicht erreichbar: Label {label_no}, {reason}, Restweg {remaining:.3f}mm",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type}
+        if event_type == "setup_measure_absolute_commanded":
+            phase_name = str(payload.get("phase_name") or payload.get("phase") or "unknown")
+            target = _safe_float(payload.get("azd_target_mm"), 0.0)
+            self._record_event(
+                event_type,
+                "info",
+                f"Einrichten ID3-Absolutziel: {phase_name}, Ziel {target:.3f}mm",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type}
         if event_type == "machine_state":
             state = _safe_int(payload.get("state"), 1)
             self.params.apply_device_value("MAS0001", str(state), promote_default=True)
@@ -572,7 +1586,82 @@ class MachineRuntime:
             return {"ok": True, "accepted": True, "event": event_type}
         return {"ok": False, "accepted": False, "detail": "missing event type"}
 
-    def press_virtual_button(self, button: str, *, actor: str = "machine-ui") -> dict[str, Any]:
+    def _handle_production_fault(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fault = str(payload.get("fault") or "").strip() or "unknown"
+        if fault == "label_edge_timeout":
+            acquire = _safe_float(payload.get("label_acquire_mm"), 0.0)
+            limit = _safe_float(payload.get("label_acquire_limit_mm"), 0.0)
+            timeout_ms = _safe_int(payload.get("label_acquire_timeout_ms"), 0)
+            initial_level = _safe_int(payload.get("initial_label_level"), 0)
+            label_sensor = _safe_int(payload.get("label_sensor"), 0)
+            message = (
+                "Produktionsfehler Labelkante nicht erkannt: "
+                f"{acquire:.1f}mm von {limit:.1f}mm, Timeout {timeout_ms}ms, "
+                f"Startpegel I0.5={initial_level}, aktueller I0.5={label_sensor}"
+            )
+        else:
+            message = f"Produktionsfehler: {fault}"
+        self._record_event("production_fault", "warning", message, dict(payload or {}))
+        return {"fault": fault, "message": message}
+
+    def _handle_registration_diagnostic_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        diag = dict((payload or {}).get("diag") or {})
+        reason = str((payload or {}).get("reason") or diag.get("reason") or "").strip() or "unknown"
+        label_no = _safe_int(diag.get("label_no"), 0)
+        error = _safe_float(diag.get("error_mm"), 0.0)
+        abs_error = _safe_float(diag.get("abs_error_mm"), abs(error))
+        tolerance = _safe_float(diag.get("tolerance_mm"), 0.05)
+        target = _safe_float(diag.get("target_mm"), 0.0)
+        progressed = _safe_float(diag.get("progressed_mm"), 0.0)
+        attempts = _safe_int(diag.get("registration_attempts"), 0)
+        max_attempts = _safe_int(diag.get("max_attempts"), 3)
+        infeed_speed = _safe_float(diag.get("infeed_speed_mm_s"), 0.0)
+        motor_busy = bool(diag.get("motor_busy"))
+        motor_ready = bool(diag.get("motor_ready", True))
+        message = (
+            f"MAE0048 Diagnose {reason}: Label {label_no}, "
+            f"Abweichung {error:.4f}mm (abs {abs_error:.4f}mm, Tol +/-{tolerance:.4f}mm), "
+            f"Weg {progressed:.3f}/{target:.3f}mm, "
+            f"Korrekturen {attempts}/{max_attempts}, "
+            f"Infeed {infeed_speed:.3f}mm/s, Motor busy={int(motor_busy)} ready={int(motor_ready)}"
+        )
+        self._record_event(event_type, "warning", message, dict(payload or {}))
+        return {"reason": reason, "message": message, "diag": diag}
+
+    def _handle_label_length_fault(self, payload: dict[str, Any]) -> dict[str, Any]:
+        label_no = _safe_int(payload.get("label_no"), 0)
+        label = self._current_production_label() or sanitize_production_label(self.params.get_effective_value("MAS0029"))
+        fault = str(payload.get("fault") or "").strip()
+        measured = _safe_float(payload.get("measured_length_mm"), 0.0)
+        expected = _safe_float(payload.get("expected_length_mm"), 0.0)
+        tolerance = _safe_float(payload.get("tolerance_mm"), 0.0)
+        direction = "zu kurz" if fault == "too_short" else ("zu lang" if fault == "too_long" else fault or "ungueltig")
+        message = (
+            f"Label {label_no} Laengenfehler {direction}: "
+            f"Ist {measured:.3f}mm, Soll {expected:.3f}mm +/- {tolerance:.3f}mm"
+        )
+        with self.db._conn() as c:
+            c.execute(
+                "INSERT INTO label_events(ts,production_label,label_no,event_type,payload_json) VALUES(?,?,?,?,?)",
+                (now_ts(), label, label_no, "label_length_fault", json.dumps(payload, ensure_ascii=False)),
+            )
+        self.production_logs.append_line("labels", label, f"[label_length_fault] {message}\n")
+        self._record_event(
+            "label_length_fault",
+            "warning",
+            message,
+            {"production_label": label, **dict(payload)},
+        )
+        return {
+            "production_label": label,
+            "label_no": label_no,
+            "fault": fault,
+            "measured_length_mm": measured,
+            "expected_length_mm": expected,
+            "tolerance_mm": tolerance,
+        }
+
+    def _normalize_machine_button(self, button: str) -> str:
         button_name = str(button or "").strip().lower().replace("-", "_")
         if button_name == "start":
             button_name = "start_pause"
@@ -581,58 +1670,109 @@ class MachineRuntime:
         valid = {"start_pause", "stop", "setup", "sync", "empty", "rewind"}
         if button_name not in valid:
             raise RuntimeError(f"unknown machine button: {button}")
+        return button_name
 
-        snapshot = self._state_row()
+    def _button_reset_context(self, snapshot: dict[str, Any], info: dict[str, Any]) -> bool:
+        safety_info = dict((info or {}).get("safety") or {})
+        return (
+            int((snapshot or {}).get("current_state") or 1) in (20, 21)
+            or bool((snapshot or {}).get("purge_active"))
+            or bool(safety_info.get("latched"))
+        )
+
+    def _motion_action_blocked_by_live_light_curtain(self, action_name: str | None, info: dict[str, Any]) -> bool:
+        if str(action_name or "") not in _LIGHT_CURTAIN_BLOCKED_ACTIONS:
+            return False
+        safety_status = dict((info or {}).get("safety_status") or {})
+        return bool(safety_status.get("light_curtain_active"))
+
+    def _resolve_button_press(
+        self,
+        button: str,
+        *,
+        snapshot: dict[str, Any],
+        info: dict[str, Any],
+        button_mask: dict[str, bool],
+    ) -> dict[str, Any]:
+        button_name = self._normalize_machine_button(button)
         current_state = int(snapshot["current_state"] or 1)
-        info = dict(snapshot.get("info") or {})
-        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
-        button_mask = parse_button_mask(param_map.get("MAP0065", "1111111"))
+        reset_context = self._button_reset_context(snapshot, info)
         allowed_actions = state_actions(current_state)
-        safety_info = dict(info.get("safety") or {})
-        reset_context = current_state in (20, 21) or bool(snapshot.get("purge_active")) or bool(safety_info.get("latched"))
 
         command = button_to_command(button_name, current_state)
-        action_name = "pause" if button_name == "start_pause" and current_state == 5 else (
-            "start" if button_name == "start_pause" else button_name
-        )
+        action_name = action_for_button(button_name, current_state, reset_context=reset_context)
         if button_name == "start_pause" and reset_context:
             command = 2
-            action_name = "stop"
-        elif reset_context and button_name not in {"start_pause", "stop"}:
+        elif reset_context:
             raise RuntimeError(f"button {button_name} is blocked during reset/safety context")
         if command is None:
             raise RuntimeError(f"button {button_name} is not valid in state {current_state}")
+        if action_name is None:
+            raise RuntimeError(f"button {button_name} has no mapped action in state {current_state}")
+        if not reset_context and self._motion_action_blocked_by_live_light_curtain(action_name, info):
+            raise RuntimeError(f"button {button_name} blocked while light curtain is active")
         if not reset_context and not allowed_actions.get(action_name, False):
             raise RuntimeError(f"button {button_name} is not allowed in state {current_state}")
-        if not reset_context and not button_mask.get(action_name, False):
+        reset_button = button_name == "start_pause" and reset_context
+        if not reset_button and not button_mask.get(action_name, False):
             raise RuntimeError(f"button {button_name} blocked by MAP0065")
 
-        ok, msg = self.params.set_value("MAS0002", str(command), actor="microtom")
-        if not ok:
-            raise RuntimeError(msg)
         target_state = command_to_target_state(command, current_state)
-        payload = {
+        return {
             "button": button_name,
             "action": action_name,
-            "command": command,
+            "command": int(command),
             "from_state": current_state,
             "target_state": target_state,
-            "actor": actor,
             "reset_context": reset_context,
+        }
+
+    def press_virtual_button(self, button: str, *, actor: str = "machine-ui") -> dict[str, Any]:
+        snapshot = self._state_row()
+        info = dict(snapshot.get("info") or {})
+        try:
+            info["safety_status"] = self._safety_status(self._io_values())
+        except Exception:
+            pass
+        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        button_mask = parse_button_mask(param_map.get("MAP0065", "1111111"))
+        request = self._resolve_button_press(
+            button,
+            snapshot=snapshot,
+            info=info,
+            button_mask=button_mask,
+        )
+
+        ok, msg = self.params.set_value("MAS0002", str(request["command"]), actor=actor)
+        if not ok:
+            raise RuntimeError(msg)
+        payload = {
+            "actor": actor,
+            **request,
         }
         self.logs.log(
             "machine",
             "info",
-            f"virtual button {button_name} -> MAS0002={command} ({state_label(target_state)})",
+            f"virtual button {request['button']} -> MAS0002={request['command']} ({state_label(request['target_state'])})",
         )
         self._record_event(
             "virtual_button",
             "info",
-            f"Virtuelle Taste {button_name} ausgeloest -> {state_label(target_state)}",
+            f"Virtuelle Taste {request['button']} ausgeloest -> {state_label(request['target_state'])}",
             payload,
         )
-        refreshed = self.refresh()
-        return {"ok": True, "button": button_name, "command": command, "target_state": target_state, "snapshot": refreshed}
+        # The virtual HMI button must behave like the physical panel: it only
+        # queues MAS0002.  The central service loop owns the runtime transition
+        # and motion start, avoiding competing refreshes from web/API workers.
+        snapshot = self.snapshot()
+        return {
+            "ok": True,
+            "button": request["button"],
+            "command": request["command"],
+            "target_state": request["target_state"],
+            "queued": True,
+            "snapshot": snapshot,
+        }
 
     def _handle_label_complete(self, payload: dict[str, Any]) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
@@ -785,6 +1925,22 @@ class MachineRuntime:
         last_label_no: int,
         info: dict[str, Any],
     ):
+        latest_row = _machine_state_row_from_db(self.db)
+        latest_info = dict(latest_row.get("info") or {})
+        info = _merge_newer_purge_info(info, latest_info)
+        ts = now_ts()
+        if (
+            int(latest_row.get("current_state") or 0) == int(current_state)
+            and int(latest_row.get("requested_state") or 0) == int(requested_state)
+            and str(latest_row.get("state_source") or "runtime") == str(state_source or "runtime")
+            and bool(latest_row.get("warning_active")) == bool(warning_active)
+            and bool(latest_row.get("purge_active")) == bool(purge_active)
+            and str(latest_row.get("production_label") or "") == str(production_label or "")
+            and int(latest_row.get("last_label_no") or 0) == int(last_label_no or 0)
+            and dict(latest_row.get("info") or {}) == dict(info or {})
+            and (ts - float(latest_row.get("updated_ts") or 0.0)) < MACHINE_STATE_HEARTBEAT_WRITE_INTERVAL_S
+        ):
+            return
         with self.db._conn() as c:
             c.execute(
                 """INSERT INTO machine_state(
@@ -810,7 +1966,7 @@ class MachineRuntime:
                     str(production_label or ""),
                     int(last_label_no or 0),
                     json.dumps(info, ensure_ascii=False),
-                    now_ts(),
+                    ts,
                 ),
             )
 
@@ -820,6 +1976,150 @@ class MachineRuntime:
                 "INSERT INTO machine_events(ts,event_type,severity,message,payload_json) VALUES(?,?,?,?,?)",
                 (now_ts(), event_type, severity, message, json.dumps(payload or {}, ensure_ascii=False)),
             )
+
+    def _record_production_event_once(
+        self,
+        event_type: str,
+        severity: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        dedupe_window_s: float = 2.0,
+    ) -> dict[str, Any]:
+        payload = dict(payload or {})
+        signature = self._production_event_signature(event_type, payload)
+        if signature:
+            cutoff = now_ts() - max(0.1, float(dedupe_window_s))
+            with self.db._conn() as c:
+                rows = c.execute(
+                    """SELECT payload_json
+                         FROM machine_events
+                        WHERE event_type=? AND ts>=?
+                        ORDER BY id DESC LIMIT 12""",
+                    (str(event_type), cutoff),
+                ).fetchall()
+            for row in rows:
+                try:
+                    previous_payload = json.loads(row[0] or "{}")
+                except Exception:
+                    previous_payload = {}
+                if self._production_event_signature(event_type, previous_payload) == signature:
+                    return {"recorded": False, "deduped": True, "dedupe_signature": signature}
+        self._record_event(event_type, severity, message, payload)
+        return {"recorded": True, "deduped": False, "dedupe_signature": signature}
+
+    @staticmethod
+    def _production_event_signature(event_type: str, payload: dict[str, Any] | None) -> str:
+        payload = dict(payload or {})
+        event_type = str(event_type or "").strip().lower()
+        label_no = _safe_int(payload.get("label_no"), 0)
+        if label_no <= 0:
+            return ""
+        if event_type == "production_print_position_commanded":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    _event_float_key(payload.get("target_abs_mm"), 3),
+                    _event_float_key(payload.get("remaining_mm"), 3),
+                ]
+            )
+        if event_type == "production_velocity_stop_for_print":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    _event_float_key(payload.get("remaining_mm"), 3),
+                ]
+            )
+        if event_type == "production_print_position_reached":
+            return "|".join([event_type, str(label_no)])
+        if event_type == "production_wickler_runline_released":
+            return "|".join([event_type, str(label_no)])
+        if event_type == "production_print_trigger":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    str(int(bool(payload.get("bypass")))),
+                    str(int(bool(payload.get("use_laser")))),
+                    str(_safe_int(payload.get("duration_ms"), 0)),
+                ]
+            )
+        if event_type == "production_print_resolved":
+            return "|".join([event_type, str(label_no), str(int(bool(payload.get("bypass"))))])
+        return ""
+
+    def _latest_machine_event_ts(self, event_type: str) -> float:
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT ts FROM machine_events WHERE event_type=? ORDER BY ts DESC LIMIT 1",
+                (str(event_type),),
+            ).fetchone()
+        if not row:
+            return 0.0
+        return _safe_float(row[0], 0.0)
+
+    def _latest_motor_setup_master_ts(self, motor_id: int) -> float:
+        try:
+            with self.db._conn() as c:
+                row = c.execute(
+                    "SELECT updated_ts FROM motor_setup_master WHERE motor_id=?",
+                    (int(motor_id),),
+                ).fetchone()
+        except Exception:
+            return 0.0
+        if not row:
+            return 0.0
+        return _safe_float(row[0], 0.0)
+
+    def _latest_motor_position_reference_suspect_event(self, motor_id: int) -> dict[str, Any] | None:
+        try:
+            with self.db._conn() as c:
+                rows = c.execute(
+                    """SELECT ts,event_type,message,payload_json
+                       FROM machine_events
+                       WHERE event_type IN ('motor_setup_position_restored','motor_position_reference_suspect')
+                       ORDER BY ts DESC
+                       LIMIT 100"""
+                ).fetchall()
+        except Exception:
+            return None
+        for ts, event_type, message, payload_json in rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {}
+            try:
+                payload_motor_id = int(payload.get("motor_id"))
+            except Exception:
+                continue
+            if payload_motor_id != int(motor_id):
+                continue
+            return {
+                "ts": _safe_float(ts, 0.0),
+                "event_type": str(event_type or ""),
+                "message": str(message or ""),
+                "payload": payload if isinstance(payload, dict) else {},
+            }
+        return None
+
+    def _position_axis_reference_suspect(self, motor_id: int) -> dict[str, Any] | None:
+        suspect_event = self._latest_motor_position_reference_suspect_event(motor_id)
+        if not suspect_event:
+            return None
+        suspect_ts = _safe_float(suspect_event.get("ts"), 0.0)
+        master_ts = self._latest_motor_setup_master_ts(motor_id)
+        if suspect_ts <= master_ts:
+            return None
+        return {
+            "motor_id": int(motor_id),
+            "blocked": True,
+            "reason": "previous_automatic_position_restore_after_last_machine_setup",
+            "suspect_ts": suspect_ts,
+            "motor_setup_master_ts": master_ts,
+            "suspect_event": suspect_event,
+        }
 
     def _recent_events(self, limit: int = 20) -> list[dict[str, Any]]:
         with self.db._conn() as c:
@@ -966,6 +2266,1195 @@ class MachineRuntime:
         finally:
             _SETUP_WICKLER_LOCK.release()
 
+    def _describe_runtime_reasons(self, reasons: list[str] | tuple[str, ...]) -> str:
+        cleaned = [str(reason).strip() for reason in (reasons or []) if str(reason).strip()]
+        if not cleaned:
+            return "keine Ursache angegeben"
+        labels = {
+            "notaus": "Not-Aus",
+            "lichtgitter": "Lichtgitter",
+            "usv_not_ok": "USV nicht OK",
+            "bahnriss_einlauf": "Bandriss Einlauf",
+            "bahnriss_auswurf": "Bandriss Auswurf",
+            "MAS0028": "Purge/Safety-Latch MAS0028",
+        }
+        meta: dict[str, dict[str, Any]] = {}
+        param_keys = [reason for reason in cleaned if reason.startswith(("MAE", "MAW", "MAS", "MAP"))]
+        if param_keys:
+            try:
+                placeholders = ",".join("?" for _ in param_keys)
+                with self.db._conn() as c:
+                    rows = c.execute(
+                        f"SELECT pkey,name,message,possible_cause,remedy FROM params WHERE pkey IN ({placeholders})",
+                        tuple(param_keys),
+                    ).fetchall()
+                meta = {
+                    str(row[0]): {
+                        "name": row[1],
+                        "message": row[2],
+                        "cause": row[3],
+                        "remedy": row[4],
+                    }
+                    for row in rows
+                }
+            except Exception:
+                meta = {}
+        parts: list[str] = []
+        for reason in cleaned:
+            item = meta.get(reason) or {}
+            title = str(item.get("name") or labels.get(reason) or reason).strip()
+            msg = str(item.get("message") or "").strip()
+            if msg and msg not in title:
+                parts.append(f"{reason} {title}: {msg}")
+            else:
+                parts.append(f"{reason} {title}" if title != reason else reason)
+        return "; ".join(parts)
+
+    def _clear_pause_errors_for_production_start(self) -> list[str]:
+        cleared: list[str] = []
+        for pkey in sorted(PAUSE_ERROR_KEYS):
+            try:
+                if not _truthy(self.params.get_effective_value(pkey)):
+                    continue
+                self.params.apply_device_value(pkey, "0", promote_default=True)
+                self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
+                cleared.append(pkey)
+            except Exception as exc:
+                self.logs.log("machine", "warning", f"Start konnte Pausebit {pkey} nicht loeschen: {exc}")
+        if cleared:
+            reason_text = self._describe_runtime_reasons(cleared)
+            self.logs.log("machine", "warning", f"Produktionsstart quittiert Pausefehler: {reason_text}")
+            self._record_event(
+                "production_pause_errors_cleared_for_start",
+                "warning",
+                f"Produktionsstart quittiert Pausefehler: {reason_text}",
+                {"cleared": cleared, "reason_text": reason_text},
+            )
+        return cleared
+
+    def _force_stop_process_motion_on_fault(self, info: dict[str, Any], reasons: list[str], ts: float) -> None:
+        # Red machine faults are not just UI state: they must remove motion
+        # authority from Motor 3 and both Wicklers. Keep this idempotent because
+        # refresh() runs cyclically while the fault remains latched.
+        reason_set = {str(reason).strip() for reason in reasons if str(reason).strip()}
+        signature = ",".join(sorted(reason_set)) or "fault"
+        last_signature = str(info.get("last_fault_motion_stop_signature") or "")
+        stop_state = dict(info.get("fault_motion_stop_state") or {})
+        previous_reasons = {str(reason).strip() for reason in (stop_state.get("reasons") or []) if str(reason).strip()}
+        new_real_reasons = reason_set.difference(previous_reasons).difference({"MAS0028"})
+        try:
+            last_ts = float(info.get("last_fault_motion_stop_ts") or 0.0)
+        except Exception:
+            last_ts = 0.0
+        if bool(stop_state.get("ok")) and not new_real_reasons:
+            stop_state["latest_reasons"] = sorted(reason_set)
+            stop_state["latest_signature"] = signature
+            stop_state["latest_ts"] = float(ts)
+            info["fault_motion_stop_state"] = stop_state
+            return
+        if signature == last_signature and bool(stop_state.get("ok")):
+            return
+        if signature == last_signature and (float(ts) - last_ts) < 2.0:
+            return
+
+        ok = False
+        reason_text = self._describe_runtime_reasons(sorted(reason_set))
+        try:
+            if bool(getattr(self.cfg, "esp_simulation", False)):
+                self.logs.log("machine", "warning", f"Fault motion stop simulated: {reason_text}")
+            else:
+                SetupWicklerOrchestrator(self.cfg, self.params, self.logs).stop_all_motion()
+                self.logs.log("machine", "warning", f"Fault motion stop executed: {reason_text}")
+            ok = True
+            self._record_event(
+                "fault_motion_stop",
+                "warning",
+                f"Kritischer Fehler: Motor 3 und beide Wickler wurden gestoppt ({reason_text})",
+                {"reasons": sorted(reason_set), "reason_text": reason_text},
+            )
+        except Exception as exc:
+            self.logs.log("machine", "error", f"Fault motion stop failed for {reason_text}: {repr(exc)}")
+            self._record_event(
+                "fault_motion_stop",
+                "error",
+                f"Kritischer Fehler: Bewegungsstop konnte nicht vollstaendig gesendet werden: {exc}",
+                {"reasons": sorted(reason_set), "reason_text": reason_text},
+            )
+        finally:
+            info["last_fault_motion_stop_signature"] = signature
+            info["last_fault_motion_stop_ts"] = float(ts)
+            info["fault_motion_stop_state"] = {
+                "ok": ok,
+                "signature": signature,
+                "reasons": sorted(reason_set),
+                "ts": float(ts),
+            }
+
+    def _production_motion_plan(self, param_map: dict[str, str], format_plan: dict[str, Any]) -> dict[str, Any]:
+        label_plan = dict((format_plan or {}).get("label") or {})
+        printer_plan = dict((format_plan or {}).get("printer") or {})
+        length_tenths = _safe_float(label_plan.get("length_tenths_mm", param_map.get("MAP0002")), 0.0)
+        travel_mm = length_tenths / 10.0
+        if travel_mm < 1.0 or travel_mm > PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
+            raise RuntimeError(f"Etikettenlaenge ausserhalb ESP-Grenze: {travel_mm:.3f}mm")
+        first_print_tenths = _safe_float(printer_plan.get("stop_distance_tenths_mm"), 0.0)
+        first_wickler_travel_mm = first_print_tenths / 10.0
+        if first_wickler_travel_mm < 1.0:
+            first_wickler_travel_mm = travel_mm
+        if first_wickler_travel_mm > PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
+            raise RuntimeError(
+                f"Erster Wickler-Takt ausserhalb Grenze: {first_wickler_travel_mm:.3f}mm "
+                f"(max {PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:.1f}mm)"
+            )
+        speed_mm_s = abs(_safe_float(param_map.get("MAP0014"), 100.0))
+        speed_mm_s = max(1.0, min(250.0, speed_mm_s))
+        ramp_mm_s2 = PRODUCTION_MOTOR3_RAMP_MM_S2
+        return {
+            "travel_mm": travel_mm,
+            "first_wickler_travel_mm": first_wickler_travel_mm,
+            "speed_mm_s": speed_mm_s,
+            "ramp_mm_s2": ramp_mm_s2,
+            "wickler_standby_percent": PRODUCTION_WICKLER_STANDBY_PERCENT,
+        }
+
+    def _production_esp(self, line: str, *, read_timeout_s: float | None = None) -> str:
+        command = str(line or "").strip()
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            response = f"SIM_{command}"
+            self.logs.log("esp-plc", "info", f"production motion simulation: {command} -> {response}")
+            return response
+        client = EspPlcClient(
+            self.cfg.esp_host,
+            self.cfg.esp_port,
+            timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
+        )
+        response = client.exchange_line(
+            command,
+            read_timeout_s=read_timeout_s or self.cfg.get_float("esp_command_timeout_s", 8.0),
+        )
+        self.logs.log("esp-plc", "info", f"production motion: {command} -> {response}")
+        if str(response or "").strip().upper().startswith("NAK"):
+            raise RuntimeError(f"ESP rejected '{command}': {response}")
+        return response
+
+    def _production_esp_retry(
+        self,
+        line: str,
+        *,
+        read_timeout_s: float | None = None,
+        attempts: int = 2,
+        settle_s: float = 0.2,
+    ) -> str:
+        command = str(line or "").strip()
+        errors: list[str] = []
+        for attempt in range(1, max(1, int(attempts)) + 1):
+            try:
+                return self._production_esp(command, read_timeout_s=read_timeout_s)
+            except Exception as exc:
+                errors.append(repr(exc))
+                if attempt >= max(1, int(attempts)):
+                    break
+                self.logs.log(
+                    "esp-plc",
+                    "warning",
+                    f"production motion retry {attempt + 1}/{max(1, int(attempts))}: {command} after {repr(exc)}",
+                )
+                time.sleep(max(0.0, float(settle_s)) * attempt)
+        raise RuntimeError(f"ESP command failed after {max(1, int(attempts))} attempts: {command}; errors={errors}")
+
+    def _production_status_after_start_error(self, start_command: str, exc: Exception) -> tuple[bool, str]:
+        errors: list[str] = [repr(exc)]
+        try:
+            for attempt in range(1, 6):
+                try:
+                    response = self._production_esp("PROCESS PRODUCTION STATUS?", read_timeout_s=5.0)
+                    text = str(response or "").strip()
+                    payload = json.loads(text.removeprefix("JSON ").strip())
+                    if bool(payload.get("running")):
+                        self.logs.log(
+                            "esp-plc",
+                            "warning",
+                            f"production start ACK missing, ESP runner is running after {repr(exc)}",
+                        )
+                        return True, f"ACK_PROCESS_PRODUCTION_START_STATUS_RUNNING after {repr(exc)}"
+                    return False, f"{repr(exc)}; status={payload}"
+                except Exception as status_exc:
+                    errors.append(f"status_attempt_{attempt}:{repr(status_exc)}")
+                    time.sleep(0.35 * attempt)
+        except Exception as outer_exc:
+            errors.append(f"status_outer:{repr(outer_exc)}")
+        return False, f"{repr(exc)}; status_errors={errors}; command={start_command}"
+
+    def _sync_esp_machine_state(self, state: int, *, required: bool = False) -> bool:
+        try:
+            self._production_esp_retry(
+                f"SYNC MAS0001={int(state)}",
+                read_timeout_s=5.0 if required else 3.0,
+                attempts=4 if required else 3,
+                settle_s=0.35,
+            )
+            return True
+        except Exception as exc:
+            level = "error" if required else "warning"
+            self.logs.log("esp-plc", level, f"MAS0001 sync to ESP failed for state {state}: {repr(exc)}")
+            if required:
+                raise
+            return False
+
+    def _production_esp_sync_values(self, param_map: dict[str, str]) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for key in PRODUCTION_ESP_SYNC_KEYS:
+            if key == "MAP0067" and not _truthy(param_map.get("MAP0036", "0")):
+                continue
+            if key == "MAP0068" and not _truthy(param_map.get("MAP0037", "0")):
+                continue
+            if key in {"MAP0069", "MAP0070"} and not _truthy(param_map.get("MAP0035", "0")):
+                continue
+            value = str(param_map.get(key, self.params.get_effective_value(key) or "")).strip()
+            if not value:
+                continue
+            values[key] = value
+        return values
+
+    def _production_esp_sync_reference(self, state_info: dict[str, Any]) -> dict[str, str]:
+        setup_info = dict((state_info or {}).get("setup") or {})
+        setup_result = setup_info.get("last_result") if isinstance(setup_info.get("last_result"), dict) else {}
+        production_info = dict((state_info or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        candidates = (
+            setup_result.get("production_param_sync_values") if isinstance(setup_result, dict) else None,
+            production_info.get("production_param_sync_values"),
+            (production_info.get("last_start") or {}).get("synced_param_values")
+            if isinstance(production_info.get("last_start"), dict)
+            else None,
+        )
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate:
+                return {str(key): str(value) for key, value in candidate.items()}
+        return {}
+
+    def _sync_production_params_to_esp(
+        self,
+        param_map: dict[str, str],
+        *,
+        previous_values: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        values = self._production_esp_sync_values(param_map)
+        previous = {str(key): str(value) for key, value in (previous_values or {}).items()}
+        synced: list[str] = []
+        skipped: list[str] = []
+        for key, value in values.items():
+            if previous.get(key) == value:
+                skipped.append(key)
+                continue
+            self._production_esp_retry(f"SYNC {key}={value}", read_timeout_s=5.0, attempts=2)
+            synced.append(key)
+        return {
+            "synced": synced,
+            "skipped": skipped,
+            "values": values,
+        }
+
+    def _verify_wickler_production_state(
+        self,
+        role: str,
+        state: dict[str, Any],
+        *,
+        require_indexed_mode: bool | None = False,
+    ) -> dict[str, Any]:
+        telemetry = dict((state or {}).get("telemetry") or {})
+        drive = dict((state or {}).get("drive") or {})
+        values = dict((state or {}).get("values") or {})
+        mode = str(telemetry.get("modeLabel") or "")
+        mode_css = str(telemetry.get("modeCss") or "")
+        try:
+            wipe_percent = float(telemetry.get("wipePercent"))
+        except Exception:
+            wipe_percent = 50.0
+        errors: list[str] = []
+        mae_keys: set[str] = set()
+        role_keys = WICKLER_ROLE_DANCER_MAE.get(role, {})
+        requires_calibration = _truthy(telemetry.get("requiresCalibration")) if "requiresCalibration" in telemetry else False
+        calibrated = _truthy(telemetry.get("calibrated")) if "calibrated" in telemetry else True
+        indexed_enabled = bool((state.get("master") or {}).get("indexedModeEnabled")) or bool(
+            telemetry.get("indexedModeEnabled")
+        )
+        if mode not in {"Bereit", "Warnung"}:
+            errors.append(f"mode={mode or '-'}")
+        if requires_calibration or not calibrated:
+            errors.append("Wippe nicht eingemessen")
+            if role_keys.get("blocked"):
+                mae_keys.add(role_keys["blocked"])
+        if mode_css.lower() == "fault":
+            errors.append(f"modeCss={mode_css}")
+        if bool(telemetry.get("externalStopActive")):
+            errors.append("externalStopActive")
+        if drive.get("online") is False:
+            errors.append("drive offline")
+        if bool(drive.get("alarm")):
+            errors.append(f"drive alarm {drive.get('alarmCode')}")
+        if require_indexed_mode is not True and not indexed_enabled and drive.get("continuousModeReady") is False:
+            errors.append("continuousModeReady=false")
+        if drive.get("lastCommandOk") is False:
+            errors.append("lastCommandOk=false")
+        if wipe_percent <= PRODUCTION_WICKLER_MIN_PERCENT or wipe_percent >= PRODUCTION_WICKLER_MAX_PERCENT:
+            errors.append(f"Wippe {wipe_percent:.1f}%")
+            if wipe_percent <= PRODUCTION_WICKLER_MIN_PERCENT and role_keys.get("low"):
+                mae_keys.add(role_keys["low"])
+            if wipe_percent >= PRODUCTION_WICKLER_MAX_PERCENT and role_keys.get("high"):
+                mae_keys.add(role_keys["high"])
+        for key, text in (
+            ("maeLow", "Taenzerarm zu tief"),
+            ("maeHigh", "Taenzerarm zu hoch"),
+            ("maeBlocked", "Taenzerarm blockiert"),
+        ):
+            if bool(values.get(key)):
+                errors.append(text)
+                if key == "maeLow" and role_keys.get("low"):
+                    mae_keys.add(role_keys["low"])
+                elif key == "maeHigh" and role_keys.get("high"):
+                    mae_keys.add(role_keys["high"])
+                elif key == "maeBlocked" and role_keys.get("blocked"):
+                    mae_keys.add(role_keys["blocked"])
+        indexed_errors: list[str] = []
+        if require_indexed_mode is True and not indexed_enabled:
+            indexed_errors.append("indexedModeEnabled=false")
+        indexed_command_seq = _safe_int(telemetry.get("indexedCommandSeq"), 0)
+        if require_indexed_mode is True and indexed_command_seq <= 0:
+            indexed_errors.append("indexedCommandSeq=0")
+        if require_indexed_mode is False and indexed_enabled:
+            indexed_errors.append("indexedModeEnabled=true")
+        if require_indexed_mode is None and indexed_enabled and indexed_command_seq <= 0:
+            indexed_errors.append("indexedModeEnabled=true,indexedCommandSeq=0")
+        return {
+            "role": role,
+            "ok": not errors and not indexed_errors,
+            "errors": errors + indexed_errors,
+            "mode": mode,
+            "calibrated": calibrated,
+            "requires_calibration": requires_calibration,
+            "wipe_percent": wipe_percent,
+            "drive_ready": drive.get("ready"),
+            "drive_move": drive.get("move"),
+            "drive_alarm": drive.get("alarm"),
+            "continuous_mode_ready": drive.get("continuousModeReady"),
+            "indexed_mode_enabled": indexed_enabled,
+            "indexed_command_seq": indexed_command_seq,
+            "indexed_move_active": bool(telemetry.get("indexedMoveActive")) or bool(drive.get("move")),
+            "indexed_mode_required": bool(require_indexed_mode),
+            "mae_keys": sorted(mae_keys),
+        }
+
+    def _production_wickler_indexed_payload(self, plan: dict[str, Any], travel_mm: float) -> dict[str, str]:
+        safe_travel_mm = max(1.0, min(PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM, float(travel_mm)))
+        return {
+            "indexedModeEnabled": "1",
+            "indexedTravelMm": f"{safe_travel_mm:.3f}",
+            "indexedSpeedMmS": f"{float(plan['speed_mm_s']):.3f}",
+            "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
+        }
+
+    def _prepare_production_wicklers_continuous(
+        self,
+        plan: dict[str, Any],
+        *,
+        reason: str = "production_start_continuous_feed",
+        timeout_s: float = 5.0,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        master_payload = {
+            "indexedModeEnabled": "0",
+            "indexedSpeedMmS": f"{float(plan['speed_mm_s']):.3f}",
+            "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
+        }
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            if not client.available():
+                if bool(getattr(self.cfg, client.descriptor.simulation_attr, True)):
+                    results.append({"role": role, "ok": True, "simulation": True})
+                    continue
+                raise RuntimeError(f"{client.descriptor.label} endpoint missing")
+            master_reply = client.post_master(master_payload, timeout_s=timeout_s)
+            if not master_reply.get("ok", True):
+                raise RuntimeError(f"{client.descriptor.label} continuous master failed: {master_reply}")
+            ready_reply = client.release_for_continuous_motion(timeout_s=timeout_s)
+            if not ready_reply.get("ok", True):
+                raise RuntimeError(f"{client.descriptor.label} ready failed: {ready_reply}")
+            state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
+            verify = self._verify_wickler_production_state(role, state, require_indexed_mode=False)
+            result = {
+                "role": role,
+                "reason": reason,
+                "mode": "continuous",
+                "ready": ready_reply,
+                "master": master_reply,
+                "verify": verify,
+            }
+            results.append(result)
+            if not verify.get("ok"):
+                raise RuntimeError(f"{client.descriptor.label} nicht kontinuierlich produktionsbereit: {verify}")
+        return results
+
+    def _wait_production_wickler_indexed_prepared(
+        self,
+        client: SmartWicklerClient,
+        role: str,
+        *,
+        timeout_s: float,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        deadline = time.monotonic() + max(0.2, float(timeout_s))
+        last_state: dict[str, Any] = {}
+        last_verify: dict[str, Any] = {}
+        while True:
+            last_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
+            last_verify = self._verify_wickler_production_state(role, last_state, require_indexed_mode=True)
+            if bool(last_verify.get("ok")) and not bool(last_verify.get("indexed_move_active")):
+                return last_state, last_verify
+            if time.monotonic() >= deadline:
+                return last_state, last_verify
+            time.sleep(0.05)
+
+    def _prepare_production_wicklers(
+        self,
+        plan: dict[str, Any],
+        *,
+        travel_mm: float | None = None,
+        reason: str = "production_start",
+        timeout_s: float = 5.0,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        planned_travel_mm = float(travel_mm if travel_mm is not None else plan.get("first_wickler_travel_mm", plan["travel_mm"]))
+        master_payload = self._production_wickler_indexed_payload(plan, planned_travel_mm)
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            if not client.available():
+                if bool(getattr(self.cfg, client.descriptor.simulation_attr, True)):
+                    results.append({"role": role, "ok": True, "simulation": True})
+                    continue
+                raise RuntimeError(f"{client.descriptor.label} endpoint missing")
+            master_reply = client.post_master(master_payload, timeout_s=timeout_s)
+            if not master_reply.get("ok", True):
+                raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
+            state, verify = self._wait_production_wickler_indexed_prepared(
+                client,
+                role,
+                timeout_s=timeout_s,
+            )
+            result = {
+                "ok": bool(verify.get("ok")),
+                "role": role,
+                "reason": reason,
+                "travel_mm": planned_travel_mm,
+                "ready": {"ok": True, "unchanged": True, "source": "hardware_start_only"},
+                "master": master_reply,
+                "verify": verify,
+            }
+            results.append(result)
+            if not verify.get("ok"):
+                raise RuntimeError(f"{client.descriptor.label} nicht produktionsbereit: {verify}")
+        return results
+
+    def _prepare_next_production_wickler_takt(self, *, label_no: int, reason: str) -> dict[str, Any]:
+        try:
+            machine_state = _safe_int(self.params.get_effective_value("MAS0001"), 0)
+            if machine_state != 5:
+                return {"ok": True, "skipped": f"machine_state={machine_state}"}
+            param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+            plan = self._production_motion_plan(param_map, build_format_plan(param_map))
+            results = self._prepare_production_wicklers(
+                plan,
+                travel_mm=float(plan["travel_mm"]),
+                reason=reason,
+                timeout_s=1.2,
+            )
+            return {"ok": all(bool(item.get("ok", True)) for item in results), "label_no": int(label_no), "results": results}
+        except Exception as exc:
+            self.logs.log("machine", "warning", f"Folge-Wicklertakt konnte nicht vorbereitet werden: {exc}")
+            return {"ok": False, "label_no": int(label_no), "error": repr(exc)}
+
+    def _production_wickler_verifications(
+        self,
+        *,
+        timeout_s: float = 2.0,
+        require_indexed_mode: bool | None = None,
+    ) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            if not client.available():
+                if bool(getattr(self.cfg, client.descriptor.simulation_attr, True)):
+                    results.append({"role": role, "ok": True, "simulation": True})
+                    continue
+                error = f"{client.descriptor.label} endpoint missing"
+                results.append({"role": role, "ok": False, "error": error})
+                errors.append(error)
+                continue
+            try:
+                state = client.fetch_state(timeout_s=timeout_s)
+                verify = self._verify_wickler_production_state(
+                    role,
+                    state,
+                    require_indexed_mode=require_indexed_mode,
+                )
+                ok = bool(verify.get("ok"))
+                results.append({"role": role, "ok": ok, "verify": verify})
+                if not ok:
+                    errors.append(f"{client.descriptor.label}: {', '.join(str(e) for e in verify.get('errors') or ['not_ready'])}")
+            except Exception as exc:
+                error = f"{client.descriptor.label}: {repr(exc)}"
+                results.append({"role": role, "ok": False, "error": error})
+                errors.append(error)
+        return {"ok": not errors, "results": results, "errors": errors}
+
+    def _latch_wickler_monitor_faults(self, monitor: dict[str, Any]) -> list[str]:
+        latched: list[str] = []
+        for item in monitor.get("results") or []:
+            verify = dict((item or {}).get("verify") or {})
+            for pkey in verify.get("mae_keys") or []:
+                key = str(pkey or "").strip().upper()
+                if key not in WICKLER_DANCER_ERROR_KEYS:
+                    continue
+                self.params.apply_device_value(key, "1", promote_default=True)
+                self._notify_microtom(key, "1", dedupe_key=f"machine:{key}")
+                latched.append(key)
+        return sorted(set(latched))
+
+    @staticmethod
+    def _wickler_state_is_calibrating(telemetry: dict[str, Any]) -> bool:
+        mode = str(telemetry.get("modeLabel") or "").strip().lower()
+        return mode in {"einmessen", "calibrate", "calibration", "kalibrieren"}
+
+    @staticmethod
+    def _wickler_state_is_calibrated(telemetry: dict[str, Any]) -> bool:
+        if "requiresCalibration" in telemetry and _truthy(telemetry.get("requiresCalibration")):
+            return False
+        if "calibrated" in telemetry:
+            return _truthy(telemetry.get("calibrated"))
+        return True
+
+    def _monitor_wickler_hard_endstops(
+        self,
+        info: dict[str, Any],
+        machine_state: int,
+        ts: float,
+    ) -> Optional[dict[str, Any]]:
+        monitor_info = dict(info.get("wickler_hard_endstop_monitor") or {})
+        if int(machine_state or 0) not in WICKLER_DANCER_MONITOR_STATES:
+            info["wickler_hard_endstop_monitor"] = {
+                **monitor_info,
+                "active": False,
+                "last_state": int(machine_state or 0),
+            }
+            return None
+        last_ts = _safe_float(monitor_info.get("last_ts"), 0.0)
+        if last_ts > 0.0 and (float(ts) - last_ts) < WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S:
+            return None
+
+        results: list[dict[str, Any]] = []
+        latched: list[str] = []
+        faults: list[str] = []
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            role_keys = WICKLER_ROLE_DANCER_MAE.get(role, {})
+            item: dict[str, Any] = {"role": role}
+            if not client.available():
+                item["ok"] = True
+                item["skipped"] = "simulation_or_endpoint_missing"
+                results.append(item)
+                continue
+            try:
+                state = client.fetch_state(timeout_s=0.6)
+            except Exception as exc:
+                item["ok"] = True
+                item["skipped"] = "state_read_failed"
+                item["error"] = repr(exc)
+                results.append(item)
+                continue
+
+            telemetry = dict((state or {}).get("telemetry") or {})
+            drive = dict((state or {}).get("drive") or {})
+            values = dict((state or {}).get("values") or {})
+            item["mode"] = telemetry.get("modeLabel")
+            item["fault"] = telemetry.get("faultReason")
+            item["calibrated"] = telemetry.get("calibrated")
+            item["requires_calibration"] = telemetry.get("requiresCalibration")
+            item["drive_alarm"] = drive.get("alarm")
+            try:
+                wipe_percent = float(telemetry.get("wipePercent"))
+            except Exception:
+                wipe_percent = 50.0
+            item["wipe_percent"] = wipe_percent
+
+            if self._wickler_state_is_calibrating(telemetry):
+                item["ok"] = True
+                item["skipped"] = "calibrating"
+                results.append(item)
+                continue
+            if not self._wickler_state_is_calibrated(telemetry):
+                item["ok"] = True
+                item["skipped"] = "requires_calibration"
+                results.append(item)
+                continue
+
+            pkey: str | None = None
+            text: str | None = None
+            if wipe_percent <= WICKLER_HARD_ENDSTOP_LOW_PERCENT:
+                pkey = role_keys.get("low")
+                text = f"Wippe unten {wipe_percent:.1f}%"
+            elif wipe_percent >= WICKLER_HARD_ENDSTOP_HIGH_PERCENT:
+                pkey = role_keys.get("high")
+                text = f"Wippe oben {wipe_percent:.1f}%"
+            elif bool(values.get("maeLow")):
+                pkey = role_keys.get("low")
+                text = "Taenzerarm zu tief"
+            elif bool(values.get("maeHigh")):
+                pkey = role_keys.get("high")
+                text = "Taenzerarm zu hoch"
+            elif bool(values.get("maeBlocked")):
+                pkey = role_keys.get("blocked")
+                text = "Taenzerarm blockiert"
+
+            if pkey and text:
+                item["ok"] = False
+                item["mae_key"] = pkey
+                item["error"] = text
+                faults.append(f"{client.descriptor.label}: {text}")
+                self.params.apply_device_value(pkey, "1", promote_default=True)
+                self._notify_microtom(pkey, "1", dedupe_key=f"machine:{pkey}")
+                latched.append(pkey)
+            else:
+                item["ok"] = True
+            results.append(item)
+
+        monitor = {
+            "ok": not faults,
+            "active": True,
+            "ts": float(ts),
+            "machine_state": int(machine_state or 0),
+            "results": results,
+            "latched_mae": sorted(set(latched)),
+            "faults": faults,
+        }
+        monitor_info.update(monitor)
+        monitor_info["last_ts"] = float(ts)
+        signature = "|".join(sorted(faults))
+        if faults:
+            self.params.apply_device_value("MAS0028", "1", promote_default=True)
+            self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+            if signature and signature != str(monitor_info.get("last_fault_signature") or ""):
+                self._record_event(
+                    "wickler_hard_endstop_fault",
+                    "error",
+                    "Wickler-Wippe im harten Endbereich: " + "; ".join(faults),
+                    monitor,
+                )
+                self.logs.log("machine", "error", "Wickler-Wippe im harten Endbereich: " + "; ".join(faults))
+            monitor_info["last_fault_signature"] = signature
+            monitor_info["last_fault_ts"] = float(ts)
+        elif not signature:
+            monitor_info.pop("last_fault_signature", None)
+        info["wickler_hard_endstop_monitor"] = monitor_info
+        return monitor
+
+    def _clear_setup_uncalibrated_wickler_latches(
+        self,
+        machine_state: int,
+        monitor: Optional[dict[str, Any]],
+        param_map: dict[str, str],
+    ) -> bool:
+        if int(machine_state or 0) not in (2, 3):
+            return False
+        items = list((monitor or {}).get("results") or [])
+        if not items:
+            items = self._setup_uncalibrated_wickler_status_items()
+        changed = False
+        uncalibrated_roles: set[str] = set()
+        for item in items:
+            role = str((item or {}).get("role") or "")
+            role_keys = WICKLER_ROLE_DANCER_MAE.get(role, {})
+            if not role_keys:
+                continue
+            requires_calibration = (
+                str((item or {}).get("skipped") or "") == "requires_calibration"
+                or str((item or {}).get("skipped") or "") == "calibrating"
+                or _truthy((item or {}).get("requires_calibration"))
+                or _truthy((item or {}).get("calibrated")) is False
+            )
+            if not requires_calibration:
+                continue
+            uncalibrated_roles.add(role)
+            for key in role_keys.values():
+                if key and _truthy(param_map.get(key, "0")):
+                    self.params.apply_device_value(key, "0", promote_default=True)
+                    param_map[key] = "0"
+                    changed = True
+        active_mae = {str(key) for key, value in (param_map or {}).items() if str(key).startswith("MAE") and _truthy(value)}
+        if uncalibrated_roles and _truthy(param_map.get("MAS0028", "0")) and active_mae.issubset(WICKLER_DANCER_ERROR_KEYS):
+            self.params.apply_device_value("MAS0028", "0", promote_default=True)
+            param_map["MAS0028"] = "0"
+            changed = True
+        return changed
+
+    def _setup_uncalibrated_wickler_status_items(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            item: dict[str, Any] = {"role": role}
+            if not client.available():
+                item["skipped"] = "simulation_or_endpoint_missing"
+                item["ok"] = True
+                items.append(item)
+                continue
+            try:
+                state = client.fetch_state(timeout_s=0.45)
+            except Exception as exc:
+                item["skipped"] = "state_read_failed"
+                item["error"] = repr(exc)
+                item["ok"] = True
+                items.append(item)
+                continue
+            telemetry = dict((state or {}).get("telemetry") or {})
+            item["mode"] = telemetry.get("modeLabel")
+            item["calibrated"] = telemetry.get("calibrated")
+            item["requires_calibration"] = telemetry.get("requiresCalibration")
+            if self._wickler_state_is_calibrating(telemetry):
+                item["skipped"] = "calibrating"
+            elif not self._wickler_state_is_calibrated(telemetry):
+                item["skipped"] = "requires_calibration"
+            item["ok"] = True
+            items.append(item)
+        return items
+
+    def _monitor_active_production_wicklers(self, production_info: dict[str, Any], ts: float) -> Optional[dict[str, Any]]:
+        last_ts = _safe_float(production_info.get("last_wickler_monitor_ts"), 0.0)
+        if last_ts > 0.0 and (float(ts) - last_ts) < PRODUCTION_WICKLER_MONITOR_INTERVAL_S:
+            return None
+        production_info["last_wickler_monitor_ts"] = float(ts)
+        monitor = self._production_wickler_verifications(timeout_s=1.0, require_indexed_mode=None)
+        monitor["ts"] = float(ts)
+        production_info["last_wickler_monitor"] = monitor
+        if monitor.get("ok"):
+            return None
+        monitor["latched_mae"] = self._latch_wickler_monitor_faults(monitor)
+        stop_result = self._stop_production_motion(reason="production_wickler_monitor_failed", target_state=21)
+        monitor["stop"] = stop_result
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+        self._record_event(
+            "production_wickler_fault",
+            "error",
+            "Produktionslauf gestoppt: Wickler nicht mehr im Produktions-Taktfenster",
+            monitor,
+        )
+        return monitor
+
+    def _set_production_wicklers_idle(self, *, target_state: int) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        keep_ready = int(target_state or 0) in (6, 7)
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            if not client.available():
+                if bool(getattr(self.cfg, client.descriptor.simulation_attr, True)):
+                    results.append({"role": role, "ok": True, "simulation": True})
+                    continue
+                results.append({"role": role, "ok": False, "error": "endpoint missing"})
+                continue
+            item: dict[str, Any] = {"role": role}
+            errors: list[str] = []
+            try:
+                item["indexed_disable"] = client.post_master({"indexedModeEnabled": "0"}, timeout_s=2.0)
+                if not item["indexed_disable"].get("ok", True):
+                    errors.append(f"indexed_disable rejected: {item['indexed_disable']}")
+            except Exception as exc:
+                item["indexed_disable_error"] = repr(exc)
+                errors.append(f"indexed_disable_error={repr(exc)}")
+            try:
+                item["mode"] = (
+                    client.release_for_continuous_motion(timeout_s=2.0)
+                    if keep_ready
+                    else client.post_mode("stop", timeout_s=2.0)
+                )
+                if not item["mode"].get("ok", True):
+                    errors.append(f"mode rejected: {item['mode']}")
+            except Exception as exc:
+                item["mode_error"] = repr(exc)
+                errors.append(f"mode_error={repr(exc)}")
+            if keep_ready:
+                try:
+                    verify: dict[str, Any] = {"ok": False, "errors": ["not_checked"]}
+                    state: dict[str, Any] = {}
+                    for attempt in range(1, 9):
+                        try:
+                            state = client.fetch_state(timeout_s=2.0)
+                            verify = self._verify_wickler_production_state(role, state)
+                        except Exception as exc:
+                            verify = {
+                                "ok": False,
+                                "errors": [f"fetch_state_error={repr(exc)}"],
+                                "attempt": attempt,
+                            }
+                        verify["attempt"] = attempt
+                        if verify.get("ok"):
+                            break
+                        errors_now = [str(error) for error in verify.get("errors") or []]
+                        transient_errors = {
+                            "continuousModeReady=false",
+                            "mode=Offline",
+                            "mode=-",
+                            "modeCss=fault",
+                            "drive offline",
+                        }
+                        if not errors_now or any(error.startswith("fetch_state_error=") for error in errors_now):
+                            pass
+                        elif not all(error in transient_errors for error in errors_now):
+                            break
+                        time.sleep(0.25)
+                    errors_now = [str(error) for error in verify.get("errors") or []]
+                    if errors_now == ["continuousModeReady=false"]:
+                        telemetry = dict((state or {}).get("telemetry") or {})
+                        drive = dict((state or {}).get("drive") or {})
+                        if (
+                            str(telemetry.get("modeLabel") or "") == "Bereit"
+                            and not bool(drive.get("move"))
+                            and not bool(drive.get("alarm"))
+                            and not bool(telemetry.get("indexedModeEnabled"))
+                        ):
+                            verify = dict(verify)
+                            verify["ok"] = True
+                            verify["soft_accepted"] = "idle_ready_continuous_bit_lag"
+                    item["verify"] = verify
+                    if not verify.get("ok"):
+                        errors.extend(str(error) for error in verify.get("errors") or ["not_ready"])
+                except Exception as exc:
+                    item["verify_error"] = repr(exc)
+                    errors.append(f"verify_error={repr(exc)}")
+            item["ok"] = not errors
+            if errors:
+                item["errors"] = errors
+            results.append(item)
+        return results
+
+    def _start_production_motion(self, param_map: dict[str, str], format_plan: dict[str, Any]) -> dict[str, Any]:
+        started_ts = now_ts()
+        if not _PRODUCTION_MOTION_LOCK.acquire(blocking=False):
+            return {"ok": False, "error": "production_motion_start_already_running", "started_ts": started_ts}
+        try:
+            plan = self._production_motion_plan(param_map, format_plan)
+            state_info = dict(self._state_row().get("info") or {})
+            previous_sync_values = self._production_esp_sync_reference(state_info)
+            self._sync_esp_machine_state(5, required=True)
+            # Let the ESP consume the MAS0001 transition reset before the real
+            # production start, otherwise pollStateTransitions can clear it again.
+            time.sleep(0.25)
+            sync_info = self._sync_production_params_to_esp(
+                param_map,
+                previous_values=previous_sync_values,
+            )
+            self._production_esp_retry("PROCESS WICKLER CANCEL", read_timeout_s=2.0, attempts=2)
+            self._production_esp_retry("PROCESS PROFILE STOP", read_timeout_s=2.0, attempts=2)
+            self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2)
+            self._production_esp_retry("PROCESS PRODUCTION STOP", read_timeout_s=2.0, attempts=2)
+            self._production_esp_retry("PROCESS PRODUCTION_RESET", read_timeout_s=5.0, attempts=2)
+            self._production_esp_retry("MOTOR 3 RESET_ALARM", read_timeout_s=5.0, attempts=2)
+            self._production_esp_retry("MOTOR 3 RECOVER_ETO", read_timeout_s=5.0, attempts=2)
+            motor3_zero = self._zero_motor3_for_production_start()
+            self._production_esp_retry(
+                "MOTOR 3 SET "
+                f"speed_mm_s={float(plan['speed_mm_s']):.3f} "
+                f"accel_mm_s2={float(plan['ramp_mm_s2']):.3f} "
+                f"decel_mm_s2={float(plan['ramp_mm_s2']):.3f}",
+                read_timeout_s=5.0,
+                attempts=2,
+            )
+            wicklers = self._prepare_production_wicklers_continuous(plan)
+            # The ESP command endpoint is single-client and the production start
+            # immediately touches the AZD bus. Give the freshly prepared Wickler
+            # HTTP writes and the ESP parameter sync a short quiet window, then
+            # verify the command channel once before the critical START.
+            time.sleep(0.25)
+            self._production_esp_retry("PROCESS PRODUCTION STATUS?", read_timeout_s=5.0, attempts=3, settle_s=0.35)
+            setup_info = dict(state_info.get("setup") or {})
+            setup_result = setup_info.get("last_result") if isinstance(setup_info.get("last_result"), dict) else {}
+            quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
+            start_command = (
+                "PROCESS PRODUCTION START "
+                f"SPEED_MM_S={float(plan['speed_mm_s']):.3f} "
+                f"RAMP_MM_S2={float(plan['ramp_mm_s2']):.3f}"
+            )
+            if quick_band_break_bypass:
+                start_command += " BAND_BREAK_BYPASS=1"
+            try:
+                response = self._production_esp(start_command, read_timeout_s=15.0)
+            except Exception as exc:
+                running, detail = self._production_status_after_start_error(start_command, exc)
+                if not running:
+                    raise RuntimeError(f"PROCESS PRODUCTION START failed: {detail}") from exc
+                response = detail
+            time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
+            post_start_wicklers = self._production_wickler_verifications(
+                timeout_s=2.0,
+                require_indexed_mode=False,
+            )
+            if not post_start_wicklers.get("ok"):
+                stop_result = self._stop_production_motion(
+                    reason="production_wickler_post_start_verify_failed",
+                    target_state=7,
+                )
+                post_start_wicklers["stop"] = stop_result
+                raise RuntimeError(
+                    "Wickler nach Produktionsstart nicht stabil: "
+                    + "; ".join(str(error) for error in post_start_wicklers.get("errors") or ["unknown"])
+                )
+            result = {
+                "ok": True,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "synced_state": 5,
+                "synced_params": list(sync_info.get("synced") or []),
+                "skipped_synced_params": list(sync_info.get("skipped") or []),
+                "synced_param_values": dict(sync_info.get("values") or {}),
+                "plan": plan,
+                "band_break_bypass": quick_band_break_bypass,
+                "motor3_zero": motor3_zero,
+                "wicklers": wicklers,
+                "post_start_wicklers": post_start_wicklers,
+                "command": start_command,
+                "response": response,
+            }
+            self._record_event(
+                "production_motion_started",
+                "info",
+                "Produktionslauf gestartet: ESP Produktionsrunner und kontinuierliche Wicklerregelung bereit",
+                result,
+            )
+            return result
+        except Exception as exc:
+            return {
+                "ok": False,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "synced_state": 5,
+                "error": str(exc),
+            }
+        finally:
+            _PRODUCTION_MOTION_LOCK.release()
+
+    def _zero_motor3_for_production_start(self) -> dict[str, Any]:
+        command = "MOTOR 3 SET_POSITION_MM=0.000"
+        response = self._production_esp_retry(command, read_timeout_s=5.0, attempts=2)
+        result: dict[str, Any] = {"ok": True, "command": command, "response": response}
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            result["simulated"] = True
+            return result
+        time.sleep(0.1)
+        status_attempts: list[dict[str, Any]] = []
+        last_valid: dict[str, Any] | None = None
+
+        for status_command in ("MOTOR 3 REFRESH", "MOTOR 3 STATUS?"):
+            for attempt in range(1, 4):
+                try:
+                    status_response = self._production_esp_retry(
+                        status_command,
+                        read_timeout_s=5.0,
+                        attempts=1,
+                    )
+                    text = str(status_response or "").strip()
+                    if not text.startswith("JSON "):
+                        raise RuntimeError(f"non_json_status={text[:160]!r}")
+                    payload = json.loads(text.removeprefix("JSON ").strip())
+                    state = dict(((payload.get("motor") or {}).get("state") or {}))
+                    if not state:
+                        raise RuntimeError("missing_motor_state")
+                    if "feedback_tenths_mm" not in state:
+                        raise RuntimeError("missing_feedback_tenths_mm")
+                    feedback_raw = state.get("feedback_tenths_mm")
+                    try:
+                        feedback_tenths = float(str(feedback_raw).strip())
+                    except Exception as exc:
+                        raise RuntimeError(f"invalid_feedback_tenths_mm={feedback_raw!r}") from exc
+                    move = bool(state.get("move", False))
+                    alarm = bool(state.get("alarm", False))
+                    ready = bool(state.get("ready", True))
+                    snapshot = {
+                        "command": status_command,
+                        "attempt": attempt,
+                        "ok": True,
+                        "feedback_tenths_mm": feedback_tenths,
+                        "ready": ready,
+                        "move": move,
+                        "alarm": alarm,
+                    }
+                    status_attempts.append(snapshot)
+                    last_valid = snapshot
+                    result.update(
+                        {
+                            "status_command": status_command,
+                            "status_response": status_response,
+                            "status_attempts": status_attempts,
+                            "feedback_tenths_mm": feedback_tenths,
+                            "ready": ready,
+                            "move": move,
+                            "alarm": alarm,
+                        }
+                    )
+                    if abs(feedback_tenths) <= 5.0 and not move and not alarm:
+                        return result
+                except Exception as exc:
+                    status_attempts.append(
+                        {
+                            "command": status_command,
+                            "attempt": attempt,
+                            "ok": False,
+                            "error": repr(exc),
+                        }
+                    )
+                time.sleep(0.15 * attempt)
+
+        result["status_attempts"] = status_attempts
+        if last_valid is not None:
+            raise RuntimeError(
+                "Motor 3 Produktionsnullpunkt nicht bestaetigt: "
+                f"feedback_tenths_mm={last_valid['feedback_tenths_mm']}, "
+                f"move={last_valid['move']}, alarm={last_valid['alarm']}, "
+                f"status_attempts={status_attempts}"
+            )
+        raise RuntimeError(
+            "Motor 3 Produktionsnullpunkt nach SET_POSITION_MM=0 nicht lesbar: "
+            f"status_attempts={status_attempts}"
+        )
+
+    def _stop_production_motion(self, *, reason: str, target_state: int) -> dict[str, Any]:
+        started_ts = now_ts()
+        commands: list[dict[str, Any]] = []
+        for command, timeout_s in (
+            ("PROCESS PRODUCTION STOP", 2.0),
+            ("MOTOR 3 MOVE_VEL_MM_S=0", 1.0),
+            ("PROCESS WICKLER CANCEL", 2.0),
+            ("PROCESS INDEXED STOP", 2.0),
+            ("PROCESS PROFILE STOP", 2.0),
+        ):
+            try:
+                commands.append({"command": command, "ok": True, "response": self._production_esp(command, read_timeout_s=timeout_s)})
+            except Exception as exc:
+                commands.append({"command": command, "ok": False, "error": repr(exc)})
+        motor3_stop = self._verify_motor3_stopped_after_production_stop(commands)
+        wicklers = self._set_production_wicklers_idle(target_state=target_state)
+        self._sync_esp_machine_state(int(target_state or 0), required=False)
+        result = {
+            "ok": all(item.get("ok") for item in commands) and bool(motor3_stop.get("ok")) and all(item.get("ok") for item in wicklers),
+            "reason": reason,
+            "target_state": int(target_state or 0),
+            "started_ts": started_ts,
+            "finished_ts": now_ts(),
+            "commands": commands,
+            "motor3_stop": motor3_stop,
+            "wicklers": wicklers,
+        }
+        self._record_event(
+            "production_motion_stopped",
+            "info" if result["ok"] else "warning",
+            (
+                f"Produktionslauf gestoppt ({reason})"
+                if result["ok"]
+                else f"Produktionslauf mit Warnungen gestoppt ({reason})"
+            ),
+            result,
+        )
+        return result
+
+    def _verify_motor3_stopped_after_production_stop(self, commands: list[dict[str, Any]]) -> dict[str, Any]:
+        snapshots: list[dict[str, Any]] = []
+        for attempt in range(1, 6):
+            try:
+                response = self._production_esp("MOTOR 3 REFRESH", read_timeout_s=5.0)
+                payload = json.loads(str(response or "").removeprefix("JSON ").strip())
+                state = dict(((payload.get("motor") or {}).get("state") or {}))
+                velocity_mode = bool(state.get("velocity_mode"))
+                target_speed_mm_s = _safe_float(state.get("target_speed_mm_s"), 0.0)
+                active = bool(state.get("move")) or bool(state.get("busy"))
+                snapshot = {
+                    "attempt": attempt,
+                    "ok": True,
+                    "active": active,
+                    "move": state.get("move"),
+                    "busy": state.get("busy"),
+                    "velocity_mode": velocity_mode,
+                    "target_speed_mm_s": state.get("target_speed_mm_s"),
+                    "stale_velocity_fields": bool(not active and (velocity_mode or abs(target_speed_mm_s) > 0.05)),
+                    "feedback_tenths_mm": state.get("feedback_tenths_mm"),
+                }
+                snapshots.append(snapshot)
+                if not active:
+                    return {"ok": True, "snapshots": snapshots}
+            except Exception as exc:
+                snapshots.append({"attempt": attempt, "ok": False, "error": repr(exc)})
+                if bool(getattr(self.cfg, "esp_simulation", False)):
+                    return {"ok": True, "simulated": True, "snapshots": snapshots}
+            for command, timeout_s in (
+                ("PROCESS PRODUCTION STOP", 2.0),
+                ("MOTOR 3 MOVE_VEL_MM_S=0", 1.0),
+            ):
+                try:
+                    commands.append(
+                        {
+                            "command": f"verify:{command}",
+                            "ok": True,
+                            "response": self._production_esp(command, read_timeout_s=timeout_s),
+                        }
+                    )
+                except Exception as exc:
+                    commands.append({"command": f"verify:{command}", "ok": False, "error": repr(exc)})
+            time.sleep(0.25)
+        return {"ok": False, "snapshots": snapshots}
+
+    def _motor_feedback_io_snapshot(self, motor_ids: Any) -> dict[int, dict[str, dict[str, Any]]]:
+        requested = {int(motor_id) for motor_id in motor_ids if int(motor_id) in MOTOR_HARDWARE_FEEDBACK_IO}
+        if not requested:
+            return {}
+
+        points_by_key: dict[str, dict[str, Any]] = {}
+        for motor_id in sorted(requested):
+            for device_code, pin_label in MOTOR_HARDWARE_FEEDBACK_IO[motor_id].values():
+                io_key = f"{device_code}__{pin_label.replace('.', '_')}"
+                point = self.io_store.get_point(io_key)
+                if point:
+                    points_by_key[io_key] = point
+
+        esp_points = [point for point in points_by_key.values() if point.get("device_code") == "esp32_plc58"]
+        if esp_points:
+            try:
+                IoRuntime(self.cfg, self.io_store)._refresh_device("esp32_plc58", esp_points)
+            except Exception:
+                # Hardware feedback is an acceleration/diagnostic path.  The
+                # RS485 motor status remains authoritative if the ESP IO
+                # snapshot is temporarily unavailable.
+                pass
+
+        snapshot: dict[int, dict[str, dict[str, Any]]] = {}
+        for motor_id in sorted(requested):
+            motor_signals: dict[str, dict[str, Any]] = {}
+            for signal, (device_code, pin_label) in MOTOR_HARDWARE_FEEDBACK_IO[motor_id].items():
+                io_key = f"{device_code}__{pin_label.replace('.', '_')}"
+                point = self.io_store.get_point(io_key)
+                if not point:
+                    continue
+                value = str(point.get("value") if point.get("value") is not None else "0")
+                motor_signals[signal] = {
+                    "io_key": io_key,
+                    "pin": pin_label,
+                    "value": value,
+                    "active": _truthy(value),
+                    "quality": point.get("quality"),
+                    "source": point.get("source"),
+                }
+            if motor_signals:
+                snapshot[motor_id] = motor_signals
+        return snapshot
+
     def _setup_format_axis_phases(self, format_plan: dict[str, Any]) -> list[tuple[str, dict[int, float]]]:
         axes = dict((format_plan.get("axes") or {}) if isinstance(format_plan, dict) else {})
 
@@ -974,15 +3463,10 @@ class MachineRuntime:
 
         return [
             (
-                "label_guides",
+                "format_axes_parallel",
                 {
                     9: target_mm("label_guide_infeed_target_tenths_mm"),
                     8: target_mm("label_guide_outfeed_target_tenths_mm"),
-                },
-            ),
-            (
-                "sensors_and_material_camera",
-                {
                     6: target_mm("label_detect_sensor_target_tenths_mm"),
                     7: target_mm("label_control_sensor_target_tenths_mm"),
                     5: target_mm("material_camera_x_target_tenths_mm"),
@@ -990,9 +3474,20 @@ class MachineRuntime:
             ),
         ]
 
-    def _position_setup_format_axes(self, format_plan: dict[str, Any]) -> dict[str, Any]:
+    def _position_setup_format_axes(
+        self,
+        format_plan: dict[str, Any],
+        motor_ids: Iterable[int] | None = None,
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {"ok": False, "skipped": False, "phases": []}
         phases = self._setup_format_axis_phases(format_plan)
+        if motor_ids is not None:
+            allowed_motor_ids = {int(motor_id) for motor_id in motor_ids}
+            phases = [
+                (phase_name, {motor_id: target for motor_id, target in targets.items() if motor_id in allowed_motor_ids})
+                for phase_name, targets in phases
+            ]
+            phases = [(phase_name, targets) for phase_name, targets in phases if targets]
         result["targets_mm"] = {str(motor_id): target for _, targets in phases for motor_id, target in targets.items()}
 
         client = EspMotorClient(self.cfg)
@@ -1011,6 +3506,24 @@ class MachineRuntime:
             result["phases"].append(phase_result)
 
             errors: list[str] = []
+            for motor_id in sorted(targets_mm):
+                restore = apply_motor_setup_master_config_to_client(
+                    self.params,
+                    client,
+                    motor_id,
+                    restore_position=False,
+                )
+                phase_result.setdefault("master_restore", []).append({"motor_id": motor_id, **restore})
+                if not bool(restore.get("ok", False)):
+                    errors.append(
+                        f"Motor {motor_id}: Motor-Setup-Master konnte nicht angewendet werden: "
+                        f"{restore.get('reply') or restore.get('reason') or restore}"
+                    )
+
+            if errors:
+                phase_result.update({"ok": False, "errors": errors})
+                raise RuntimeError(f"Einrichten Formatachsen {phase_name} Master-Setup verweigert: " + "; ".join(errors))
+
             for motor_id, target_mm in sorted(targets_mm.items()):
                 preflight = self._motor_preflight_for_position_move(client, motor_id, target_mm)
                 phase_result["preflight"].append(preflight)
@@ -1021,44 +3534,94 @@ class MachineRuntime:
                 phase_result.update({"ok": False, "errors": errors})
                 raise RuntimeError(f"Einrichten Formatachsen {phase_name} verweigert: " + "; ".join(errors))
 
-            for motor_id, target_mm in sorted(targets_mm.items()):
+            for motor_id in sorted(targets_mm):
                 try:
                     client.reset_alarm(motor_id)
                     client.recover_eto_motor(motor_id)
-                    reply = client.move_absolute_mm(motor_id, target_mm)
-                    move_result = {
-                        "motor_id": motor_id,
-                        "target_mm": target_mm,
-                        "ok": bool(reply.get("ok")),
-                        "reply": reply.get("reply"),
-                    }
-                    phase_result["moves"].append(move_result)
-                    if not move_result["ok"]:
-                        errors.append(f"Motor {motor_id}: {reply.get('reply')}")
                 except Exception as exc:
-                    phase_result["moves"].append(
-                        {"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)}
-                    )
+                    phase_result["moves"].append({"motor_id": motor_id, "ok": False, "error": repr(exc)})
                     errors.append(f"Motor {motor_id}: {exc}")
 
-            if errors:
-                phase_result.update({"ok": False, "errors": errors})
-                raise RuntimeError(f"Einrichten Formatachsen {phase_name} nicht gesendet: " + "; ".join(errors))
+            move_warnings: list[str] = []
+            verification: dict[str, Any] = {"ok": False, "results": [], "errors": ["Positionssatz nicht gesendet"]}
+            if not errors:
+                verification_attempts: list[dict[str, Any]] = []
+                for attempt in range(1, SETUP_AXIS_MOVE_SET_MAX_ATTEMPTS + 1):
+                    attempt_warnings: list[str] = []
+                    move_acknowledged = False
+                    try:
+                        # The ESP loads all AZD direct-data records first and then
+                        # triggers the axes as one positioning set. This avoids the
+                        # visible axis-by-axis movement from single MOVE_ABS_MM
+                        # commands whose trigger is executed immediately.
+                        reply = client.move_absolute_set_mm(targets_mm)
+                        move_acknowledged = bool(reply.get("ok"))
+                        move_result = {
+                            "attempt": attempt,
+                            "motor_ids": sorted(targets_mm),
+                            "targets_mm": dict(targets_mm),
+                            "ok": move_acknowledged,
+                            "reply": reply,
+                        }
+                        phase_result["moves"].append(move_result)
+                        if not move_result["ok"]:
+                            attempt_warnings.append(f"Positionssatz: {reply}")
+                    except Exception as exc:
+                        phase_result["moves"].append(
+                            {
+                                "attempt": attempt,
+                                "motor_ids": sorted(targets_mm),
+                                "ok": False,
+                                "error": repr(exc),
+                                "targets_mm": dict(targets_mm),
+                            }
+                        )
+                        attempt_warnings.append(f"Positionssatz: {exc}")
 
-            verification = self._verify_axis_targets(
-                client,
-                targets_mm,
-                tolerance_tenths=SETUP_AXIS_POSITION_TOLERANCE_TENTHS,
-                timeout_s=SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S,
-                poll_s=SETUP_AXIS_POSITION_VERIFY_POLL_S,
-            )
+                    move_warnings.extend(attempt_warnings)
+                    verify_timeout = (
+                        SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S
+                        if move_acknowledged
+                        else SETUP_AXIS_MOVE_SET_SHORT_VERIFY_TIMEOUT_S
+                    )
+                    verification = self._verify_axis_targets(
+                        client,
+                        targets_mm,
+                        tolerance_tenths=SETUP_AXIS_POSITION_TOLERANCE_TENTHS,
+                        timeout_s=verify_timeout,
+                        poll_s=SETUP_AXIS_POSITION_VERIFY_POLL_S,
+                    )
+                    verification_attempts.append(
+                        {
+                            "attempt": attempt,
+                            "move_acknowledged": move_acknowledged,
+                            "verify_timeout_s": verify_timeout,
+                            "ok": bool(verification.get("ok")),
+                            "errors": list(verification.get("errors") or []),
+                        }
+                    )
+                    if verification.get("ok"):
+                        break
+                    if attempt >= SETUP_AXIS_MOVE_SET_MAX_ATTEMPTS:
+                        break
+                    self.logs.log(
+                        "machine",
+                        "warning",
+                        f"Einrichten Formatachsen {phase_name}: Positionssatz Versuch {attempt} "
+                        "nicht verifiziert, wiederhole",
+                    )
+                    time.sleep(min(1.0, 0.35 * attempt))
+                phase_result["verification_attempts"] = verification_attempts
+                if move_warnings:
+                    phase_result["move_warnings"] = move_warnings
+
             phase_result["verification"] = verification
             if not verification.get("ok"):
-                errors = [str(item) for item in verification.get("errors") or []]
+                errors = [*move_warnings, *[str(item) for item in verification.get("errors") or []]]
                 phase_result.update({"ok": False, "errors": errors})
                 raise RuntimeError(f"Einrichten Formatachsen {phase_name} Ziel nicht erreicht: " + "; ".join(errors))
 
-            phase_result.update({"ok": True, "errors": []})
+            phase_result.update({"ok": True, "errors": [], "warnings": move_warnings})
 
         result.update({"ok": True, "finished_ts": now_ts()})
         self.logs.log("machine", "info", "Einrichten: Formatachsen stehen auf Rezeptposition")
@@ -1072,6 +3635,55 @@ class MachineRuntime:
 
     def _stop_mode_target_key(self) -> str:
         return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()))
+
+    def _block_position_axis_if_live_outside_limits(
+        self,
+        motor_id: int,
+        motor_cfg: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        motor_id = int(motor_id)
+        if motor_id == 3:
+            return None
+        try:
+            feedback_tenths = int(float(state.get("feedback_tenths_mm")))
+        except Exception:
+            return None
+        min_enabled = bool(motor_cfg.get("min_enabled", True))
+        max_enabled = bool(motor_cfg.get("max_enabled", True))
+        min_tenths = _safe_int(motor_cfg.get("min_tenths_mm"), -2_147_483_648)
+        max_tenths = _safe_int(motor_cfg.get("max_tenths_mm"), 2_147_483_647)
+        below_min = bool(min_enabled and feedback_tenths < min_tenths)
+        above_max = bool(max_enabled and feedback_tenths > max_tenths)
+        if not (below_min or above_max):
+            return None
+        block: dict[str, Any] = {
+            "ok": False,
+            "motor_id": motor_id,
+            "before_feedback_tenths_mm": feedback_tenths,
+            "min_tenths_mm": min_tenths,
+            "max_tenths_mm": max_tenths,
+            "reason": "live_position_outside_limits",
+            "blocked": True,
+        }
+        if bool(state.get("alarm")) or bool(state.get("hwto")):
+            block["reason"] = "alarm_or_hwto_active"
+        self.logs.log(
+            "machine",
+            "warning",
+            (
+                f"Motor {motor_id}: Live-Istposition {feedback_tenths / 10.0:.1f}mm ausserhalb "
+                f"Limits {min_tenths / 10.0:.1f}..{max_tenths / 10.0:.1f}mm - automatische "
+                "Positionsuebernahme gesperrt"
+            ),
+        )
+        self._record_event(
+            "motor_setup_position_write_blocked",
+            "warning",
+            f"Motor {motor_id}: Positionszaehler-Restore ausserhalb Machine-Setup blockiert",
+            block,
+        )
+        return block
 
     def _motor_preflight_for_position_move(
         self,
@@ -1124,6 +3736,17 @@ class MachineRuntime:
         if bool(state.get("hwto")):
             result["reason"] = "HWTO/Sicherheitskreis aktiv"
             return result
+        reference_suspect = self._position_axis_reference_suspect(motor_id)
+        if reference_suspect is not None:
+            result["position_reference_suspect"] = reference_suspect
+            result["reason"] = (
+                "Positionsreferenz nach frueherem automatischem Restore unsicher; "
+                "Achse zuerst ueber /ui/machine-setup/motors neu kalibrieren und speichern"
+            )
+            return result
+        position_block = self._block_position_axis_if_live_outside_limits(motor_id, motor_cfg, state)
+        if position_block is not None:
+            result["position_write_block"] = position_block
         if min_enabled and feedback_tenths < min_tenths:
             result["reason"] = (
                 f"Istposition {feedback_tenths / 10.0:.1f}mm unter Min {min_tenths / 10.0:.1f}mm"
@@ -1145,6 +3768,48 @@ class MachineRuntime:
         result["reason"] = "safe"
         return result
 
+    def _stop_mode_command_target_mm(self, target_mm: float, preflight: dict[str, Any]) -> tuple[float, dict[str, Any] | None]:
+        """Keep automatic stop moves just inside active AZD soft limits.
+
+        The operator-facing stop target remains unchanged and verification still
+        uses the configured target with tolerance.  The small inward command
+        margin prevents AZD alarms when an automatic stop/abort path asks a
+        positioning drive to land exactly on an active min/max boundary.
+        """
+        try:
+            target_tenths = int(float(preflight.get("target_tenths_mm")))
+        except Exception:
+            return float(target_mm), None
+        command_tenths = target_tenths
+        min_enabled = bool(preflight.get("min_enabled", True))
+        max_enabled = bool(preflight.get("max_enabled", True))
+        min_tenths = _safe_int(preflight.get("min_tenths_mm"), -2_147_483_648)
+        max_tenths = _safe_int(preflight.get("max_tenths_mm"), 2_147_483_647)
+        margin = int(STOP_MODE_POSITION_LIMIT_MARGIN_TENTHS)
+        if min_enabled and target_tenths <= min_tenths:
+            command_tenths = max(command_tenths, min_tenths + margin)
+        if max_enabled and target_tenths >= max_tenths:
+            command_tenths = min(command_tenths, max_tenths - margin)
+        if min_enabled and command_tenths < min_tenths:
+            command_tenths = min_tenths
+        if max_enabled and command_tenths > max_tenths:
+            command_tenths = max_tenths
+        if command_tenths == target_tenths:
+            return float(target_mm), None
+        command_mm = command_tenths / 10.0
+        return command_mm, {
+            "reason": "stop_mode_limit_margin",
+            "requested_target_tenths_mm": target_tenths,
+            "command_target_tenths_mm": command_tenths,
+            "requested_target_mm": float(target_mm),
+            "command_target_mm": command_mm,
+            "margin_tenths_mm": margin,
+            "min_enabled": min_enabled,
+            "max_enabled": max_enabled,
+            "min_tenths_mm": min_tenths,
+            "max_tenths_mm": max_tenths,
+        }
+
     def _apply_stop_mode_axis_targets(
         self,
         state: int,
@@ -1160,6 +3825,21 @@ class MachineRuntime:
                 stop_info["active"] = False
                 stop_info["left_stop_ts"] = ts
                 info["stop_positions"] = stop_info
+            return
+
+        manual_lock = motor_setup_manual_lock_status(self.db, now=ts)
+        if bool(manual_lock.get("active")):
+            stop_info.update(
+                {
+                    "active": True,
+                    "ok": False,
+                    "skipped": True,
+                    "reason": "motor_setup_manual_lock_active",
+                    "manual_lock": manual_lock,
+                    "last_skipped_ts": ts,
+                }
+            )
+            info["stop_positions"] = stop_info
             return
 
         last_attempt_ts = float(stop_info.get("last_attempt_ts") or 0.0)
@@ -1200,8 +3880,27 @@ class MachineRuntime:
             return
 
         errors: list[str] = []
+        accepted_targets_mm: dict[int, float] = {}
         for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
             try:
+                restore = apply_motor_setup_master_config_to_client(
+                    self.params,
+                    client,
+                    motor_id,
+                    restore_position=False,
+                )
+                if not bool(restore.get("ok", False)):
+                    reason = str(restore.get("reply") or restore.get("reason") or "Motor-Setup-Master nicht anwendbar")
+                    result = {
+                        "motor_id": motor_id,
+                        "target_mm": target_mm,
+                        "ok": False,
+                        "master_restore": restore,
+                        "error": reason,
+                    }
+                    stop_info["results"].append(result)
+                    errors.append(f"Motor {motor_id}: Motor-Setup-Master konnte nicht angewendet werden: {reason}")
+                    continue
                 preflight = self._motor_preflight_for_position_move(client, motor_id, target_mm)
                 if not preflight.get("ok"):
                     reason = str(preflight.get("reason") or "Positionierfreigabe verweigert")
@@ -1209,29 +3908,73 @@ class MachineRuntime:
                         "motor_id": motor_id,
                         "target_mm": target_mm,
                         "ok": False,
+                        "master_restore": restore,
                         "preflight": preflight,
                         "error": reason,
                     }
                     stop_info["results"].append(result)
                     errors.append(f"Motor {motor_id}: {reason}")
                     continue
+                try:
+                    feedback_tenths = int(float(preflight.get("feedback_tenths_mm")))
+                    target_tenths = int(float(preflight.get("target_tenths_mm")))
+                except Exception:
+                    feedback_tenths = None
+                    target_tenths = None
+                if (
+                    feedback_tenths is not None
+                    and target_tenths is not None
+                    and abs(target_tenths - feedback_tenths) <= STOP_MODE_POSITION_TOLERANCE_TENTHS
+                ):
+                    result = {
+                        "motor_id": motor_id,
+                        "target_mm": target_mm,
+                        "ok": True,
+                        "master_restore": restore,
+                        "preflight": preflight,
+                        "queued": False,
+                        "already_in_position": True,
+                    }
+                    stop_info["results"].append(result)
+                    continue
                 client.reset_alarm(motor_id)
                 client.recover_eto_motor(motor_id)
-                reply = client.move_absolute_mm(motor_id, target_mm)
-                ok = bool(reply.get("ok"))
-                result = {"motor_id": motor_id, "target_mm": target_mm, "ok": ok, "reply": reply.get("reply")}
+                command_target_mm, command_adjustment = self._stop_mode_command_target_mm(target_mm, preflight)
+                result = {
+                    "motor_id": motor_id,
+                    "target_mm": target_mm,
+                    "command_target_mm": command_target_mm,
+                    "ok": True,
+                    "master_restore": restore,
+                    "queued": True,
+                }
+                if command_adjustment is not None:
+                    result["command_adjustment"] = command_adjustment
                 stop_info["results"].append(result)
-                if not ok:
-                    errors.append(f"Motor {motor_id}: {reply.get('reply')}")
+                accepted_targets_mm[int(motor_id)] = float(command_target_mm)
             except Exception as exc:
                 result = {"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)}
                 stop_info["results"].append(result)
                 errors.append(f"Motor {motor_id}: {exc}")
 
+        move_set_warnings: list[str] = []
+        if accepted_targets_mm and not errors:
+            try:
+                reply = client.move_absolute_set_mm(accepted_targets_mm)
+                stop_info["move_set"] = {"ok": bool(reply.get("ok")), "reply": reply, "targets_mm": accepted_targets_mm}
+                if not bool(reply.get("ok")):
+                    move_set_warnings.append(f"Positionssatz: {reply}")
+            except Exception as exc:
+                stop_info["move_set"] = {"ok": False, "error": repr(exc), "targets_mm": accepted_targets_mm}
+                move_set_warnings.append(f"Positionssatz: {exc}")
+
         verification = self._verify_stop_mode_axis_targets(client)
         stop_info["verification"] = verification
         if not verification.get("ok"):
+            errors.extend(move_set_warnings)
             errors.extend(str(item) for item in verification.get("errors") or [])
+        elif move_set_warnings:
+            stop_info["move_set_warnings"] = move_set_warnings
 
         if errors:
             stop_info.update({"ok": False, "errors": errors, "finished_ts": now_ts()})
@@ -1264,20 +4007,77 @@ class MachineRuntime:
     ) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         errors: list[str] = []
-        for motor_id, target_mm in sorted(targets_mm.items()):
-            target_tenths = int(round(float(target_mm) * 10.0))
-            deadline = time.time() + float(timeout_s)
-            last_result: dict[str, Any] | None = None
-            try:
-                while True:
+        pending = {int(motor_id): float(target_mm) for motor_id, target_mm in targets_mm.items()}
+        last_by_motor: dict[int, dict[str, Any]] = {}
+        stationary_since: dict[int, float] = {}
+        last_feedback_by_motor: dict[int, int] = {}
+        saw_moving_by_motor: dict[int, bool] = {}
+        saw_fresh_by_motor: dict[int, bool] = {}
+        saw_hardware_move_by_motor: dict[int, bool] = {}
+        refresh_error_count_by_motor: dict[int, int] = {}
+        deadline = time.time() + float(timeout_s)
+
+        while pending and time.time() < deadline:
+            now = time.time()
+            hardware_by_motor = self._motor_feedback_io_snapshot(pending.keys())
+            completed: list[int] = []
+            failed: list[int] = []
+            for motor_id, target_mm in sorted(pending.items()):
+                target_tenths = int(round(float(target_mm) * 10.0))
+                last_result: dict[str, Any] | None = None
+                hardware = hardware_by_motor.get(motor_id) or {}
+                hardware_move = bool((hardware.get("move") or {}).get("active"))
+                hardware_in_pos = bool((hardware.get("in_pos") or {}).get("active"))
+                if hardware_move:
+                    saw_moving_by_motor[motor_id] = True
+                    saw_hardware_move_by_motor[motor_id] = True
+                try:
                     payload = client.refresh(motor_id)
+                    refresh_error_count_by_motor[motor_id] = 0
                     motor = payload.get("motor") if isinstance(payload, dict) else {}
                     state = (motor or {}).get("state") or motor or {}
+                    payload_ok = bool(payload.get("ok", True)) if isinstance(payload, dict) else True
+                    link_ok = state.get("link_ok")
+                    if not payload_ok or link_ok is False:
+                        last_result = {
+                            "motor_id": motor_id,
+                            "target_tenths_mm": target_tenths,
+                            "ok": False,
+                            "fresh": False,
+                            "payload_ok": payload_ok,
+                            "link_ok": link_ok,
+                            "last_error": state.get("last_error"),
+                            "feedback_tenths_mm": state.get("feedback_tenths_mm"),
+                            "hardware": hardware,
+                        }
+                        last_by_motor[motor_id] = last_result
+                        if hardware_in_pos and saw_hardware_move_by_motor.get(motor_id) and not hardware_move:
+                            last_result["hardware_at_target"] = True
+                            last_result["at_target"] = True
+                            last_result["moving"] = False
+                            completed.append(motor_id)
+                        continue
                     feedback_tenths = int(state.get("feedback_tenths_mm"))
-                    moving = bool(state.get("move")) or bool(state.get("busy"))
+                    moving = bool(state.get("move")) or bool(state.get("busy")) or hardware_move
                     alarm = bool(state.get("alarm"))
                     error_tenths = target_tenths - feedback_tenths
-                    at_target = abs(error_tenths) <= int(tolerance_tenths)
+                    feedback_at_target = abs(error_tenths) <= int(tolerance_tenths)
+                    try:
+                        drive_target_tenths = int(float(state.get("target_tenths_mm")))
+                    except Exception:
+                        drive_target_tenths = None
+                    hardware_at_target = (
+                        hardware_in_pos
+                        and not hardware_move
+                        and (
+                            drive_target_tenths == target_tenths
+                            or bool(saw_hardware_move_by_motor.get(motor_id))
+                        )
+                    )
+                    at_target = feedback_at_target or hardware_at_target
+                    saw_fresh_by_motor[motor_id] = True
+                    if moving:
+                        saw_moving_by_motor[motor_id] = True
                     last_result = {
                         "motor_id": motor_id,
                         "target_tenths_mm": target_tenths,
@@ -1287,34 +4087,91 @@ class MachineRuntime:
                         "alarm": alarm,
                         "alarm_code": state.get("alarm_code"),
                         "at_target": at_target,
+                        "feedback_at_target": feedback_at_target,
+                        "hardware_at_target": hardware_at_target,
+                        "hardware": hardware,
+                        "fresh": True,
+                        "payload_ok": payload_ok,
+                        "link_ok": link_ok,
                     }
+                    last_by_motor[motor_id] = last_result
                     if at_target and not moving and not alarm:
-                        break
+                        completed.append(motor_id)
+                        continue
                     if alarm:
                         errors.append(
                             f"Motor {motor_id} Alarm {state.get('alarm_code')} bei {feedback_tenths / 10.0:.1f}mm, "
                             f"Ziel {target_mm:.1f}mm"
                         )
-                        break
+                        failed.append(motor_id)
+                        continue
                     if not moving:
-                        errors.append(
-                            f"Motor {motor_id} steht bei {feedback_tenths / 10.0:.1f}mm, "
-                            f"Ziel {target_mm:.1f}mm, keine Bewegung gemeldet"
-                        )
-                        break
-                    if time.time() >= deadline:
-                        errors.append(
-                            f"Motor {motor_id} Ziel {target_mm:.1f}mm nach "
-                            f"{float(timeout_s):.0f}s nicht erreicht "
-                            f"(Ist {feedback_tenths / 10.0:.1f}mm)"
-                        )
-                        break
-                    time.sleep(float(poll_s))
-                if last_result is not None:
-                    results.append(last_result)
-            except Exception as exc:
-                results.append({"motor_id": motor_id, "target_mm": target_mm, "ok": False, "error": repr(exc)})
-                errors.append(f"Motor {motor_id} Refresh: {exc}")
+                        previous_feedback = last_feedback_by_motor.get(motor_id)
+                        if previous_feedback is None or previous_feedback != feedback_tenths:
+                            stationary_since[motor_id] = now
+                        else:
+                            stationary_since.setdefault(motor_id, now)
+                    else:
+                        stationary_since.pop(motor_id, None)
+                    last_feedback_by_motor[motor_id] = feedback_tenths
+                except Exception as exc:
+                    count = refresh_error_count_by_motor.get(motor_id, 0) + 1
+                    refresh_error_count_by_motor[motor_id] = count
+                    last_result = {
+                        "motor_id": motor_id,
+                        "target_mm": target_mm,
+                        "ok": False,
+                        "error": repr(exc),
+                        "refresh_error_count": count,
+                        "hardware": hardware,
+                    }
+                    last_by_motor[motor_id] = last_result
+                    if hardware_in_pos and saw_hardware_move_by_motor.get(motor_id) and not hardware_move:
+                        last_result["hardware_at_target"] = True
+                        last_result["at_target"] = True
+                        last_result["moving"] = False
+                        completed.append(motor_id)
+                        continue
+                    if count >= 3:
+                        errors.append(f"Motor {motor_id} Refresh nach {count} Versuchen: {exc}")
+                        failed.append(motor_id)
+            for motor_id in completed + failed:
+                pending.pop(motor_id, None)
+            if pending:
+                time.sleep(float(poll_s))
+
+        if pending:
+            for motor_id, target_mm in sorted(pending.items()):
+                last = last_by_motor.get(motor_id) or {}
+                feedback = last.get("feedback_tenths_mm")
+                if not bool(saw_fresh_by_motor.get(motor_id)):
+                    detail = str(last.get("last_error") or last.get("error") or "keine frische Antwort")
+                    errors.append(
+                        f"Motor {motor_id} Status nicht frisch/lesbar vor Zielpruefung: {detail}"
+                    )
+                    continue
+                hardware = last.get("hardware") if isinstance(last.get("hardware"), dict) else {}
+                if bool((hardware.get("move") or {}).get("active")):
+                    errors.append(
+                        f"Motor {motor_id} Hardware-MOVE noch aktiv, Ziel {target_mm:.1f}mm nicht abgeschlossen"
+                    )
+                    continue
+                if feedback is not None and not bool(last.get("moving")) and not bool(saw_moving_by_motor.get(motor_id)):
+                    errors.append(
+                        f"Motor {motor_id} steht bei {int(feedback) / 10.0:.1f}mm, "
+                        f"Ziel {target_mm:.1f}mm, keine Bewegung gemeldet"
+                    )
+                    continue
+                suffix = f"(Ist {int(feedback) / 10.0:.1f}mm)" if feedback is not None else "(Ist unbekannt)"
+                errors.append(
+                    f"Motor {motor_id} Ziel {target_mm:.1f}mm nach {float(timeout_s):.0f}s nicht erreicht {suffix}"
+                )
+
+        for motor_id in sorted(targets_mm):
+            if motor_id in last_by_motor:
+                results.append(last_by_motor[motor_id])
+            else:
+                results.append({"motor_id": motor_id, "target_mm": targets_mm[motor_id], "ok": False, "error": "not_polled"})
         return {"ok": not errors, "results": results, "errors": errors}
 
     def _verify_stop_mode_axis_targets(self, client: EspMotorClient) -> dict[str, Any]:
@@ -1347,29 +4204,158 @@ class MachineRuntime:
         reasons = [pkey for pkey in sorted(PAUSE_ERROR_KEYS) if _truthy(param_map.get(pkey))]
         return bool(reasons), reasons
 
+    def _light_curtain_auto_reset_due(
+        self,
+        *,
+        safety_status: dict[str, Any],
+        critical_reasons: list[str],
+        safety_info: dict[str, Any],
+        info: dict[str, Any],
+        mas0028_active: bool,
+        ts: float,
+    ) -> bool:
+        if not bool(getattr(self.cfg, "light_curtain_auto_reset_enabled", True)):
+            return False
+        if external_purge_active(info):
+            return False
+        if mas0028_active:
+            return False
+        if bool(safety_status.get("estop_active")):
+            return False
+        if not bool(safety_status.get("light_curtain_active")):
+            return False
+
+        live_safety_reasons = {str(reason) for reason in (safety_status.get("reasons") or [])}
+        if not live_safety_reasons.issubset({"lichtgitter"}):
+            return False
+
+        live_critical_reasons = {str(reason) for reason in (critical_reasons or [])}
+        if live_critical_reasons:
+            return False
+
+        try:
+            last_ts = float(safety_info.get("light_curtain_auto_reset_last_ts") or 0.0)
+        except Exception:
+            last_ts = 0.0
+        return (float(ts) - last_ts) >= LIGHT_CURTAIN_AUTO_RESET_INTERVAL_S
+
+    def _blocking_safety_reasons(self, safety_status: dict[str, Any]) -> list[str]:
+        # The light curtain has a separate automatic reset path and must not
+        # behave like Not-Aus in the software state machine.
+        return ["notaus"] if bool(safety_status.get("estop_active")) else []
+
+    def _blocking_safety_active(self, safety_status: dict[str, Any]) -> bool:
+        return bool(self._blocking_safety_reasons(safety_status))
+
+    def _stale_light_curtain_only_latch(
+        self,
+        *,
+        safety_status: dict[str, Any],
+        critical_reasons: list[str],
+        safety_info: dict[str, Any],
+        info: dict[str, Any],
+        mas0028_active: bool,
+    ) -> bool:
+        if external_purge_active(info):
+            return False
+        if self._blocking_safety_active(safety_status):
+            return False
+        if critical_reasons:
+            return False
+        live_safety_reasons = {str(reason) for reason in (safety_status.get("reasons") or [])}
+        if not live_safety_reasons.issubset({"lichtgitter"}):
+            return False
+        last_reasons = {str(reason) for reason in (safety_info.get("last_reasons") or [])}
+        last_reset = safety_info.get("last_reset") if isinstance(safety_info.get("last_reset"), dict) else {}
+        last_reset_reasons = {str(reason) for reason in (last_reset.get("initial_reasons") or [])}
+        light_latch_history = last_reasons == {"lichtgitter"} or last_reset_reasons == {"lichtgitter"}
+        if not light_latch_history:
+            return False
+        return bool(safety_info.get("latched") or mas0028_active)
+
+    def _perform_light_curtain_auto_reset(self, ts: float) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": False,
+            "source": "light_curtain_auto_reset",
+            "started_ts": now_ts(),
+            "steps": [],
+        }
+        if not _SAFETY_RESET_LOCK.acquire(blocking=False):
+            result["in_progress"] = True
+            result["error"] = "manual safety reset already in progress"
+            return result
+        try:
+            self._pulse_esp_reset_output()
+            result["steps"].append({"step": "esp_q0_2_reset_pulse", "ok": True})
+            result["ok"] = True
+            result["finished_ts"] = now_ts()
+        except Exception as exc:
+            result["steps"].append({"step": "esp_q0_2_reset_pulse", "ok": False, "error": str(exc)})
+            result["error"] = f"ESP reset pulse failed: {exc}"
+        finally:
+            _SAFETY_RESET_LOCK.release()
+        return result
+
+    def _remember_light_curtain_auto_reset(
+        self,
+        safety_info: dict[str, Any],
+        ts: float,
+        reset_result: dict[str, Any],
+    ) -> None:
+        try:
+            count = int(safety_info.get("light_curtain_auto_reset_count") or 0)
+        except Exception:
+            count = 0
+        reset_result["source"] = "light_curtain_auto_reset"
+        safety_info["light_curtain_auto_reset_last_ts"] = float(ts)
+        safety_info["light_curtain_auto_reset_count"] = count + 1
+        safety_info["last_auto_reset"] = {
+            "source": "light_curtain_auto_reset",
+            "reason": "lichtgitter",
+            "ts": float(ts),
+            "ok": bool(reset_result.get("ok")),
+            "error": reset_result.get("error"),
+        }
+
     def _safety_status(self, io_map: dict[tuple[str, str], str]) -> dict[str, Any]:
-        estop_active = self._bool_io(io_map, "esp32_plc58", "I0.7", default=False)
-        light_curtain_active = self._bool_io(io_map, "esp32_plc58", "I0.8", default=False)
+        estop_ok = self._bool_io(io_map, "esp32_plc58", "I0.7", default=False)
+        light_curtain_ok = self._bool_io(io_map, "esp32_plc58", "I0.8", default=False)
+        ups_input = self._io_point_detail(io_map, "raspi_plc21", "I0.6", default=True)
+        ups_ok = bool(ups_input.get("active"))
+        estop_active = not estop_ok
+        light_curtain_active = not light_curtain_ok
         reasons: list[str] = []
         if estop_active:
             reasons.append("notaus")
         if light_curtain_active:
             reasons.append("lichtgitter")
+        blocking_reasons = ["notaus"] if estop_active else []
         return {
             "active": bool(reasons),
+            "blocking_active": bool(blocking_reasons),
+            "blocking_reasons": blocking_reasons,
             "estop_active": estop_active,
             "light_curtain_active": light_curtain_active,
+            "estop_ok": estop_ok,
+            "light_curtain_ok": light_curtain_ok,
+            "ups_ok": ups_ok,
+            "ups_not_ok": not ups_ok,
+            "ups_input": ups_input,
             "reasons": reasons,
         }
 
-    def _critical_state(self, io_map: dict[tuple[str, str], str], param_map: dict[str, str]) -> tuple[bool, list[str]]:
+    def _critical_state(
+        self,
+        io_map: dict[tuple[str, str], str],
+        param_map: dict[str, str],
+        *,
+        band_break_bypass: bool = False,
+    ) -> tuple[bool, list[str]]:
         reasons: list[str] = []
         machine_state = _safe_int(param_map.get("MAS0001"), 1)
-        monitor_band_break = band_break_monitoring_active(machine_state)
-        if self._bool_io(io_map, "esp32_plc58", "I0.7", default=False):
+        monitor_band_break = band_break_monitoring_active(machine_state) and not bool(band_break_bypass)
+        if not self._bool_io(io_map, "esp32_plc58", "I0.7", default=False):
             reasons.append("notaus")
-        if self._bool_io(io_map, "esp32_plc58", "I0.8", default=False):
-            reasons.append("lichtgitter")
         if not self._bool_io(io_map, "raspi_plc21", "I0.6", default=True):
             reasons.append("usv_not_ok")
         if monitor_band_break and self._bool_io(io_map, "esp32_plc58", "I0.4", default=False):
@@ -1381,11 +4367,63 @@ class MachineRuntime:
                 continue
             if pkey in BAND_BREAK_ERROR_KEYS and not monitor_band_break:
                 continue
+            if pkey in WICKLER_DANCER_ERROR_KEYS and machine_state not in WICKLER_DANCER_MONITOR_STATES:
+                continue
             if pkey == "MAE0027" and _safe_int(param_map.get("MAS0001"), 1) not in PROCESS_SENSOR_FAULT_STATES:
                 continue
             if pkey.startswith("MAE") and _truthy(value):
                 reasons.append(pkey)
         return bool(reasons), reasons
+
+    def _clear_resettable_fault_latches_after_external_purge_clear(
+        self,
+        *,
+        io_map: dict[tuple[str, str], str],
+        param_map: dict[str, str],
+        critical_reasons: list[str],
+        ts: float,
+    ) -> list[str]:
+        # MAS0028=0 from Microtom/simulator is a deliberate Purge reset.  Do
+        # not let stale software MAE bits immediately recreate MAS0028=1; live
+        # safety inputs are kept and will relatch the purge in the same tick.
+        machine_state = _safe_int(param_map.get("MAS0001"), 1)
+        monitor_band_break = band_break_monitoring_active(machine_state)
+        live_blockers = {
+            "notaus",
+            "usv_not_ok",
+            "bahnriss_einlauf",
+            "bahnriss_auswurf",
+        }
+        if any(reason in live_blockers for reason in critical_reasons):
+            return []
+
+        cleared: list[str] = []
+        for pkey in sorted({str(reason).strip().upper() for reason in critical_reasons}):
+            if pkey not in RESETTABLE_SAFETY_ERROR_KEYS:
+                continue
+            live_point = CONDITIONAL_RESETTABLE_SAFETY_ERRORS.get(pkey)
+            if live_point and monitor_band_break and self._bool_io(io_map, live_point[0], live_point[1], default=False):
+                continue
+            if not _truthy(param_map.get(pkey, "0")):
+                continue
+            self.params.apply_device_value(pkey, "0", promote_default=True)
+            self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
+            cleared.append(pkey)
+
+        if cleared:
+            reason_text = self._describe_runtime_reasons(cleared)
+            self.logs.log(
+                "machine",
+                "info",
+                f"Externer MAS0028-Reset hat stale Fehler-Latches geloescht: {reason_text}",
+            )
+            self._record_event(
+                "external_purge_clear_fault_latches_cleared",
+                "info",
+                f"Externer MAS0028-Reset hat stale Fehler-Latches geloescht: {reason_text}",
+                {"cleared": cleared, "ts": float(ts)},
+            )
+        return cleared
 
     def _perform_safety_reset(self, safety_status: dict[str, Any], ts: float) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -1400,11 +4438,29 @@ class MachineRuntime:
         self._record_event(
             "safety_reset",
             "info",
-            "Safety-Reset gestartet: ESP Q0.2 Reset-Sequenz, danach Motor-/Wickler-Reset",
+            "Safety-Reset gestartet: ESP Q0.2 Reset-Sequenz, danach Motor-/Wickler-Recovery im Hintergrund",
             {"initial_reasons": result["initial_reasons"]},
         )
+        snapshot = self._state_row()
+        reset_info = dict(snapshot.get("info") or {})
+        reset_info["safety"] = {
+            **dict(reset_info.get("safety") or {}),
+            "latched": True,
+            "phase": SAFETY_PHASE_RESETTING,
+            "last_reasons": list(result["initial_reasons"]),
+            "last_reset": {"ok": False, "in_progress": True, "started_ts": result["started_ts"]},
+        }
+        self._write_state(
+            current_state=8,
+            requested_state=8,
+            state_source="safety_reset_running",
+            warning_active=False,
+            purge_active=True,
+            production_label=str(snapshot.get("production_label") or ""),
+            last_label_no=int(snapshot.get("last_label_no") or 0),
+            info=reset_info,
+        )
         self._apply_status_lamp(8, warning_active=False, ts=ts)
-        self._apply_safety_button_leds(8, {"phase": SAFETY_PHASE_RESETTING}, ts)
 
         try:
             self._pulse_esp_reset_output()
@@ -1418,13 +4474,14 @@ class MachineRuntime:
         result["steps"].append({"step": "refresh_esp_io", "ok": bool(refreshed.get("ok", True)), "detail": refreshed})
         refreshed_io = self._io_values()
         refreshed_safety = self._safety_status(refreshed_io)
-        if refreshed_safety["active"]:
+        refreshed_blocking_reasons = self._blocking_safety_reasons(refreshed_safety)
+        if refreshed_blocking_reasons:
             result["steps"].append(
-                {"step": "verify_safety_inputs_low", "ok": False, "reasons": refreshed_safety["reasons"]}
+                {"step": "verify_safety_inputs_high_ok", "ok": False, "reasons": refreshed_blocking_reasons}
             )
-            result["error"] = "ESP safety input still HIGH after reset sequence: " + ",".join(refreshed_safety["reasons"])
+            result["error"] = "ESP safety input still LOW/not OK after reset sequence: " + ",".join(refreshed_blocking_reasons)
             return result
-        result["steps"].append({"step": "verify_safety_inputs_low", "ok": True})
+        result["steps"].append({"step": "verify_safety_inputs_high_ok", "ok": True})
 
         process_reset = self._reset_esp_process_runtime()
         result["steps"].append({"step": "esp_process_reset", **process_reset})
@@ -1446,11 +4503,8 @@ class MachineRuntime:
         result["cleared_errors"] = clear_result.get("cleared", [])
         result["kept_errors"] = clear_result.get("kept", [])
 
-        motion_result = self._reset_motion_devices()
-        result["steps"].append({"step": "reset_motion_devices", **motion_result})
-        if not motion_result.get("ok"):
-            result["error"] = motion_result.get("error") or "motion device reset failed"
-            return result
+        motion_result = self._start_reset_motion_recovery_background()
+        result["steps"].append({"step": "reset_motion_devices_background", **motion_result})
 
         self.params.apply_device_value("MAS0001", "9", promote_default=True)
         self._notify_microtom("MAS0001", "9", dedupe_key="machine:MAS0001")
@@ -1461,19 +4515,157 @@ class MachineRuntime:
             motion_result,
         )
         self._apply_status_lamp(9, warning_active=False, ts=now_ts())
-        self._apply_safety_button_leds(9, {"phase": SAFETY_PHASE_READY}, now_ts())
         result["ok"] = True
         result["finished_ts"] = now_ts()
         return result
 
+    def _start_reset_motion_recovery_background(self) -> dict[str, Any]:
+        if not _RESET_MOTION_RECOVERY_LOCK.acquire(blocking=False):
+            return {"ok": True, "queued": False, "in_progress": True}
+
+        def worker():
+            try:
+                started_ts = now_ts()
+                try:
+                    motion_result = self._reset_motion_devices()
+                except Exception as exc:
+                    motion_result = {"ok": False, "error": str(exc), "details": {}}
+                finished_ts = now_ts()
+                payload = {
+                    **motion_result,
+                    "started_ts": started_ts,
+                    "finished_ts": finished_ts,
+                    "duration_s": round(max(0.0, finished_ts - started_ts), 3),
+                }
+                ok = bool(motion_result.get("ok"))
+                severity = "info" if ok else "warning"
+                message = (
+                    "Safety-Reset Motion-Recovery abgeschlossen"
+                    if ok
+                    else "Safety-Reset Motion-Recovery mit Warnung abgeschlossen"
+                )
+                self.logs.log("machine", severity, f"{message}: {motion_result.get('error') or 'ok'}")
+                self._record_event("reset_motion_recovery", severity, message, payload)
+                try:
+                    snapshot = self._state_row()
+                    info = dict(snapshot.get("info") or {})
+                    safety_info = dict(info.get("safety") or {})
+                    safety_info["last_motion_recovery"] = payload
+                    current_state = int(snapshot.get("current_state") or 1)
+                    requested_state = int(snapshot.get("requested_state") or snapshot.get("current_state") or 1)
+                    state_source = str(snapshot.get("state_source") or "runtime")
+                    purge_active = bool(snapshot.get("purge_active"))
+                    if ok:
+                        try:
+                            live_io = self._io_values()
+                            live_params = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+                            live_critical, live_reasons = self._critical_state(
+                                live_io,
+                                live_params,
+                                band_break_bypass=quick_setup_band_break_bypass_active(snapshot.get("info") or {}),
+                            )
+                            live_purge = _truthy(live_params.get("MAS0028", "0"))
+                        except Exception:
+                            live_critical = False
+                            live_reasons = []
+                            live_purge = bool(snapshot.get("purge_active"))
+                        if not live_critical and not live_purge:
+                            safety_info = {
+                                **safety_info,
+                                "latched": False,
+                                "phase": SAFETY_PHASE_READY,
+                                "last_reasons": [],
+                            }
+                            purge_active = False
+                            if current_state in (8, 20, 21):
+                                current_state = 9
+                                requested_state = 9
+                                state_source = "reset_motion_recovery_ready"
+                        else:
+                            safety_info = {
+                                **safety_info,
+                                "latched": True,
+                                "phase": SAFETY_PHASE_LATCHED,
+                                "last_reasons": list(live_reasons),
+                            }
+                            purge_active = True
+                    info["safety"] = safety_info
+                    self._write_state(
+                        current_state=current_state,
+                        requested_state=requested_state,
+                        state_source=state_source,
+                        warning_active=bool(snapshot.get("warning_active")),
+                        purge_active=purge_active,
+                        production_label=str(snapshot.get("production_label") or ""),
+                        last_label_no=int(snapshot.get("last_label_no") or 0),
+                        info=info,
+                    )
+                except Exception as exc:
+                    self.logs.log("machine", "info", f"reset motion recovery state update skipped: {exc}")
+            finally:
+                _RESET_MOTION_RECOVERY_LOCK.release()
+
+        thread = threading.Thread(target=worker, name="mas004-reset-motion-recovery", daemon=True)
+        thread.start()
+        return {"ok": True, "queued": True, "in_progress": True}
+
+    def _resettable_position_axis_faults_ready(self) -> tuple[list[str], list[dict[str, Any]]]:
+        details: list[dict[str, Any]] = []
+        cleared: list[str] = []
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            return cleared, [{"ok": True, "skipped": True, "reason": "esp_simulation"}]
+        client = EspMotorClient(self.cfg)
+        if not client.available():
+            return cleared, [{"ok": True, "skipped": True, "reason": "esp_motor_endpoint_unavailable"}]
+        for motor_id, pkey in sorted(POSITION_AXIS_MAE_BY_MOTOR.items()):
+            try:
+                if not _truthy(self.params.get_effective_value(pkey)):
+                    continue
+                payload = client.refresh(motor_id)
+                motor = payload.get("motor") if isinstance(payload, dict) else {}
+                state = (motor or {}).get("state") if isinstance(motor, dict) else {}
+                state = state if isinstance(state, dict) else {}
+                status_ok = bool(payload.get("ok", True)) if isinstance(payload, dict) else False
+                ready = self._esp_motor_reset_ready(motor_id, state, status_ok)
+                detail = {
+                    "motor_id": motor_id,
+                    "pkey": pkey,
+                    "ok": ready,
+                    "status_ok": status_ok,
+                    "link_ok": state.get("link_ok"),
+                    "ready": state.get("ready"),
+                    "alarm": state.get("alarm"),
+                    "alarm_code": state.get("alarm_code"),
+                    "feedback_tenths_mm": state.get("feedback_tenths_mm"),
+                }
+                details.append(detail)
+                if ready:
+                    cleared.append(pkey)
+            except Exception as exc:
+                details.append({"motor_id": motor_id, "pkey": pkey, "ok": False, "error": str(exc)})
+        return cleared, details
+
     def _clear_resettable_safety_errors(
         self, *, io_map: dict[tuple[str, str], str] | None = None
-    ) -> dict[str, list[str]]:
-        cleared = ["MAS0028", *sorted(RESETTABLE_SAFETY_ERROR_KEYS)]
+    ) -> dict[str, Any]:
+        state_info = dict(self._state_row().get("info") or {})
+        keep_external_purge = external_purge_active(state_info)
+        cleared = sorted(RESETTABLE_SAFETY_ERROR_KEYS)
+        skipped: list[str] = []
+        if keep_external_purge:
+            skipped.append("MAS0028")
+        else:
+            cleared.insert(0, "MAS0028")
+        motor_faults_cleared, motor_fault_details = self._resettable_position_axis_faults_ready()
+        for pkey in motor_faults_cleared:
+            if pkey not in cleared:
+                cleared.append(pkey)
         kept: list[str] = []
         machine_state = _safe_int(self._state_row().get("current_state"), 1)
         monitor_band_break = band_break_monitoring_active(machine_state)
         for pkey, (device_code, pin_label) in sorted(CONDITIONAL_RESETTABLE_SAFETY_ERRORS.items()):
+            if pkey in motor_faults_cleared:
+                continue
             if (
                 monitor_band_break
                 and io_map is not None
@@ -1484,11 +4676,17 @@ class MachineRuntime:
             cleared.append(pkey)
         for pkey in cleared:
             self.params.apply_device_value(pkey, "0", promote_default=True)
-            self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
+            if pkey != "MAS0028":
+                self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
         self.logs.log("machine", "info", "resettable safety errors cleared: " + ",".join(cleared))
         if kept:
             self.logs.log("machine", "warning", "resettable safety errors kept active: " + ",".join(kept))
-        return {"cleared": cleared, "kept": kept}
+        result = {"cleared": cleared, "kept": kept}
+        if skipped:
+            result["skipped"] = skipped
+        if motor_fault_details:
+            result["position_axis_faults"] = motor_fault_details
+        return result
 
     def _pulse_esp_reset_output(self):
         io_runtime = IoRuntime(self.cfg, self.io_store)
@@ -1496,18 +4694,20 @@ class MachineRuntime:
         if not point:
             raise RuntimeError("ESP reset output Q0.2 is not defined in IO master")
         io_runtime.write_output(point["io_key"], True, force=True, source="safety-reset")
-        time.sleep(0.2)
+        time.sleep(ESP_RESET_PULSE_HIGH_S)
         io_runtime.write_output(point["io_key"], False, force=True, source="safety-reset")
-        time.sleep(0.1)
+        time.sleep(ESP_RESET_PULSE_GAP_S)
         io_runtime.write_output(point["io_key"], True, force=True, source="safety-reset")
-        time.sleep(0.2)
+        time.sleep(ESP_RESET_PULSE_HIGH_S)
         io_runtime.write_output(point["io_key"], False, force=True, source="safety-reset")
 
-    def _refresh_single_io_device(self, device_code: str) -> dict[str, Any]:
+    def _refresh_single_io_device(self, device_code: str, pin_labels: set[str] | None = None) -> dict[str, Any]:
+        wanted_pins = {str(pin or "").upper() for pin in (pin_labels or set())}
         points = [
             point
-            for point in self.io_store.list_points(include_reserved=True)
+            for point in self.io_store.list_points(device_code=str(device_code or ""), include_reserved=True)
             if str(point.get("device_code") or "") == str(device_code or "")
+            and (not wanted_pins or str(point.get("pin_label") or "").upper() in wanted_pins)
         ]
         if not points:
             return {"ok": False, "error": f"no IO points for {device_code}"}
@@ -1523,22 +4723,30 @@ class MachineRuntime:
             return {"ok": True, "skipped": True, "reason": "esp_simulation"}
         if not getattr(self.cfg, "esp_host", "") or int(getattr(self.cfg, "esp_port", 0) or 0) <= 0:
             return {"ok": True, "skipped": True, "reason": "esp_endpoint_missing"}
-        try:
-            client = EspPlcClient(
-                str(self.cfg.esp_host),
-                int(self.cfg.esp_port),
-                float(getattr(self.cfg, "esp_connect_timeout_s", 1.5) or 1.5),
-            )
-            reply = client.exchange_line(
-                "PROCESS RESET",
-                read_timeout_s=float(getattr(self.cfg, "esp_command_timeout_s", 8.0) or 8.0),
-            )
-            ok = str(reply or "").strip().upper().startswith("ACK_PROCESS_RESET")
-            if not ok:
-                return {"ok": False, "reply": reply, "error": f"unexpected ESP reply: {reply}"}
-            return {"ok": True, "reply": reply}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+        attempts: list[dict[str, Any]] = []
+        read_timeout_s = min(1.5, float(getattr(self.cfg, "esp_command_timeout_s", 8.0) or 8.0))
+        for attempt_no in (1, 2):
+            try:
+                client = EspPlcClient(
+                    str(self.cfg.esp_host),
+                    int(self.cfg.esp_port),
+                    float(getattr(self.cfg, "esp_connect_timeout_s", 1.5) or 1.5),
+                )
+                reply = client.exchange_line("PROCESS RESET", read_timeout_s=read_timeout_s)
+                ok = str(reply or "").strip().upper().startswith("ACK_PROCESS_RESET")
+                attempts.append({"attempt": attempt_no, "ok": ok, "reply": reply})
+                if ok:
+                    return {"ok": True, "reply": reply, "attempts": attempts}
+            except Exception as exc:
+                attempts.append({"attempt": attempt_no, "ok": False, "error": str(exc)})
+            time.sleep(0.2)
+        last = attempts[-1] if attempts else {}
+        return {
+            "ok": False,
+            "attempts": attempts,
+            "reply": last.get("reply"),
+            "error": last.get("error") or f"unexpected ESP reply: {last.get('reply')}",
+        }
 
     @staticmethod
     def _esp_motor_reset_ready(motor_id: int, state: dict[str, Any], status_ok: bool) -> bool:
@@ -1713,9 +4921,8 @@ class MachineRuntime:
                     "none",
                     "keine",
                     "ok",
-                    "wippe unten",
-                    "wippe oben",
                     "externer wickler-stop aktiv",
+                    "azd stop eingang aktiv",
                 )
                 state_ok = bool(state.get("ok", True))
                 verified = self._wickler_reset_safe_stop(state_ok, drive, mode_label, safe_stop_fault)
@@ -1751,12 +4958,52 @@ class MachineRuntime:
             return {"ok": False, "error": "; ".join(hard_failures[:5]), "details": details}
         return {"ok": True, "details": details}
 
+    def _refresh_esp_critical_io_if_stale(self) -> dict[str, Any] | None:
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            return None
+        now = now_ts()
+        stale_pins: list[str] = []
+        for pin in sorted(ESP_CRITICAL_IO_PINS):
+            point = self.io_store.get_point(f"esp32_plc58__{pin.replace('.', '_')}")
+            if not point:
+                stale_pins.append(pin)
+                continue
+            age_s = now - _safe_float(point.get("updated_ts"), 0.0)
+            if str(point.get("quality") or "").lower() != "live" or age_s > ESP_CRITICAL_IO_MAX_AGE_S:
+                stale_pins.append(pin)
+        if not stale_pins:
+            return None
+        result = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
+        return {
+            "ok": bool(result.get("ok", False)),
+            "stale_pins": stale_pins,
+            "refresh": result,
+            "ts": now,
+        }
+
     def _io_values(self) -> dict[tuple[str, str], str]:
         values: dict[tuple[str, str], str] = {}
+        now = now_ts()
         for item in self.io_store.list_points(include_reserved=True):
-            values[(str(item.get("device_code") or ""), str(item.get("pin_label") or "").upper())] = str(
-                item.get("value") if item.get("value") is not None else "0"
-            )
+            device = str(item.get("device_code") or "")
+            pin = str(item.get("pin_label") or "").upper()
+            value = str(item.get("value") if item.get("value") is not None else "0")
+            if device == "esp32_plc58" and pin in ESP_BAND_BREAK_IO_PINS:
+                age_s = now - _safe_float(item.get("updated_ts"), 0.0)
+                if str(item.get("quality") or "").lower() == "live" and age_s > ESP_CRITICAL_IO_MAX_AGE_S:
+                    value = "0"
+            values[(device, pin)] = value
+        return values
+
+    def _io_values_for_pins(self, pins: Iterable[tuple[str, str]]) -> dict[tuple[str, str], str]:
+        wanted = {(str(device or ""), str(pin or "").upper()) for device, pin in pins}
+        values: dict[tuple[str, str], str] = {}
+        devices = sorted({device for device, _pin in wanted})
+        for device in devices:
+            for item in self.io_store.list_points(device_code=device, include_reserved=True):
+                key = (str(item.get("device_code") or ""), str(item.get("pin_label") or "").upper())
+                if key in wanted:
+                    values[key] = str(item.get("value") if item.get("value") is not None else "0")
         return values
 
     def _bool_io(self, io_map: dict[tuple[str, str], str], device_code: str, pin_label: str, *, default: bool) -> bool:
@@ -1765,63 +5012,138 @@ class MachineRuntime:
             return bool(default)
         return _truthy(io_map.get(key))
 
+    def _io_point_detail(
+        self,
+        io_map: dict[tuple[str, str], str],
+        device_code: str,
+        pin_label: str,
+        *,
+        default: bool,
+    ) -> dict[str, Any]:
+        device = str(device_code or "")
+        pin = str(pin_label or "").upper()
+        io_key = f"{device}__{pin.replace('.', '_')}"
+        value = str(io_map.get((device, pin), "1" if default else "0"))
+        point = self.io_store.get_point(io_key) or {}
+        return {
+            "device_code": device,
+            "pin_label": pin,
+            "io_key": io_key,
+            "value": value,
+            "active": _truthy(value),
+            "quality": point.get("quality"),
+            "source": point.get("source"),
+            "function_text": point.get("function_text"),
+            "updated_ts": point.get("updated_ts"),
+        }
+
+    def _needs_fresh_raspi_button_io(self, snapshot: dict[str, Any], info: dict[str, Any]) -> bool:
+        safety_info = dict((info or {}).get("safety") or {})
+        return (
+            int((snapshot or {}).get("current_state") or 0) in (20, 21)
+            or bool((snapshot or {}).get("purge_active"))
+            or bool(safety_info.get("latched"))
+            or str(safety_info.get("phase") or "") in {SAFETY_PHASE_LATCHED, SAFETY_PHASE_FAILED}
+        )
+
     def _button_inputs(self, io_map: dict[tuple[str, str], str]) -> dict[str, bool]:
         return {
             name: self._bool_io(io_map, device_code, pin_label, default=False)
             for name, (device_code, pin_label) in BUTTON_INPUTS.items()
         }
 
-    def _button_requested_command(
+    def _physical_button_request(
         self,
         *,
-        current_state: int,
+        snapshot: dict[str, Any],
+        info: dict[str, Any],
         io_map: dict[tuple[str, str], str],
         previous_inputs: dict[str, Any],
         button_mask: dict[str, bool],
-    ) -> Optional[int]:
+    ) -> Optional[dict[str, Any]]:
         current_inputs = self._button_inputs(io_map)
-        allowed_actions = state_actions(current_state)
         for button_name, active_now in current_inputs.items():
             was_active = bool(previous_inputs.get(button_name))
             if not active_now or was_active:
                 continue
-            command = button_to_command(button_name, current_state)
-            if command is None:
+            try:
+                return self._resolve_button_press(
+                    button_name,
+                    snapshot=snapshot,
+                    info=info,
+                    button_mask=button_mask,
+                )
+            except RuntimeError as exc:
+                self.logs.log("machine", "info", f"physical button {button_name} ignored: {exc}")
                 continue
-            action_name = "pause" if button_name == "start_pause" and int(current_state or 0) == 5 else (
-                "start" if button_name == "start_pause" else button_name
-            )
-            if not allowed_actions.get(action_name, False):
-                continue
-            if not button_mask.get(action_name, False):
-                self.logs.log("machine", "info", f"button {button_name} ignored by MAP0065")
-                continue
-            return command
         return None
 
     def _apply_button_leds(self, state: int, button_mask: dict[str, bool], ts: float):
-        io_runtime = IoRuntime(self.cfg, self.io_store)
-        led_plan = button_led_plan(state, button_mask, ts=ts)
-        for action, pins in BUTTON_LED_OUTPUTS.items():
+        self._apply_button_led_plan(button_led_plan(state, button_mask, ts=ts))
+
+    def _button_led_points(self) -> list[tuple[str, dict[str, Any]]]:
+        if self._button_led_points_cache is not None:
+            return self._button_led_points_cache
+        points: list[tuple[str, dict[str, Any]]] = []
+        for _action, pins in BUTTON_LED_OUTPUTS.items():
             for device_code, pin in pins:
                 point = self.io_store.get_point(f"{device_code}__{pin.replace('.', '_')}")
-                if not point:
-                    continue
-                try:
-                    io_runtime.write_output(point["io_key"], bool(led_plan.get(pin, False)))
-                except Exception as exc:
-                    self.logs.log("machine", "info", f"button-led write skipped for {point['io_key']}: {exc}")
+                if point:
+                    points.append((pin, point))
+        self._button_led_points_cache = points
+        return points
+
+    def _apply_button_led_plan(self, led_plan: dict[str, bool], *, force: bool = True, source: str = "button-led"):
+        io_runtime = IoRuntime(self.cfg, self.io_store)
+        writes: list[tuple[bool, dict[str, Any]]] = []
+        desired = {pin: bool(led_plan.get(pin, False)) for pin, _point in self._button_led_points()}
+        previous = self._button_led_last_plan
+        for pin, point in self._button_led_points():
+            enabled = desired.get(pin, False)
+            if not force and previous is not None and bool(previous.get(pin, False)) == enabled:
+                continue
+            writes.append((enabled, point))
+        if not writes:
+            self._button_led_last_plan = desired
+            return
+
+        # On multi-colour illuminated buttons, switch stale colours off before
+        # enabling the next colour.  A tiny dark gap is better than a visible
+        # mixed red/blue flash on the panel.
+        had_error = False
+        for enabled, point in sorted(writes, key=lambda item: 1 if item[0] else 0):
+            try:
+                # Button lamps must reflect the current machine state on
+                # the physical panel, even after a restart or manual test
+                # left the DB value equal to the requested value while the
+                # real output latch is different.
+                io_runtime.write_output(
+                    point["io_key"],
+                    enabled,
+                    force=force,
+                    source=source,
+                )
+            except Exception as exc:
+                had_error = True
+                self.logs.log("machine", "info", f"button-led write skipped for {point['io_key']}: {exc}")
+        if not had_error:
+            self._button_led_last_plan = desired
 
     def _safety_led_override_active(self, state: int, safety_info: dict[str, Any]) -> bool:
         phase = str((safety_info or {}).get("phase") or "")
-        return int(state or 0) in (8, 9, 21) and phase in {
+        return int(state or 0) == 21 and phase in {
             SAFETY_PHASE_LATCHED,
             SAFETY_PHASE_RESETTING,
             SAFETY_PHASE_READY,
             SAFETY_PHASE_FAILED,
         }
 
-    def _safety_button_led_plan(self, phase: str, ts: float) -> dict[str, bool]:
+    def _safety_button_led_plan(
+        self,
+        phase: str,
+        ts: float,
+        button_mask: dict[str, bool] | None = None,
+    ) -> dict[str, bool]:
         plan = {pin: False for pins in BUTTON_LED_OUTPUTS.values() for _device, pin in pins}
         second_on = int(ts) % 2 == 0
         if phase in {SAFETY_PHASE_LATCHED, SAFETY_PHASE_FAILED}:
@@ -1837,28 +5159,53 @@ class MachineRuntime:
         if not self._safety_led_override_active(state, safety_info):
             return
         io_runtime = IoRuntime(self.cfg, self.io_store)
-        plan = self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts)
+        param_map = self._param_values_by_prefix(("MAP",))
+        button_mask = parse_button_mask(param_map.get("MAP0065", "1111111"))
+        plan = self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts, button_mask)
         for pin in ("Q0.0", "Q0.2"):
             point = self.io_store.get_point(f"raspi_plc21__{pin.replace('.', '_')}")
             if not point:
                 continue
             try:
-                io_runtime.write_output(point["io_key"], bool(plan.get(pin, False)), force=True, source="safety-led")
+                io_runtime.write_output(
+                    point["io_key"],
+                    bool(plan.get(pin, False)),
+                    force=True,
+                    source="safety-led",
+                )
             except Exception as exc:
                 self.logs.log("machine", "info", f"safety-led write skipped for {point['io_key']}: {exc}")
 
-    def _apply_status_lamp(self, state: int, *, warning_active: bool, ts: float):
-        io_runtime = IoRuntime(self.cfg, self.io_store)
-        lamp = lamp_outputs_for_state(state, warning_active=warning_active, ts=ts)
-        for color, enabled in lamp.items():
-            device_code, pin = STATUS_LAMP_OUTPUTS[color]
+    def _status_lamp_points(self) -> dict[str, dict[str, Any]]:
+        if self._status_lamp_points_cache is not None:
+            return self._status_lamp_points_cache
+        points: dict[str, dict[str, Any]] = {}
+        for color, (device_code, pin) in STATUS_LAMP_OUTPUTS.items():
             point = self.io_store.get_point(f"{device_code}__{pin.replace('.', '_')}")
+            if point:
+                points[str(color)] = point
+        self._status_lamp_points_cache = points
+        return points
+
+    def _apply_status_lamp(self, state: int, *, warning_active: bool, ts: float):
+        lamp = lamp_outputs_for_state(state, warning_active=warning_active, ts=ts)
+        if self._status_lamp_last_plan == lamp:
+            return
+        io_runtime = IoRuntime(self.cfg, self.io_store)
+        had_error = False
+        writes = [(bool(enabled), self._status_lamp_points().get(str(color))) for color, enabled in lamp.items()]
+        for enabled, point in sorted(writes, key=lambda item: 1 if item[0] else 0):
             if not point:
                 continue
             try:
-                io_runtime.write_output(point["io_key"], bool(enabled), source="status-lamp", best_effort=True)
+                result = io_runtime.write_output(point["io_key"], enabled, source="status-lamp", best_effort=True)
+                if bool(result.get("overridden")):
+                    had_error = True
             except Exception as exc:
+                had_error = True
                 self.logs.log("machine", "info", f"status-lamp write skipped for {point['io_key']}: {exc}")
+        if not had_error:
+            self._status_lamp_last_plan = dict(lamp)
 
     def _current_production_label(self) -> str:
         active = self.production_logs.active_state()
@@ -1873,20 +5220,32 @@ class MachineRuntime:
     def _notify_microtom(self, pkey: str, value: str, *, dedupe_key: str | None):
         if self.outbox is None:
             return
+        if str(pkey or "").strip().upper() == "MAS0028" and not _truthy(value):
+            self.logs.log(
+                "raspi",
+                "info",
+                "suppressed machine-runtime MAS0028=0 callback; purge termination is Microtom/DIClient-owned",
+            )
+            return
         targets = peer_urls(self.cfg, "/api/inbox")
-        effective_dedupe = f"state:{pkey}" if dedupe_key else None
+        effective_dedupe, replace_existing = (
+            microtom_state_queue_options(pkey, value) if dedupe_key else (None, False)
+        )
+        line = f"{pkey}={value}"
         for url in targets:
             self.outbox.enqueue(
                 "POST",
                 url,
                 {},
-                {"msg": f"{pkey}={value}", "source": "raspi", "origin": "machine-runtime"},
+                {"msg": line, "source": "raspi", "origin": "machine-runtime"},
                 None,
                 priority=20,
                 dedupe_key=effective_dedupe,
                 drop_if_duplicate=bool(effective_dedupe),
-                replace_existing=bool(effective_dedupe),
+                replace_existing=replace_existing,
             )
+        if targets:
+            self.logs.log("raspi", "out", f"to microtom: {line}")
 
 
 def parse_machine_event_line(line: str) -> dict[str, Any] | None:

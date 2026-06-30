@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 from typing import List
 from typing import Tuple
 
@@ -57,6 +58,16 @@ def peer_urls(cfg: Settings, path: str) -> List[str]:
     if not p.startswith("/"):
         p = "/" + p
     return [f"{base}{p}" for base in peer_base_urls(cfg)]
+
+
+def peer_request_headers(cfg: Settings, url: str, headers: Mapping[str, object] | None = None) -> dict[str, str]:
+    out = {str(k): str(v) for k, v in dict(headers or {}).items()}
+    adapter_key = str(getattr(cfg, "diclient_adapter_key", "") or "").strip()
+    if not adapter_key:
+        return out
+    if any(url_matches_peer_base(url, base) for base in peer_base_urls(cfg)):
+        out["X-DIClient-Adapter-Key"] = adapter_key
+    return out
 
 
 def sender_lanes(cfg: Settings) -> List[SenderLane]:

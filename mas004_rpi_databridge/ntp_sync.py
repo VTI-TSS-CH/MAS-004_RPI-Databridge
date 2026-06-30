@@ -103,8 +103,10 @@ def ntp_loop(cfg_path: str):
                 sleep_s = interval_min * 60
             else:
                 print(f"[NTP] sync FAIL server={server} msg={msg}", flush=True)
-                # Retry quickly after boot/network recovery instead of waiting the full interval.
-                sleep_s = min(interval_min * 60, 15)
+                # Retry after a short backoff, but do not hammer an unreachable
+                # plant NTP server. The next config reload still happens on the
+                # next retry cycle.
+                sleep_s = min(interval_min * 60, 300)
         else:
             sleep_s = interval_min * 60
 

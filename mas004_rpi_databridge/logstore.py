@@ -14,7 +14,7 @@ DEFAULT_LOG_DIR = "/var/lib/mas004_rpi_databridge/logs"
 
 # Channels that should ALWAYS exist in the UI dropdown, even if no logs exist yet.
 # "all" is a virtual channel (aggregates all channels).
-DEFAULT_LOG_CHANNELS = ["all", "raspi", "machine", "esp-plc", "moxa1", "moxa2", "raspi-io", "vj3350", "vj6530"]
+DEFAULT_LOG_CHANNELS = ["all", "raspi", "machine", "esp-plc", "moxa1", "moxa2", "moxa3", "raspi-io", "vj3350", "vj6530"]
 
 DAILY_GROUP_ALL = "all"
 DAILY_GROUP_ESP = "esp"
@@ -47,8 +47,9 @@ AUDIT_CHANNEL_LABELS = {
     "machine": "Maschinensteuerung",
     "esp-plc": "ESP32-PLC",
     "raspi-io": "Raspberry PLC 21 I/O",
-    "moxa1": "Moxa E1211 #1",
-    "moxa2": "Moxa E1211 #2",
+    "moxa1": "Moxa E1213 #1",
+    "moxa2": "Moxa E1213 #2",
+    "moxa3": "Moxa E1213 #3",
     "vj6530": "Videojet 6530 TTO",
     "vj3350": "Videojet 3350 Laser",
     "smartwickler": "Smart Wickler",
@@ -249,7 +250,8 @@ class LogStore:
         m = re.search(r"\b(ACK_)?([A-Z]{3})(\d{4,5})\s*=\s*([^|\s]+)", s)
         if not m:
             return None, None, False
-        return f"{m.group(2)}{m.group(3)}", m.group(4), bool(m.group(1))
+        value = str(m.group(4) or "").rstrip(";,")
+        return f"{m.group(2)}{m.group(3)}", value, bool(m.group(1))
 
     def _audit_summary_for_log(self, channel: str, direction: str, message: str) -> dict[str, Any]:
         pkey, value, ack = self._extract_pkey_value(message)
@@ -282,6 +284,32 @@ class LogStore:
             "description": desc,
             "name": title,
         }
+
+    def _truthy_audit_value(self, value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        return text not in ("", "0", "false", "off", "no", "none", "null")
+
+    def _audit_category_for_log(self, channel: str, pkey: str, ack: bool) -> str:
+        channel_key = (channel or "").strip().lower()
+        key = (pkey or "").strip().upper()
+        if channel_key == "machine":
+            return "machine"
+        if ack:
+            return "communication"
+        if key.startswith("MAE") or key.startswith("MAW") or key == "MAS0028":
+            return "machine"
+        return "communication"
+
+    def _audit_direction_for_log(self, direction: str, pkey: str, value: str, ack: bool) -> str:
+        base = str(direction or "").strip().upper()
+        if ack:
+            return base
+        key = (pkey or "").strip().upper()
+        if key.startswith("MAE") and self._truthy_audit_value(value):
+            return "ERROR"
+        if (key.startswith("MAW") or key == "MAS0028") and self._truthy_audit_value(value):
+            return "WARNING"
+        return base
 
     def list_audit_entries(self, *, hours: Optional[int] = None, limit: int = 500) -> List[Dict[str, Any]]:
         keep_hours = self._safe_hours(hours if hours is not None else self.audit_keep_hours_from_settings(), 72)
@@ -316,13 +344,24 @@ class LogStore:
 
         for ts, channel, direction, message in log_rows:
             summary = self._audit_summary_for_log(str(channel or ""), str(direction or ""), str(message or ""))
+            category = self._audit_category_for_log(
+                str(channel or ""),
+                str(summary.get("pkey") or ""),
+                bool(summary.get("ack")),
+            )
+            audit_direction = self._audit_direction_for_log(
+                str(direction or ""),
+                str(summary.get("pkey") or ""),
+                str(summary.get("value") or ""),
+                bool(summary.get("ack")),
+            )
             entries.append(
                 {
                     "ts": float(ts or 0.0),
                     "ts_display": format_local_timestamp(float(ts or 0.0)),
-                    "category": "communication",
+                    "category": category,
                     "source": channel,
-                    "direction": direction,
+                    "direction": audit_direction,
                     "message": message,
                     **summary,
                 }

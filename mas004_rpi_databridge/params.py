@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import io
 import re
 from typing import Optional, Dict, Any, Tuple
@@ -10,6 +12,48 @@ from mas004_rpi_databridge.db import DB, now_ts
 
 SHEET_NAME = "Parameter"
 DEVICE_PUSH_PTYPES = {"TTE", "TTW", "LSE", "LSW", "MAE", "MAW"}
+PROTECTED_POSITION_MOTOR_PARAM_KEYS = frozenset(
+    {
+        # Positionsachsen ID1/2 und ID4-9: setpoint + actual pkeys.
+        "MAP0056",
+        "MAS0011",
+        "MAP0057",
+        "MAS0012",
+        "MAP0059",
+        "MAS0032",
+        "MAP0060",
+        "MAS0017",
+        "MAP0061",
+        "MAS0013",
+        "MAP0062",
+        "MAS0014",
+        "MAP0063",
+        "MAS0016",
+        "MAP0064",
+        "MAS0015",
+    }
+)
+_MOTOR_PARAM_MASTER_WRITE_ALLOWED = contextvars.ContextVar("motor_param_master_write_allowed", default=False)
+_MOTOR_PARAM_MASTER_WRITE_REASON = contextvars.ContextVar("motor_param_master_write_reason", default="")
+
+
+@contextlib.contextmanager
+def motor_param_master_write_context(reason: str = "machine_setup_motors"):
+    token_allowed = _MOTOR_PARAM_MASTER_WRITE_ALLOWED.set(True)
+    token_reason = _MOTOR_PARAM_MASTER_WRITE_REASON.set(str(reason or "machine_setup_motors"))
+    try:
+        yield
+    finally:
+        _MOTOR_PARAM_MASTER_WRITE_REASON.reset(token_reason)
+        _MOTOR_PARAM_MASTER_WRITE_ALLOWED.reset(token_allowed)
+
+
+def _protected_motor_param(pkey: str) -> bool:
+    return str(pkey or "").strip().upper() in PROTECTED_POSITION_MOTOR_PARAM_KEYS
+
+
+def _motor_param_master_write_allowed() -> bool:
+    return bool(_MOTOR_PARAM_MASTER_WRITE_ALLOWED.get(False))
 
 
 def _to_str(v) -> Optional[str]:
@@ -94,6 +138,7 @@ class ParamStore:
         inserted = 0
         updated = 0
         skipped = 0
+        protected_motor_params_preserved = 0
 
         headers_raw = [(_to_str(ws.cell(1, c).value) or "").strip() for c in range(1, ws.max_column + 1)]
         header_map: Dict[str, int] = {}
@@ -196,7 +241,18 @@ class ParamStore:
 
                 ts = now_ts()
 
-                exists = c.execute("SELECT 1 FROM params WHERE pkey=?", (pkey,)).fetchone() is not None
+                existing_row = c.execute(
+                    "SELECT min_v,max_v,default_v,rw,esp_rw FROM params WHERE pkey=?",
+                    (pkey,),
+                ).fetchone()
+                exists = existing_row is not None
+                protected_existing = exists and _protected_motor_param(pkey) and not _motor_param_master_write_allowed()
+                if protected_existing:
+                    # Commissioned position-axis parameters are owned only by
+                    # /ui/machine-setup/motors. Older Excel imports may still
+                    # contain stale defaults/limits such as ID8/ID9 max=910.
+                    min_v, max_v, default_v, rw, esp_rw = existing_row
+                    protected_motor_params_preserved += 1
                 if exists:
                     c.execute(
                         """UPDATE params SET
@@ -310,7 +366,13 @@ class ParamStore:
                     else:
                         c.execute("DELETE FROM param_device_map WHERE pkey=?", (pkey,))
 
-        return {"ok": True, "inserted": inserted, "updated": updated, "skipped": skipped}
+        return {
+            "ok": True,
+            "inserted": inserted,
+            "updated": updated,
+            "skipped": skipped,
+            "protected_motor_params_preserved": protected_motor_params_preserved,
+        }
 
     def get_meta(self, pkey: str) -> Optional[Dict[str, Any]]:
         with self.db._conn() as c:
@@ -409,6 +471,9 @@ class ParamStore:
         if not meta:
             return False, "NAK_UnknownParam"
 
+        if _protected_motor_param(pkey) and not _motor_param_master_write_allowed():
+            return False, "NAK_MotorSetupOnly"
+
         if not self.can_actor_write(pkey, actor=actor):
             access = self.actor_access(pkey, actor=actor)
             return False, "NAK_NoAccess" if access == "N" else "NAK_ReadOnly"
@@ -455,9 +520,13 @@ class ParamStore:
         if not meta:
             return False, "NAK_UnknownParam"
 
+        protected_motor_param = _protected_motor_param(pkey) and not _motor_param_master_write_allowed()
         rw = (meta.get("rw") or "").strip().upper()
         ptype = (meta.get("ptype") or "").strip().upper()
-        can_update_default = bool(promote_default) or rw in ("W", "R/W") or ptype in DEVICE_PUSH_PTYPES
+        can_update_default = (
+            not protected_motor_param
+            and (bool(promote_default) or rw in ("W", "R/W") or ptype in DEVICE_PUSH_PTYPES)
+        )
 
         ts = now_ts()
         with self.db._conn() as c:
@@ -485,6 +554,9 @@ class ParamStore:
         meta = self.get_meta(pkey)
         if not meta:
             return False, "NAK_UnknownParam"
+
+        if _protected_motor_param(pkey) and not _motor_param_master_write_allowed():
+            return False, "NAK_MotorSetupOnly"
 
         new_min = meta.get("min_v") if min_v is None else min_v
         new_max = meta.get("max_v") if max_v is None else max_v

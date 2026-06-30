@@ -38,6 +38,7 @@ class Settings:
     # Peer (Microtom)
     peer_base_url: str = "http://127.0.0.1:9090"
     peer_base_url_secondary: str = ""  # optional parallel target (e.g. local Microtom test tool via VPN/WireGuard)
+    diclient_adapter_key: str = ""
     peer_watchdog_host: str = "127.0.0.1"
     peer_health_path: str = "/health"
 
@@ -71,14 +72,19 @@ class Settings:
     raspi_plc_model: str = "RPIPLC_21"
     raspi_io_simulation: bool = True
     raspi_io_poll_interval_s: float = 1.0
+    raspi_analog_input_high_threshold: float = 1000.0
+    light_curtain_auto_reset_enabled: bool = True
 
-    # Moxa ioLogik E1211 on ETH1 (Modbus/TCP direct, default port 502)
+    # Moxa ioLogik on ETH1 (Modbus/TCP direct, default port 502)
     moxa1_host: str = "192.168.2.102"
     moxa1_port: int = 502
     moxa1_simulation: bool = True
     moxa2_host: str = "192.168.2.103"
     moxa2_port: int = 502
     moxa2_simulation: bool = True
+    moxa3_host: str = "192.168.2.104"
+    moxa3_port: int = 502
+    moxa3_simulation: bool = True
     moxa_poll_interval_s: float = 1.0
     moxa_timeout_s: float = 1.5
     moxa_error_cooldown_s: float = 5.0

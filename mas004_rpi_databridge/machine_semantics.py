@@ -43,6 +43,8 @@ TRANSITION_FINALS: dict[int, int] = {
 
 FINAL_TO_TRANSITION: dict[int, int] = {final_state: transition for transition, final_state in TRANSITION_FINALS.items()}
 
+LIGHT_CURTAIN_PAUSE_STATES = {5, 10, 11}
+
 BUTTON_ORDER = [
     "start",
     "pause",
@@ -84,9 +86,9 @@ BUTTON_LED_OUTPUTS = {
 }
 
 STATUS_LAMP_OUTPUTS = {
-    "red": ("moxa_e1211_2", "DO4"),
-    "green": ("moxa_e1211_2", "DO5"),
-    "blue": ("moxa_e1211_2", "DO6"),
+    "red": ("moxa_e1213_3", "DIO0"),
+    "green": ("moxa_e1213_3", "DIO1"),
+    "blue": ("moxa_e1213_3", "DIO2"),
 }
 
 PHASE_STEADY = "steady"
@@ -147,10 +149,8 @@ def state_actions(state: int | str | None) -> dict[str, bool]:
     actions = {name: False for name in BUTTON_ORDER}
     if code == 7:
         actions["start"] = True
-        actions["sync"] = True
-        actions["empty"] = True
-        actions["rewind"] = True
-    if code == 3:
+        actions["stop"] = True
+    if code in (2, 3):
         actions["stop"] = True
     if code == 5:
         actions["pause"] = True
@@ -158,9 +158,9 @@ def state_actions(state: int | str | None) -> dict[str, bool]:
         actions["empty"] = True
     if code == 6:
         actions["pause"] = True
-    if code in (1, 3, 5, 7, 9, 11, 13, 15, 17, 19):
+    if code == 9:
         actions["setup"] = True
-    if code in (9, 11, 13, 19):
+    if code in (11, 19):
         actions["rewind"] = True
     if code in (20, 21):
         return {name: False for name in BUTTON_ORDER}
@@ -182,13 +182,37 @@ def target_state_for_button(button: str, current_state: int | str | None) -> int
     if btn == "stop":
         return 9 if code not in (20, 21) else None
     if btn == "setup":
-        return 3
+        return 3 if code == 9 else None
     if btn == "sync":
         return 17
     if btn == "empty":
         return 13
     if btn == "rewind":
         return 11
+    return None
+
+
+def action_for_button(
+    button: str,
+    current_state: int | str | None,
+    *,
+    reset_context: bool = False,
+) -> str | None:
+    try:
+        code = int(current_state or 0)
+    except Exception:
+        code = 0
+    btn = str(button or "").strip().lower()
+    if btn == "start":
+        btn = "start_pause"
+    if btn == "pause":
+        btn = "start_pause"
+    if btn == "start_pause":
+        if reset_context:
+            return "start"
+        return "pause" if code == 5 else "start"
+    if btn in {"stop", "setup", "sync", "empty", "rewind"}:
+        return btn
     return None
 
 
@@ -249,7 +273,9 @@ def settle_machine_state(
         return 20, "ups_shutdown"
     if not estop_ok or purge_active:
         return 21, "safety_or_purge"
-    if not light_curtain_ok and current in (4, 5, 6):
+    # Lichtgitter ist kein Purge-/Stoergrund. In laufender Produktion oder
+    # Rueckspulung muss der Prozess aber kontrolliert nach Pause gehen.
+    if not light_curtain_ok and current in LIGHT_CURTAIN_PAUSE_STATES:
         return 7, "light_curtain_pause"
     if requested in FINAL_TO_TRANSITION and current not in (requested, FINAL_TO_TRANSITION[requested]):
         return FINAL_TO_TRANSITION[requested], "transition_enter"
@@ -301,35 +327,19 @@ def button_led_plan(
     ts: float,
     blink_period_s: float = 1.0,
 ) -> dict[str, bool]:
-    actions = state_actions(current_state)
     try:
         code = int(current_state or 0)
     except Exception:
         code = 0
-    current_action = None
-    if code == 5:
-        current_action = "start"
-    elif code == 7:
-        current_action = "pause"
-    elif code == 9:
-        current_action = "stop"
-    elif code == 3:
-        current_action = "setup"
-    elif code == 17:
-        current_action = "sync"
-    elif code == 13:
-        current_action = "empty"
-    elif code == 11:
-        current_action = "rewind"
-
+    actions = state_actions(current_state)
     plan = {pin: False for pins in BUTTON_LED_OUTPUTS.values() for _device, pin in pins}
+    if code in (2, 3):
+        setup_on = int(math.floor(ts)) % 2 == 0 and bool(button_mask.get("setup", False))
+        for _device, pin in BUTTON_LED_OUTPUTS["setup"]:
+            plan[pin] = setup_on
+        return plan
     for action, pins in BUTTON_LED_OUTPUTS.items():
-        allowed = bool(actions.get(action)) and bool(button_mask.get(action, False))
-        enabled_now = False
-        if current_action == action:
-            enabled_now = True
-        elif allowed and blink_on(ts, blink_period_s):
-            enabled_now = True
+        enabled_now = bool(actions.get(action)) and bool(button_mask.get(action, False))
         for _device, pin in pins:
             plan[pin] = enabled_now
     return plan

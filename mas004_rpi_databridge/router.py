@@ -7,10 +7,17 @@ from mas004_rpi_databridge.inbox import Inbox
 from mas004_rpi_databridge.machine_runtime import (
     BAND_BREAK_ERROR_KEYS,
     PROCESS_SENSOR_FAULT_STATES,
+    PRODUCTION_START_BLOCK_CODE,
+    PRODUCTION_START_BLOCK_REASON,
+    WICKLER_DANCER_ERROR_KEYS,
     band_break_monitoring_active,
+    mark_external_purge_start,
     mark_external_purge_clear,
+    microtom_state_queue_options,
+    production_start_motion_enabled,
     recent_external_purge_clear,
 )
+from mas004_rpi_databridge.motor_setup_lock import clear_motor_setup_manual_lock
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
@@ -41,6 +48,8 @@ def _channel_for_operation(params: ParamStore, ptype: str, pid: str, op: str = "
     if ptype.startswith("MA"):  # MAP/MAS/MAE/MAW
         pkey = f"{ptype}{pid}"
         if pkey in RPI_AUTHORITATIVE_MA_KEYS:
+            return "raspi"
+        if op == "read" and ptype in {"MAE", "MAW"}:
             return "raspi"
         meta = params.get_meta(pkey)
         esp_access = params.actor_access(pkey, actor="esp32") if meta else "N"
@@ -104,11 +113,35 @@ def _truthy_value(value: object) -> bool:
     return text not in ("", "0", "false", "off", "no", "none", "null")
 
 
+def _duplicate_inactive_fault_clear(params: ParamStore, pkey: str, value: object) -> bool:
+    if _truthy_value(value):
+        return False
+    if not (pkey.startswith("MAE") or pkey.startswith("MAW")):
+        return False
+    try:
+        return not _truthy_value(params.get_effective_value(pkey))
+    except Exception:
+        return False
+
+
+def _latched_wickler_dancer_fault_clear(params: ParamStore, pkey: str, value: object) -> bool:
+    if _truthy_value(value) or pkey not in WICKLER_DANCER_ERROR_KEYS:
+        return False
+    try:
+        return _truthy_value(params.get_effective_value(pkey))
+    except Exception:
+        return False
+
+
 def _current_machine_state(params: ParamStore) -> int:
     try:
         return int(float(str(params.get_effective_value("MAS0001") or "1").strip()))
     except Exception:
         return 1
+
+
+def _ack_authoritative_current(params: ParamStore, pkey: str) -> str:
+    return f"ACK_{pkey}={params.get_effective_value(pkey)}"
 
 
 class Router:
@@ -168,6 +201,13 @@ class Router:
         self.logs.log(dev, "in", f"raspi-> {dev}: {line}")
 
         if pkey == "MAS0002" and op == "write" and str(value).strip() == "1":
+            if not production_start_motion_enabled():
+                resp = f"{pkey}={PRODUCTION_START_BLOCK_CODE}"
+                self.logs.log("machine", "warning", f"Start blockiert: {PRODUCTION_START_BLOCK_REASON}")
+                self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
+                self.logs.log("raspi", "out", f"to microtom: {resp}")
+                self._enqueue_to_microtom(resp, correlation=correlation)
+                return resp
             allowed, reason = self.production_logs.can_start_new_production()
             if not allowed:
                 resp = f"{pkey}={reason}"
@@ -180,13 +220,32 @@ class Router:
         if pkey == "MAS0030" and op == "read":
             self.production_logs.ready_manifest()
 
+        purge_start_prehandled = pkey == "MAS0028" and op == "write" and str(value).strip() == "1"
+        if purge_start_prehandled:
+            # Scenario B: DIClient owns the purge lifecycle. Mark the external
+            # purge before the value is persisted so the machine-runtime refresh
+            # cannot race in between and treat MAS0028=1 as a stale local latch.
+            mark_external_purge_start(self.params.db, source="microtom")
+            deleted = self.outbox.delete_status_updates("MAS0028")
+            if deleted:
+                self.logs.log("raspi", "info", f"cleared {deleted} pending stale MAS0028 status callback(s)")
+
         resp = self.device_bridge.execute(device=dev, pkey=pkey, ptype=ptype, op=op, value=value, actor="microtom")
         self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
         self.logs.log("raspi", "out", f"to microtom: {resp}")
         if op == "write" and "NAK" not in resp.upper():
-            if pkey == "MAS0028" and str(value).strip() == "0":
-                mark_external_purge_clear(self.params.db, source="microtom")
-                deleted = self.outbox.delete_status_updates("MAS0028")
+            if pkey == "MAS0002" and str(value).strip() not in ("", "0"):
+                clear_motor_setup_manual_lock(self.params.db, reason=f"microtom_mas0002:{value}")
+            if pkey == "MAS0028":
+                if _truthy_value(value):
+                    if not purge_start_prehandled:
+                        mark_external_purge_start(self.params.db, source="microtom")
+                        deleted = self.outbox.delete_status_updates("MAS0028")
+                    else:
+                        deleted = 0
+                else:
+                    mark_external_purge_clear(self.params.db, source="microtom")
+                    deleted = self.outbox.delete_status_updates("MAS0028")
                 if deleted:
                     self.logs.log("raspi", "info", f"cleared {deleted} pending stale MAS0028 status callback(s)")
             event = self.production_logs.handle_param_change(pkey, value)
@@ -213,13 +272,19 @@ class Router:
             self.logs.log("raspi", "info", f"device message ignored (read op): {line}")
             return None
 
-        if pkey == "MAS0028" and _truthy_value(value) and recent_external_purge_clear(self.params.db):
+        if pkey in RPI_AUTHORITATIVE_MA_KEYS:
+            # These values are Raspi-runtime owned. ESP/Wickler may receive
+            # mirrored copies, but a stale device echo must never pull the
+            # machine back into Not-Stop/Purge or overwrite the current command.
+            # For Purge scenario B the terminating MAS0028=0 may only come
+            # from Microtom/DIClient. Device-origin 0/1 values are echoes.
+            current = self.params.get_effective_value(pkey)
             self.logs.log(
                 "raspi",
                 "info",
-                f"ignored stale device-origin MAS0028=1 from {device_source} immediately after external clear",
+                f"ignored device-origin {pkey}={value} from {device_source}; Raspi authoritative value is {current}",
             )
-            return f"ACK_{pkey}=1"
+            return _ack_authoritative_current(self.params, pkey)
 
         if pkey == "MAE0027" and _truthy_value(value) and _current_machine_state(self.params) not in PROCESS_SENSOR_FAULT_STATES:
             self.params.apply_device_value("MAE0027", "0", promote_default=False)
@@ -243,6 +308,18 @@ class Router:
             )
             return f"ACK_{pkey}=0"
 
+        if _latched_wickler_dancer_fault_clear(self.params, pkey, value):
+            self.logs.log(
+                "raspi",
+                "info",
+                f"ignored device-origin clear {pkey}=0 from {device_source}; Wicklerzustand bleibt bis Reset gelatcht",
+            )
+            return _ack_authoritative_current(self.params, pkey)
+
+        if _duplicate_inactive_fault_clear(self.params, pkey, value):
+            self.logs.log("raspi", "info", f"ignored duplicate device-origin clear {pkey}=0 from {device_source}")
+            return f"ACK_{pkey}=0"
+
         ok, detail = self.params.apply_device_value(pkey, str(value), promote_default=False)
         if not ok:
             self.logs.log("raspi", "error", f"device value rejected for {pkey} from {device_source}: {detail}")
@@ -255,13 +332,15 @@ class Router:
             response_line = f"{pkey}={value}"
             self.logs.log("raspi", "out", f"to microtom: {response_line}")
             state_signal = ptype in {"MAS", "MAE", "MAW"}
-            dedupe = f"state:{pkey}" if state_signal else None
+            dedupe, replace_existing = (
+                microtom_state_queue_options(pkey, value) if state_signal else (None, False)
+            )
             self._enqueue_to_microtom(
                 response_line,
                 correlation=correlation,
                 origin=device_source,
                 dedupe_key=dedupe,
-                replace_existing=state_signal,
+                replace_existing=replace_existing,
             )
         else:
             self.logs.log("raspi", "info", f"skip microtom forward for {pkey}: microtom access=N")

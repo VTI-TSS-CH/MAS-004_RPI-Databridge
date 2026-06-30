@@ -4,6 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -64,6 +65,27 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(303, production_page.status_code)
         self.assertEqual("/ui/machine-setup/login?next=/ui/machine-setup/production", production_page.headers.get("location"))
 
+        visualization_page = client.get("/ui/machine-setup/visualization", follow_redirects=False)
+        self.assertEqual(303, visualization_page.status_code)
+        self.assertEqual(
+            "/ui/machine-setup/login?next=/ui/machine-setup/visualization",
+            visualization_page.headers.get("location"),
+        )
+
+        mae0048_page = client.get("/ui/machine-setup/mae0048", follow_redirects=False)
+        self.assertEqual(303, mae0048_page.status_code)
+        self.assertEqual(
+            "/ui/machine-setup/login?next=/ui/machine-setup/mae0048",
+            mae0048_page.headers.get("location"),
+        )
+
+        calibration_page = client.get("/ui/machine-setup/calibration", follow_redirects=False)
+        self.assertEqual(303, calibration_page.status_code)
+        self.assertEqual(
+            "/ui/machine-setup/login?next=/ui/machine-setup/calibration",
+            calibration_page.headers.get("location"),
+        )
+
         api = client.get("/api/motors/overview")
         self.assertEqual(401, api.status_code)
         self.assertEqual("Machine-Setup login required", api.json()["detail"])
@@ -87,6 +109,22 @@ class MachineSetupAuthTests(unittest.TestCase):
         audit_api = client.get("/api/machine/audit")
         self.assertEqual(401, audit_api.status_code)
         self.assertEqual("Machine-Setup login required", audit_api.json()["detail"])
+
+        visualization_api = client.get("/api/machine/production-visualization")
+        self.assertEqual(401, visualization_api.status_code)
+        self.assertEqual("Machine-Setup login required", visualization_api.json()["detail"])
+
+        mae0048_api = client.get("/api/machine/mae0048-diagnostics")
+        self.assertEqual(401, mae0048_api.status_code)
+        self.assertEqual("Machine-Setup login required", mae0048_api.json()["detail"])
+
+        calibration_api = client.get("/api/machine/motor3-calibration/status")
+        self.assertEqual(401, calibration_api.status_code)
+        self.assertEqual("Machine-Setup login required", calibration_api.json()["detail"])
+
+        led_test_api = client.post("/api/machine/led-test", json={"action": "start", "duration_ms": 1000})
+        self.assertEqual(401, led_test_api.status_code)
+        self.assertEqual("Machine-Setup login required", led_test_api.json()["detail"])
 
     def test_machine_setup_login_unlocks_ui_and_api(self):
         client = self.build_client()
@@ -136,6 +174,29 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertIn("Formatprofile", production_page.text)
         self.assertIn(">Produktion<", production_page.text)
 
+        visualization_page = client.get("/ui/machine-setup/visualization")
+        self.assertEqual(200, visualization_page.status_code)
+        self.assertIn("Produktionsvisualisierung", visualization_page.text)
+        self.assertIn("Controller Rot", visualization_page.text)
+        self.assertIn(">Visualisierung<", visualization_page.text)
+
+        mae0048_page = client.get("/ui/machine-setup/mae0048")
+        self.assertEqual(200, mae0048_page.status_code)
+        self.assertIn("MAE0048 Diagnose", mae0048_page.text)
+        self.assertIn("Stopptoleranz", mae0048_page.text)
+        self.assertIn(">MAE0048<", mae0048_page.text)
+
+        calibration_page = client.get("/ui/machine-setup/calibration")
+        self.assertEqual(200, calibration_page.status_code)
+        self.assertIn("Motor 3 / Encoder Kalibrierung", calibration_page.text)
+        self.assertIn("2000-mm-Fahrt starten", calibration_page.text)
+        self.assertIn(">Kalibrierung<", calibration_page.text)
+
+        for nav_page in (process_page, visualization_page, mae0048_page, calibration_page):
+            self.assertIn(".topnav{", nav_page.text)
+            self.assertIn(".navbtn{", nav_page.text)
+            self.assertIn('class="navbtn', nav_page.text)
+
         api = client.get("/api/motors/overview")
         self.assertEqual(200, api.status_code)
         payload = api.json()
@@ -150,9 +211,41 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(200, process_api.status_code)
         self.assertIn("current_state", process_api.json())
 
+        visualization_api = client.get("/api/machine/production-visualization")
+        self.assertEqual(200, visualization_api.status_code)
+        self.assertIn("track", visualization_api.json())
+        self.assertIn("active_labels", visualization_api.json())
+        self.assertIn("completed_labels", visualization_api.json())
+
+        mae0048_api = client.get("/api/machine/mae0048-diagnostics")
+        self.assertEqual(200, mae0048_api.status_code)
+        self.assertIn("params", mae0048_api.json())
+        self.assertIn("registration", mae0048_api.json())
+        self.assertIn("motor3", mae0048_api.json())
+        self.assertIn("findings", mae0048_api.json())
+
+        calibration_api = client.get("/api/machine/motor3-calibration/status")
+        self.assertEqual(200, calibration_api.status_code)
+        self.assertIn("params", calibration_api.json())
+        self.assertIn("MAP0077", calibration_api.json()["params"])
+
+        led_test_api = client.post("/api/machine/led-test", json={"action": "start", "duration_ms": 1000})
+        self.assertEqual(200, led_test_api.status_code)
+        self.assertTrue(led_test_api.json()["ok"])
+        self.assertTrue(led_test_api.json()["simulation"])
+
+        led_stop_api = client.post("/api/machine/led-test", json={"action": "stop"})
+        self.assertEqual(200, led_stop_api.status_code)
+        self.assertTrue(led_stop_api.json()["ok"])
+
         audit_api = client.get("/api/machine/audit?hours=1&limit=50")
         self.assertEqual(200, audit_api.status_code)
         self.assertIn("entries", audit_api.json())
+
+        bypass_api = client.get("/api/machine/bypass")
+        self.assertEqual(200, bypass_api.status_code)
+        self.assertIn("parameters", bypass_api.json())
+        self.assertTrue(any(item["pkey"] == "MAP0067" for item in bypass_api.json()["parameters"]))
 
         audit_retention = client.post("/api/machine/audit/retention", json={"keep_hours": 24})
         self.assertEqual(200, audit_retention.status_code)
@@ -213,6 +306,22 @@ class MachineSetupAuthTests(unittest.TestCase):
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)
         self.assertEqual("/ui/machine-setup/motors", legacy.headers.get("location"))
+
+    def test_settings_ui_and_config_api_expose_light_curtain_auto_reset(self):
+        client = self.build_client(config_overrides={"light_curtain_auto_reset_enabled": False})
+
+        page = client.get("/ui/settings")
+        self.assertEqual(200, page.status_code)
+        self.assertIn('id="light_curtain_auto_reset_enabled"', page.text)
+
+        with patch("mas004_rpi_databridge.webui.subprocess.call") as restart:
+            response = client.post("/api/config", json={"light_curtain_auto_reset_enabled": True})
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["ok"])
+        restart.assert_called_once()
+        config = client.get("/api/config").json()["config"]
+        self.assertTrue(config["light_curtain_auto_reset_enabled"])
 
     def test_motor_refresh_esp_connection_failure_is_bad_gateway_not_500(self):
         client = self.build_client(

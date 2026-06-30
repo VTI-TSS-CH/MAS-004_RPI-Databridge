@@ -66,6 +66,7 @@
     - ESP realtime IO/process image
     - Moxa 1 endpoint
     - Moxa 2 endpoint
+    - Moxa 3 endpoint
     - Moxa field IO verification
   - printers:
     - VJ6530 endpoint

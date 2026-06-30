@@ -139,6 +139,52 @@ class Outbox:
             row = c.execute(sql, params).fetchone()
         return OutboxJob(*row) if row else None
 
+    def claim_next_due(
+        self,
+        url_prefixes: Optional[Iterable[str]] = None,
+        exclude_url_prefixes: Optional[Iterable[str]] = None,
+        lease_s: float = 60.0,
+    ) -> Optional[OutboxJob]:
+        where = ["next_attempt_ts <= ?"]
+        params: list[object] = [now_ts()]
+
+        include_prefixes = self._normalize_prefixes(url_prefixes)
+        if include_prefixes:
+            parts = []
+            for prefix in include_prefixes:
+                parts.append("(url = ? OR url LIKE ?)")
+                params.extend([prefix, prefix + "/%"])
+            where.append("(" + " OR ".join(parts) + ")")
+
+        excluded_prefixes = self._normalize_prefixes(exclude_url_prefixes)
+        if excluded_prefixes:
+            parts = []
+            for prefix in excluded_prefixes:
+                parts.append("(url = ? OR url LIKE ?)")
+                params.extend([prefix, prefix + "/%"])
+            where.append("NOT (" + " OR ".join(parts) + ")")
+
+        sql = f"""
+            SELECT id,created_ts,method,url,headers_json,body_json,idempotency_key,priority,dedupe_key,retry_count,next_attempt_ts
+            FROM outbox
+            WHERE {" AND ".join(where)}
+            ORDER BY next_attempt_ts ASC, priority ASC, retry_count ASC, created_ts ASC
+            LIMIT 1
+        """
+        with self.db._conn() as c:
+            c.execute("BEGIN IMMEDIATE;")
+            row = c.execute(sql, params).fetchone()
+            if not row:
+                c.execute("COMMIT;")
+                return None
+            claimed_until = now_ts() + max(1.0, float(lease_s or 60.0))
+            c.execute(
+                "UPDATE outbox SET next_attempt_ts=? WHERE id=? AND next_attempt_ts<=?",
+                (claimed_until, int(row[0]), float(row[10] or 0.0) + 0.000001),
+            )
+            c.execute("COMMIT;")
+        return OutboxJob(*row)
+
     def delete(self, job_id: int):
         with self.db._conn() as c:
             c.execute("DELETE FROM outbox WHERE id=?", (job_id,))

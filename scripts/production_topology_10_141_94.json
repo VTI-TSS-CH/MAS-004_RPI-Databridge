@@ -36,7 +36,7 @@
     }
   },
   "eth1": {
-    "role": "Realtime/field IO network, unchanged from the merged MAS-004 basis",
+    "role": "Realtime/field IO network for ESP32-PLC58 and three Moxa E1213 source-output modules",
     "raspi_ip": "192.168.2.100",
     "subnet_mask": "255.255.255.0",
     "prefix": 24,
@@ -47,12 +47,16 @@
         "host": "192.168.2.101",
         "port": 3010
       },
-      "moxa1_e1211": {
+      "moxa1_e1213": {
         "host": "192.168.2.102",
         "port": 502
       },
-      "moxa2_e1211": {
+      "moxa2_e1213": {
         "host": "192.168.2.103",
+        "port": 502
+      },
+      "moxa3_e1213": {
+        "host": "192.168.2.104",
         "port": 502
       }
     }

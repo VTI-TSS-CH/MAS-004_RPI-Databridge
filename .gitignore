@@ -9,6 +9,7 @@ build/
 
 # venv
 .venv/
+.venv*/
 venv/
 
 # OS / IDE
@@ -29,6 +30,7 @@ config.json
 
 # Temp uploads
 /tmp/
+tmp_*.json
 
 # Uvicorn / FastAPI runtime
 *.pid

@@ -47,10 +47,10 @@ SPECIAL_AI: dict[str, str] = {
     "MAP0023": "KI: Ich verstehe diesen Parameter als Vorwarnschwelle fuer den Abwickler in Prozent Restfuellstand. Wenn MAS0008 kleiner/gleich diesem Wert ist, ist die Abwickelrolle bald leer und die passende Wickler-/Materialwarnung muss aktiv werden. Der ESP liest diesen Wert fuer die Wickler-/Prozesslogik, Microtom liest ihn als eingestellte Schwelle.",
     "MAP0024": "KI: Ich verstehe diesen Parameter als Vorwarnschwelle fuer den Aufwickler in Prozent Rollenfuellstand. Wenn MAS0009 groesser/gleich diesem Wert ist, ist die Aufwickelrolle bald voll und die passende Wickler-/Materialwarnung muss aktiv werden. Default ist 95 %, also Warnung im Bereich 95-100 %. Alte/gespiegelte Werte kleiner/gleich 50 werden in der Wickler-Firmware uebergangsweise als Restreserve bis voll interpretiert, z.B. 5 bedeutet Warnung ab 95 %. Der ESP liest diesen Wert fuer die Wickler-/Prozesslogik, Microtom liest ihn als eingestellte Schwelle.",
     "MAP0025": "KI: Ich verstehe diesen Parameter als harte Produktions-Pausenschwelle fuer den Abwickler. Wird der verbleibende Fuellstand unterschritten, muss die Anlage in den Pausenzustand wechseln, damit kein unkontrollierter Produktionsabbruch entsteht.",
-    "MAP0035": "KI: Ich verstehe diesen Parameter als Bypass fuer das aktive Drucksystem. Wenn er gesetzt ist, darf das jeweilige Drucksystem den Prozess nicht blockieren; die Druckbewertung im Labelregister muss dann fachlich als gebypasst behandelt werden.",
-    "MAP0036": "KI: Ich verstehe diesen Parameter als Bypass der Material-Kontrollkamera. Wenn der Bypass aktiv ist, darf fehlendes Kamerafeedback nicht zu einem schlechten Material-OK-Bit fuehren.",
-    "MAP0037": "KI: Ich verstehe diesen Parameter als Bypass der Verifizierungs-/OCR-Kamera. Wenn der Bypass aktiv ist, darf fehlendes OCR-Feedback das Label nicht als schlecht markieren.",
-    "MAP0038": "KI: Ich verstehe diesen Parameter als Bypass fuer den Etiketten-Kontrollsensor am Auslauf. Wenn der Bypass aktiv ist, darf die Anlage fehlende Entnahmekontrolle nicht als Produktionsfehler werten.",
+    "MAP0035": "KI: Ich verstehe diesen Parameter als Bypass fuer das aktive Drucksystem (TTO oder Laser). Wenn er gesetzt ist, wird der echte Drucker nicht getriggert und dessen Status-/Druckfertig-Signale werden ignoriert. Stattdessen wartet die ESP-Prozesslogik die passende Simulationsdauer MAP0069 (Laser) oder MAP0070 (TTO) ab und setzt das Druckergebnis intern als erledigt.",
+    "MAP0036": "KI: Ich verstehe diesen Parameter als Bypass der Material-Kontrollkamera. Bei aktivem Bypass wird der Kameratrigger weiterhin wie im Produktionsbetrieb ausgegeben, aber Bereit-/Gut-Schlecht-Rueckmelde-IOs werden ignoriert. Das simulierte Gut/Schlecht-Ergebnis wird ueber MAP0067 gebildet.",
+    "MAP0037": "KI: Ich verstehe diesen Parameter als Bypass der Druck-Verifikations-/OCR-Kamera. Bei aktivem Bypass wird der Kameratrigger weiterhin wie im Produktionsbetrieb ausgegeben, aber Bereit-/Gut-Schlecht-Rueckmelde-IOs werden ignoriert. Das simulierte Gut/Schlecht-Ergebnis wird ueber MAP0068 gebildet.",
+    "MAP0038": "KI: Ich verstehe diesen Parameter als Bypass fuer den Etiketten-Kontrollsensor am Auslauf. Bei aktivem Bypass wird keine Entnahme-/Rueckspulpflicht fuer schlechte Labels erzwungen; die Statuswerte der Labels bleiben aber im Schieberegister erhalten.",
     "MAP0027": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Portalachse X. Die programmierte Motor-Nullposition bleibt die Grundstellung; dieser Wert verschiebt den fachlichen Nullpunkt fuer alle X-bezogenen Berechnungen.",
     "MAP0028": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Portalachse Z. Die programmierte Motor-Nullposition bleibt die Grundstellung; dieser Wert verschiebt den fachlichen Nullpunkt fuer alle Z-bezogenen Berechnungen.",
     "MAP0029": "KI: Ich verstehe diesen Parameter als Nullpunktkorrektur der Querachse fuer den Etikettenerfassungs-Sensor. Alle Sensorpositionen fuer diese Achse werden relativ zu diesem korrigierten Nullpunkt betrachtet.",
@@ -71,7 +71,19 @@ SPECIAL_AI: dict[str, str] = {
     "MAP0063": "KI: Ich verstehe diesen Parameter als Sollposition des linken bzw. Auslauf-Etikettenanschlags ueber Motor-ID 8. Dieser Wert folgt normalerweise der eingestellten Materialbreite.",
     "MAP0064": "KI: Ich verstehe diesen Parameter als Sollposition des rechten bzw. Einlauf-Etikettenanschlags ueber Motor-ID 9. Dieser Wert folgt normalerweise der eingestellten Materialbreite und sollte konsistent zu MAP0063 sein.",
     "MAP0065": "KI: Ich verstehe diesen Parameter als Bitmaske fuer die Freigabe der Maschinen-Tasten je nach Microtom-Benutzerlevel. Der Raspi nutzt diese Bitmaske, um Tastereingaben zu erlauben oder zu sperren und um die zugehoerigen Taster-LEDs nur dann zu signalisieren, wenn die Bedienhandlung fachlich und rechtebezogen erlaubt ist.",
-    "MAP0066": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zur ersten LED des 1-m-LED-Streifens. Der aktuelle Default 8000 entspricht 800.0 mm. Der ESP braucht diesen Wegbezug, um den Labelstatus entlang des Streifens korrekt anzuzeigen; der exakte Wert muss bei der realen Inbetriebnahme mechanisch verifiziert werden.",
+    "MAP0066": "KI: Ich verstehe diesen Parameter als Distanz vom Einlese-Sensor bis zur ersten LED des externen LED-Streifens. Der ESP braucht diesen Wegbezug, um den Labelstatus entlang des Streifens korrekt anzuzeigen; der exakte Wert muss bei der realen Inbetriebnahme mechanisch verifiziert werden.",
+    "MAP0067": "KI: Ich verstehe diesen Parameter als Simulationsmuster fuer die Material-Kontrollkamera bei aktivem MAP0036. 0=alle gut, 1=alle schlecht, n=jede n-te Etikette schlecht.",
+    "MAP0068": "KI: Ich verstehe diesen Parameter als Simulationsmuster fuer die Druck-Verifikations-/OCR-Kamera bei aktivem MAP0037. 0=alle gut, 1=alle schlecht, n=jede n-te Etikette schlecht.",
+    "MAP0069": "KI: Ich verstehe diesen Parameter als simulierte Laser-Druckdauer in ms bei aktivem Drucksystem-Bypass MAP0035.",
+    "MAP0070": "KI: Ich verstehe diesen Parameter als simulierte TTO-Druckdauer in ms bei aktivem Drucksystem-Bypass MAP0035.",
+    "MAP0071": "KI: Ich verstehe diesen Parameter als aktive Laenge des externen LED-Streifens in 1/10 mm. Aktuell ist der Streifen auf 520.0 mm gekuerzt; der ESP rendert dafuer 75 Pixel und sendet sie an den externen LED-Controller.",
+    "MAP0072": "KI: Ich verstehe diesen Parameter als Freigabe des externen LED-Controller-Datenstroms. Bei 1 sendet der ESP32-PLC Prozess fertige RGB-Frames per UDP an den Olimex ESP32-POE-ISO-IND Controller, bei 0 bleibt der LED-Datenstrom aus.",
+    "MAP0073": "KI: Ich verstehe diesen Parameter als letztes Oktett der Ziel-IP fuer den externen LED-Controller im ESP-Netz 192.168.2.x. 110 ist fuer den vorbereiteten Olimex ESP32-POE-ISO-IND Controller vorgesehen; der Default 255 nutzt Broadcast.",
+    "MAP0074": "KI: Ich verstehe diesen Parameter als UDP-Zielport fuer das MAS004-LED-UDP/v1 Protokoll zum externen LED-Controller.",
+    "MAP0075": "KI: Ich verstehe diesen Parameter als minimales Sendeintervall fuer LED-Frames in ms. Der Default 33 ms entspricht etwa 30 Hz und ist fuer die Positionsanzeige ausreichend schnell.",
+    "MAP0076": "KI: Ich verstehe diesen Parameter als konstante Laengenkorrektur fuer den Etikettenerfassungssensor in 1/10 mm. Der ESP addiert diesen Wert auf die vom Sensorfenster gemessene HIGH-Laenge fuer Setup-/Anzeige-Diagnose; die Produktion entscheidet Laengenfehler auf roher Einlaufencoder-Laenge, damit die fixe Sensorfenster-Kompensation keine falschen Produktionsalarme erzeugt. Encoder-Rohwerte bleiben fuer Diagnose und Schlupfvergleich sichtbar.",
+    "MAP0077": "KI: Ich verstehe diesen Parameter als festen Maschinen-Abgleichwert fuer den Wirkdurchmesser des Einlaufencoders in 1/1000 mm. Er ist nicht formatrelevant und wird nach der 2000-mm-Kalibrierfahrt vom Raspi an die ESP32-PLC synchronisiert.",
+    "MAP0078": "KI: Ich verstehe diesen Parameter als festen Maschinen-Abgleichwert fuer den Wirkdurchmesser des Auslauf-/ID3-Encoders in 1/1000 mm. Er ist nicht formatrelevant und wird nach der 2000-mm-Kalibrierfahrt vom Raspi an die ESP32-PLC synchronisiert.",
     "MAS0001": "KI: Ich verstehe diesen Parameter als fuehrenden Anlagenstatus, den der Raspi gegenueber Microtom meldet. Die eigentliche Statuslogik entsteht aus Bedienbefehlen, Sicherheitsbedingungen und Maschinenfortschritt; der ESP liefert dafuer harte Prozessereignisse zu.",
     "MAS0002": "KI: Ich verstehe diesen Parameter nicht als Status, sondern als Befehlsbyte von Microtom an die Anlage. Der Raspi muss diesen Befehlswert in den passenden internen Zielzustand uebersetzen, zum Beispiel Start, Stop, Einrichten, Synchronisieren, Leerfahren, Rueckspulen oder Pause.",
     "MAS0003": "KI: Ich verstehe diesen Parameter als verdichtete Produktionsrueckmeldung pro fertig behandeltem Label. Der ESP baut die Einzelinformationen im Schieberegister auf; der Raspi packt sie in das definierte Bitfeld und meldet den Wert an Microtom sowie in das Label-Produktionslog.",
@@ -84,6 +96,129 @@ SPECIAL_AI: dict[str, str] = {
     "MAS0030": "KI: Ich verstehe diesen Parameter als Status, ob Produktionslogfiles der letzten Produktion noch abholbereit sind. Auch dieser Wert ist gemaess Masterliste Raspi-/Microtom-seitig und soll nicht in den ESP gespiegelt werden.",
     "TTS0001": "KI: Ich verstehe diesen Parameter als numerischen Gesamtstatus des TTO-Druckers gemaess ZBC-Statusabbild. Der Wert muss sowohl aktiv aus Druckerstatuswechseln zurueckgemeldet als auch - soweit vom Drucker unterstuetzt - vom ESP gesetzt werden koennen, zum Beispiel fuer Offline, Online oder Shutdown.",
 }
+
+LED_CONTROLLER_PARAM_SPECS = [
+    {
+        "key": "MAP0071",
+        "ptype": "MAP",
+        "pid": "0071",
+        "min": "10",
+        "max": "5200",
+        "default": "5200",
+        "unit": "1/10mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "MAP0071 LED-Streifen aktive Laenge",
+        "format": "YES",
+        "message": "Aktive Laenge des externen LED-Streifens in 1/10 mm",
+    },
+    {
+        "key": "MAP0072",
+        "ptype": "MAP",
+        "pid": "0072",
+        "min": "0",
+        "max": "1",
+        "default": "1",
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "name": "MAP0072 LED-Controller UDP aktiv",
+        "format": "YES",
+        "message": "Freigabe des ESP32-PLC UDP-Datenstroms zum externen LED-Controller",
+    },
+    {
+        "key": "MAP0073",
+        "ptype": "MAP",
+        "pid": "0073",
+        "min": "1",
+        "max": "255",
+        "default": "255",
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint8",
+        "name": "MAP0073 LED-Controller Ziel-IP letztes Oktett",
+        "format": "NO",
+        "message": "Letztes Oktett der LED-Controller-Ziel-IP im ESP-Netz 192.168.2.x",
+    },
+    {
+        "key": "MAP0074",
+        "ptype": "MAP",
+        "pid": "0074",
+        "min": "1",
+        "max": "65535",
+        "default": "3050",
+        "unit": "port",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "MAP0074 LED-Controller UDP-Port",
+        "format": "NO",
+        "message": "UDP-Zielport fuer MAS004-LED-UDP/v1 Frames",
+    },
+    {
+        "key": "MAP0075",
+        "ptype": "MAP",
+        "pid": "0075",
+        "min": "20",
+        "max": "1000",
+        "default": "33",
+        "unit": "ms",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint16",
+        "name": "MAP0075 LED-Controller Frame-Intervall",
+        "format": "NO",
+        "message": "Minimales Sendeintervall fuer LED-Frames an den externen Controller",
+    },
+    {
+        "key": "MAP0076",
+        "ptype": "MAP",
+        "pid": "0076",
+        "min": "-50",
+        "max": "50",
+        "default": "8",
+        "unit": "1/10mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "int16",
+        "name": "MAP0076 Label-Laengenkompensation",
+        "format": "NO",
+        "message": "Konstante Kompensation der vom Etikettenerfassungssensor gemessenen HIGH-Laenge in 1/10 mm",
+    },
+    {
+        "key": "MAP0077",
+        "ptype": "MAP",
+        "pid": "0077",
+        "min": "1000",
+        "max": "1000000",
+        "default": "100765",
+        "unit": "1/1000mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint32",
+        "name": "MAP0077 Einlaufencoder Wirkdurchmesser",
+        "format": "NO",
+        "message": "Fester Maschinen-Abgleichwert fuer die Einlaufencoder-Skalierung in 1/1000 mm",
+    },
+    {
+        "key": "MAP0078",
+        "ptype": "MAP",
+        "pid": "0078",
+        "min": "1000",
+        "max": "1000000",
+        "default": "100649",
+        "unit": "1/1000mm",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "uint32",
+        "name": "MAP0078 Auslaufencoder Wirkdurchmesser",
+        "format": "NO",
+        "message": "Fester Maschinen-Abgleichwert fuer die Auslauf-/ID3-Encoder-Skalierung in 1/1000 mm",
+    },
+]
 
 
 def row_key(ws, row_idx: int) -> str:
@@ -307,10 +442,79 @@ def ensure_map0066(ws):
         ws.cell(existing_row, col_idx).value = value
 
 
+def ensure_led_controller_params(ws):
+    headers = header_map(ws)
+    c_type = col_any(headers, "Params_Type.:", "Params_Type")
+    c_id = col_any(headers, "Param. ID.:", "Param ID")
+    c_min = col_any(headers, "Min.:", "Min")
+    c_max = col_any(headers, "Max.:", "Max")
+    c_default = col_any(headers, "Default Value:", "Default Value")
+    c_unit = col_any(headers, "Einheit:", "Einheit", "Unit")
+    c_user_range = col_optional(headers, "Microtom User Range:", "Microtom User Range")
+    c_rw = col_any(headers, "R/W:", "R/W")
+    c_esp_rw = col_any(headers, "ESP32 R/W:", "ESP32 R/W")
+    c_dtype = col_any(headers, "Data Type:", "Data Type")
+    c_name = col_any(headers, "Name:", "Name")
+    c_zbc_mapping = col_optional(headers, "ZBC Mapping:", "ZBC Mapping")
+    c_format = col_any(headers, "Format relevant?:", "Format relevant")
+    c_message = col_any(headers, "Message:", "Message")
+    c_cause = col_any(headers, "Possible Cause:", "Possible Cause")
+    c_effects = col_any(headers, "Effects:", "Effects")
+    c_remedy = col_any(headers, "Remedy:", "Remedy")
+    c_ai = col_any(headers, "KI-Anweisungen:", "KI-Anweisungen", "AI Instructions")
+
+    def find_row(key: str) -> Optional[int]:
+        for row_idx in range(2, ws.max_row + 1):
+            if row_key(ws, row_idx) == key:
+                return row_idx
+        return None
+
+    previous_key = "MAP0070"
+    for spec in LED_CONTROLLER_PARAM_SPECS:
+        existing_row = find_row(spec["key"])
+        if existing_row is None:
+            anchor = find_row(previous_key) or find_row("MAP0066")
+            if anchor is None:
+                raise RuntimeError("MAP0066/MAP0070 not found - cannot insert LED controller params cleanly")
+            target_row = anchor + 1
+            if row_key(ws, target_row):
+                ws.insert_rows(target_row, 1)
+            copy_row_style(ws, anchor, target_row, ws.max_column)
+            existing_row = target_row
+
+        values_by_col = {
+            c_type: spec["ptype"],
+            c_id: spec["pid"],
+            c_min: spec["min"],
+            c_max: spec["max"],
+            c_default: spec["default"],
+            c_unit: spec["unit"],
+            c_rw: spec["rw"],
+            c_esp_rw: spec["esp_rw"],
+            c_dtype: spec["dtype"],
+            c_name: spec["name"],
+            c_format: spec["format"],
+            c_message: spec["message"],
+            c_cause: None,
+            c_effects: None,
+            c_remedy: None,
+            c_ai: SPECIAL_AI[spec["key"]],
+        }
+        if c_user_range is not None:
+            values_by_col[c_user_range] = None
+        if c_zbc_mapping is not None:
+            values_by_col[c_zbc_mapping] = None
+
+        for col_idx, value in values_by_col.items():
+            ws.cell(existing_row, col_idx).value = value
+        previous_key = spec["key"]
+
+
 def sync_parameter_workbook(path: Path):
     wb = load_workbook(path)
     ws = wb["Parameter"]
     ensure_map0066(ws)
+    ensure_led_controller_params(ws)
     headers = header_map(ws)
     c_type = col_any(headers, "Params_Type.:", "Params_Type")
     c_id = col_any(headers, "Param. ID.:", "Param ID")

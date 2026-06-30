@@ -1,0 +1,11 @@
+{
+  "esp_simulation": true,
+  "vj6530_simulation": true,
+  "vj3350_simulation": true,
+  "smart_unwinder_simulation": true,
+  "smart_rewinder_simulation": true,
+  "moxa1_simulation": true,
+  "moxa2_simulation": true,
+  "moxa3_simulation": true,
+  "raspi_io_simulation": true
+}

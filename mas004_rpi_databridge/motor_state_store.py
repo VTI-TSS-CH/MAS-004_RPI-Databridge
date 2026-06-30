@@ -90,6 +90,7 @@ class MotorStateStore:
             cache = data.get("last_known") or {}
             if not isinstance(cache, dict):
                 cache = {}
+            changed = False
             for motor in motors:
                 if not isinstance(motor, dict):
                     continue
@@ -99,6 +100,12 @@ class MotorStateStore:
                     continue
                 if mid <= 0:
                     continue
-                cache[str(mid)] = deepcopy(motor)
+                key = str(mid)
+                value = deepcopy(motor)
+                if cache.get(key) != value:
+                    cache[key] = value
+                    changed = True
+            if not changed:
+                return
             data["last_known"] = cache
             self._write_unlocked(data)

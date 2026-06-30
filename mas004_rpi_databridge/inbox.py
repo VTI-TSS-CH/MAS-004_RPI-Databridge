@@ -46,6 +46,13 @@ class Inbox:
         Atomar: nimmt die älteste pending Nachricht und setzt sie auf 'processing',
         damit parallel laufende Worker sie nicht doppelt ziehen.
         """
+        # Fast idle path: avoid a write transaction every router tick when the
+        # inbox is empty. The service has one router worker; if a message arrives
+        # just after this read it is picked up on the next short tick.
+        msg = self.next_pending()
+        if msg is None:
+            return None
+
         with self.db._conn() as c:
             c.execute("BEGIN IMMEDIATE;")
             row = c.execute(
@@ -73,6 +80,22 @@ class Inbox:
         # falls du mal retry willst
         with self.db._conn() as c:
             c.execute("UPDATE inbox SET state='pending' WHERE id=?", (msg_id,))
+
+    def recover_stale_processing(self, max_age_s: float = 300.0) -> int:
+        cutoff = now_ts() - max(1.0, float(max_age_s or 300.0))
+        with self.db._conn() as c:
+            stale = int(
+                c.execute(
+                    "SELECT COUNT(*) FROM inbox WHERE state='processing' AND received_ts<?",
+                    (cutoff,),
+                ).fetchone()[0]
+            )
+            if stale:
+                c.execute(
+                    "UPDATE inbox SET state='stale' WHERE state='processing' AND received_ts<?",
+                    (cutoff,),
+                )
+            return stale
 
     def count_pending(self) -> int:
         with self.db._conn() as c:

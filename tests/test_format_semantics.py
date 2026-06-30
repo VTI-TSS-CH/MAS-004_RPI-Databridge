@@ -32,6 +32,14 @@ class FormatSemanticsTests(unittest.TestCase):
                 "MAP0039": "1",
                 "MAP0040": "5",
                 "MAP0066": "8000",
+                "MAP0071": "5200",
+                "MAP0072": "1",
+                "MAP0073": "255",
+                "MAP0074": "3050",
+                "MAP0075": "33",
+                "MAP0076": "0",
+                "MAP0077": "100765",
+                "MAP0078": "100649",
             }
         )
 
@@ -49,6 +57,14 @@ class FormatSemanticsTests(unittest.TestCase):
         self.assertEqual(512, plan["axes"]["label_guide_outfeed_target_tenths_mm"])
         self.assertTrue(plan["process"]["rewind_after_stop"])
         self.assertEqual(8000, plan["process"]["led_strip_first_led_distance_tenths_mm"])
+        self.assertEqual(5200, plan["process"]["led_strip_length_tenths_mm"])
+        self.assertTrue(plan["process"]["led_controller_enabled"])
+        self.assertEqual(255, plan["process"]["led_controller_target_last_octet"])
+        self.assertEqual(3050, plan["process"]["led_controller_udp_port"])
+        self.assertEqual(33, plan["process"]["led_controller_frame_interval_ms"])
+        self.assertEqual(0, plan["process"]["label_length_compensation_tenths_mm"])
+        self.assertEqual(100765, plan["process"]["infeed_encoder_diameter_um"])
+        self.assertEqual(100649, plan["process"]["drive_encoder_diameter_um"])
         self.assertEqual("100mm", plan["process"]["roll_core_note"])
 
     def test_laser_selection_switches_print_distance(self):

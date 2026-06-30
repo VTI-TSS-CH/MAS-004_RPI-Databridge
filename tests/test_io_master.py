@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook
 
@@ -18,24 +19,32 @@ class IoMasterImportTests(unittest.TestCase):
         ws.append(["PLC Pinout", "Function"])
         ws.append(["Raspberry PLC21+ Pinout Digital I/Os", ""])
         ws.append(["I0.6", "USV Status OK"])
+        ws.append(["I0.7", "Taster Start/Pause / Reset"])
         ws.append(["Q0.0", "LED rot Taster Start/Pause"])
 
         ws = wb.create_sheet("ESP32 PLC 58 PINOUT")
         ws.append(["PLC Pinout", "Function"])
         ws.append(["ESP32 PLC58 Pinout Digital I/Os", ""])
         ws.append(["Zone A", ""])
-        ws.append(["GPIO0", "Ansteuerung LED Streifen"])
+        ws.append(["GPIO0", "Reserve GPIO0 statischer Test; LED-Streifen nutzt externen UDP-Controller"])
         ws.append(["I0.0", "TTO Drucker Status"])
+        ws.append(["I0.7", "Not-Aus OK"])
+        ws.append(["I0.8", "Lichtgitter OK"])
 
-        ws = wb.create_sheet("IOLOGIK E1211 PINOUT Modul 1")
+        ws = wb.create_sheet("IOLOGIK E1213 PINOUT Modul 1")
         ws.append(["PLC Pinout", "Function"])
-        ws.append(["ioLogik E1211 Pinout Digital I/Os", ""])
+        ws.append(["ioLogik E1213 Pinout Digital I/Os", ""])
+        ws.append(["DO0", "Reserve 1 Motor Schutzblech Laser"])
+        ws.append(["DIO0", "Reserve 1 Motor Etikettenanschlag rechts"])
+
+        ws = wb.create_sheet("IOLOGIK E1213 PINOUT Modul 2")
+        ws.append(["PLC Pinout", "Function"])
         ws.append(["DO0", "Start Motor X-Achse (IN0)"])
-        ws.append(["DO1", "Reserve"])
+        ws.append(["DIO0", "Reserve 1 Motor Z-Achse"])
 
-        ws = wb.create_sheet("IOLOGIK E1211 PINOUT Modul 2")
+        ws = wb.create_sheet("IOLOGIK E1213 PINOUT Modul 3")
         ws.append(["PLC Pinout", "Function"])
-        ws.append(["DO4", "LED Maschinenstatus rot"])
+        ws.append(["DIO0", "LED Maschinenstatus rot"])
 
         wb.save(path)
 
@@ -49,16 +58,100 @@ class IoMasterImportTests(unittest.TestCase):
             result = store.import_xlsx(str(workbook_path))
 
             self.assertTrue(result["ok"])
-            self.assertEqual(7, result["channels"])
-            self.assertEqual(4, result["devices"])
+            self.assertEqual(12, result["channels"])
+            self.assertEqual(5, result["devices"])
 
             points = store.list_points()
-            by_pin = {item["pin_label"]: item for item in points}
-            self.assertEqual("raspi_plc21", by_pin["I0.6"]["device_code"])
-            self.assertEqual("gpio", by_pin["GPIO0"]["io_dir"])
-            self.assertFalse(by_pin["DO0"]["is_reserved"])
-            self.assertTrue(by_pin["DO1"]["is_reserved"])
-            self.assertEqual(7, store.master_info()["channel_count"])
+            by_key = {item["io_key"]: item for item in points}
+            self.assertEqual("raspi_plc21", by_key["raspi_plc21__I0_6"]["device_code"])
+            self.assertEqual("gpio", by_key["esp32_plc58__GPIO0"]["io_dir"])
+            self.assertFalse(by_key["moxa_e1213_2__DO0"]["is_reserved"])
+            self.assertFalse(by_key["moxa_e1213_3__DIO0"]["is_reserved"])
+            self.assertEqual("output", by_key["moxa_e1213_3__DIO0"]["io_dir"])
+            self.assertEqual(12, store.master_info()["channel_count"])
+
+    def test_esp_simulation_keeps_safety_ok_inputs_high(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            store.upsert_value("esp32_plc58__I0_7", "0", "simulation", "test")
+            store.upsert_value("esp32_plc58__I0_8", "0", "simulation", "test")
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_simulation=True,
+                    raspi_io_simulation=True,
+                    moxa1_simulation=True,
+                    moxa2_simulation=True,
+                    moxa3_simulation=True,
+                ),
+                store,
+            )
+
+            runtime.refresh()
+
+            self.assertEqual("1", store.get_point("esp32_plc58__I0_7")["value"])
+            self.assertEqual("1", store.get_point("esp32_plc58__I0_8")["value"])
+
+    def test_raspi_plc21_i07_to_i012_inputs_are_read_via_analog_threshold(self):
+        class FakeRpiplc:
+            INPUT = 0
+            OUTPUT = 1
+            HIGH = 1
+            LOW = 0
+
+            def __init__(self):
+                self.modes = []
+                self.digital_reads = []
+                self.analog_reads = []
+
+            def pin_mode(self, pin, mode):
+                self.modes.append((pin, mode))
+
+            def digital_read(self, pin):
+                self.digital_reads.append(pin)
+                return 1 if pin == "I0.6" else 0
+
+            def analog_read(self, pin):
+                self.analog_reads.append(pin)
+                return 2300 if pin == "I0.7" else 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    raspi_io_simulation=False,
+                    raspi_analog_input_high_threshold=1000.0,
+                ),
+                store,
+            )
+            fake = FakeRpiplc()
+
+            with patch("mas004_rpi_databridge.io_runtime._ensure_rpiplc", return_value=(fake, "")):
+                result = runtime.refresh()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("1", store.get_point("raspi_plc21__I0_6")["value"])
+            self.assertEqual("1", store.get_point("raspi_plc21__I0_7")["value"])
+            self.assertIn("I0.6", fake.digital_reads)
+            self.assertIn("I0.7", fake.analog_reads)
+            self.assertNotIn(("I0.7", fake.INPUT), fake.modes)
+            self.assertNotIn("Q0.0", fake.digital_reads)
+            self.assertNotIn(("Q0.0", fake.OUTPUT), fake.modes)
 
     def test_io_override_blocks_normal_runtime_writes_until_release(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -77,6 +170,7 @@ class IoMasterImportTests(unittest.TestCase):
                     raspi_io_simulation=True,
                     moxa1_simulation=True,
                     moxa2_simulation=True,
+                    moxa3_simulation=True,
                 ),
                 store,
             )
@@ -99,7 +193,7 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual("0", point["value"])
             self.assertFalse(point["override_active"])
 
-    def test_gpio0_is_pulse_only_and_cannot_be_overridden(self):
+    def test_gpio0_can_be_overridden_after_led_moved_to_tx1(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "io.xlsx"
             db_path = Path(tmpdir) / "io.sqlite3"
@@ -116,12 +210,16 @@ class IoMasterImportTests(unittest.TestCase):
                     raspi_io_simulation=True,
                     moxa1_simulation=True,
                     moxa2_simulation=True,
+                    moxa3_simulation=True,
                 ),
                 store,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "pulse-only"):
-                runtime.override_output("esp32_plc58__GPIO0", True, source="test-ui")
+            result = runtime.override_output("esp32_plc58__GPIO0", True, source="test-ui")
+            self.assertTrue(result["ok"])
+            point = store.get_point("esp32_plc58__GPIO0")
+            self.assertEqual("1", point["value"])
+            self.assertTrue(point["override_active"])
 
     def test_unchanged_live_output_is_not_written_again(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -131,23 +229,74 @@ class IoMasterImportTests(unittest.TestCase):
 
             store = IoStore(DB(str(db_path)))
             store.import_xlsx(str(workbook_path))
-            store.upsert_value("moxa_e1211_2__DO4", "1", "live", "test")
+            store.upsert_value("moxa_e1213_3__DIO0", "1", "live", "test")
             runtime = IoRuntime(
                 Settings(
                     db_path=str(db_path),
                     peer_base_url="",
                     shared_secret="",
-                    moxa2_host="127.0.0.1",
-                    moxa2_port=1,
-                    moxa2_simulation=False,
+                    moxa3_host="127.0.0.1",
+                    moxa3_port=1,
+                    moxa3_simulation=False,
                 ),
                 store,
             )
 
-            result = runtime.write_output("moxa_e1211_2__DO4", True)
+            result = runtime.write_output("moxa_e1213_3__DIO0", True)
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["skipped_unchanged"])
+
+    def test_unchanged_io_value_updates_timestamp_only_on_slow_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+
+            with patch("mas004_rpi_databridge.io_master.now_ts", return_value=100.0):
+                changed = store.upsert_value("raspi_plc21__I0_6", "1", "live", "raspi")
+            self.assertTrue(changed)
+            first_ts = store.get_point("raspi_plc21__I0_6")["updated_ts"]
+
+            with patch("mas004_rpi_databridge.io_master.now_ts", return_value=105.0):
+                changed = store.upsert_value("raspi_plc21__I0_6", "1", "live", "raspi")
+            self.assertFalse(changed)
+            self.assertEqual(first_ts, store.get_point("raspi_plc21__I0_6")["updated_ts"])
+
+            with patch("mas004_rpi_databridge.io_master.now_ts", return_value=111.0):
+                changed = store.upsert_value("raspi_plc21__I0_6", "1", "live", "raspi")
+            self.assertFalse(changed)
+            self.assertEqual(111.0, store.get_point("raspi_plc21__I0_6")["updated_ts"])
+
+    def test_batch_io_upsert_uses_one_heartbeat_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+
+            items = [
+                ("raspi_plc21__I0_6", "1", "live", "raspi"),
+                ("raspi_plc21__I0_7", "0", "live", "raspi"),
+            ]
+            with patch("mas004_rpi_databridge.io_master.now_ts", return_value=100.0):
+                self.assertEqual(2, store.upsert_values(items))
+            first_i06_ts = store.get_point("raspi_plc21__I0_6")["updated_ts"]
+            first_i07_ts = store.get_point("raspi_plc21__I0_7")["updated_ts"]
+
+            with patch("mas004_rpi_databridge.io_master.now_ts", return_value=105.0):
+                self.assertEqual(0, store.upsert_values(items))
+            self.assertEqual(first_i06_ts, store.get_point("raspi_plc21__I0_6")["updated_ts"])
+            self.assertEqual(first_i07_ts, store.get_point("raspi_plc21__I0_7")["updated_ts"])
+
+            with patch("mas004_rpi_databridge.io_master.now_ts", return_value=106.0):
+                self.assertEqual(1, store.upsert_values([("raspi_plc21__I0_7", "1", "live", "raspi")]))
+            self.assertEqual(106.0, store.get_point("raspi_plc21__I0_7")["updated_ts"])
 
     def test_moxa_best_effort_write_failure_does_not_raise(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -162,19 +311,19 @@ class IoMasterImportTests(unittest.TestCase):
                     db_path=str(db_path),
                     peer_base_url="",
                     shared_secret="",
-                    moxa2_host="127.0.0.1",
-                    moxa2_port=1,
-                    moxa2_simulation=False,
+                    moxa3_host="127.0.0.1",
+                    moxa3_port=1,
+                    moxa3_simulation=False,
                     moxa_timeout_s=0.3,
                 ),
                 store,
             )
 
-            result = runtime.write_output("moxa_e1211_2__DO4", True, best_effort=True)
+            result = runtime.write_output("moxa_e1213_3__DIO0", True, best_effort=True)
 
             self.assertFalse(result["ok"])
             self.assertTrue(result["best_effort"])
-            self.assertEqual("offline", store.get_point("moxa_e1211_2__DO4")["quality"])
+            self.assertEqual("offline", store.get_point("moxa_e1213_3__DIO0")["quality"])
 
 
 if __name__ == "__main__":

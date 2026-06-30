@@ -14,6 +14,9 @@ def build_machine_control_ui_html(nav_html: str) -> str:
     *{{box-sizing:border-box}}
     body{{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink)}}
     .wrap{{max-width:1760px;margin:0 auto;padding:16px}}
+    .topnav{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}}
+    .navbtn{{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink);text-decoration:none;font-weight:700}}
+    .navbtn.active{{background:var(--blue);color:#fff;border-color:var(--blue)}}
     .hero{{display:grid;grid-template-columns:1.2fr .8fr;gap:14px;margin-bottom:14px}}
     .card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:0 1px 2px rgba(15,23,42,.04)}}
     .title{{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}}
@@ -40,13 +43,24 @@ def build_machine_control_ui_html(nav_html: str) -> str:
     .reason-chip .code{{font-family:Consolas,Menlo,monospace;font-size:11px;color:#9b1c14}}
     .reason-empty{{color:var(--muted)}}
     .audit-shell{{display:grid;grid-template-columns:330px 1fr;gap:14px;margin-top:14px}}
+    .bypass-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px}}
+    .bypass-card{{border:1px solid var(--line);border-radius:12px;background:#fbfdff;padding:12px}}
+    .bypass-card.active{{background:#fff9e6;border-color:#e3c66c}}
+    .bypass-card h3{{display:flex;justify-content:space-between;gap:8px;align-items:center}}
+    .bypass-fields{{display:grid;grid-template-columns:1fr 120px;gap:8px;align-items:center;margin-top:10px}}
     .audit-view{{height:64vh;min-height:520px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fbfdff}}
     .entry{{display:grid;grid-template-columns:168px 112px 1fr;gap:10px;padding:10px 12px;border-bottom:1px solid #e7edf6;align-items:start}}
     .entry:last-child{{border-bottom:none}}
     .entry.communication{{background:#fff}} .entry.machine{{background:#f7fbff}} .entry.label{{background:#fbfff8}}
+    .entry.level-warning{{background:var(--soft-yellow)!important;border-left:4px solid #e3c66c}}
+    .entry.level-error{{background:var(--soft-red)!important;border-left:4px solid #efaaa4}}
     .summary{{font-weight:700}} .raw{{margin-top:4px;color:#4b5b6f;white-space:pre-wrap;word-break:break-word;font-size:12px}}
     input,select{{min-height:38px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#fff}}
     label.check{{display:inline-flex;gap:7px;align-items:center}}
+    .audit-filters{{margin:8px 0 12px;padding:8px;border:1px solid var(--line);border-radius:12px;background:#f8fbff}}
+    .filter-chip{{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--line);border-radius:999px;background:#fff;padding:6px 9px;font-size:12px;font-weight:700;color:#31445a}}
+    .filter-chip input{{margin:0}}
+    #audit_search{{min-width:220px;flex:1 1 280px}}
     .event-list{{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:#fbfdff}}
     .event-row{{padding:8px 10px;border-bottom:1px solid #e7edf6}} .event-row:last-child{{border-bottom:none}}
     table{{width:100%;border-collapse:collapse}} th,td{{padding:7px 8px;border-bottom:1px solid #e7edf6;text-align:left;vertical-align:top;font-size:13px}}
@@ -89,6 +103,21 @@ def build_machine_control_ui_html(nav_html: str) -> str:
     </section>
   </div>
 
+  <section class="card" style="margin-bottom:14px">
+    <div class="title">
+      <div>
+        <h2>Bypass / Simulation</h2>
+        <div class="muted small">MAP0035-MAP0038 werden wie Microtom-Parameter geschrieben und zur ESP32-PLC gespiegelt.</div>
+      </div>
+      <span id="bypass_status" class="pill">lade...</span>
+    </div>
+    <div id="bypass_grid" class="bypass-grid"></div>
+    <div class="toolbar" style="margin-top:12px">
+      <button onclick="saveBypass()" class="primary">Bypass speichern</button>
+      <button onclick="loadBypass()">Neu laden</button>
+    </div>
+  </section>
+
   <div class="audit-shell">
     <aside class="card">
       <div class="title">
@@ -126,12 +155,25 @@ def build_machine_control_ui_html(nav_html: str) -> str:
         </div>
         <span id="audit_count" class="pill">0 Eintraege</span>
       </div>
+      <div class="toolbar audit-filters">
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="direction" value="IN" checked/>IN</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="direction" value="OUT" checked/>OUT</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="level" value="error" checked/>Error</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="level" value="warning" checked/>Warning</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="level" value="info" checked/>Info</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="category" value="communication" checked/>Kommunikation</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="category" value="machine" checked/>Maschine</label>
+        <label class="filter-chip"><input class="audit-filter" type="checkbox" data-filter="category" value="label" checked/>Label</label>
+        <input id="audit_search" type="search" placeholder="Suche nach Code, Text, Quelle..."/>
+        <button id="audit_clear_btn" type="button" onclick="toggleAuditDisplayClear()">Anzeige leeren</button>
+      </div>
       <div id="audit_entries" class="audit-view"></div>
     </main>
   </div>
 </div>
 <script>
 const TOKEN_KEY = "mas004_ui_token";
+const AUDIT_PREF_KEY = "mas004_machine_audit_prefs";
 const buttons = [
   ["start_pause", "Start/Pause"],
   ["stop", "Stop"],
@@ -140,8 +182,53 @@ const buttons = [
   ["empty", "Leerfahren"],
   ["rewind", "Zurueckspulen"]
 ];
+const bypassCards = [
+  {{
+    key:"MAP0036",
+    title:"Material-Kontrollkamera",
+    note:"Trigger bleibt aktiv, Kamera-IOs werden ignoriert und die Rueckmeldung wird simuliert.",
+    fields:[["MAP0067", "Simulation", "0=alle gut, 1=alle schlecht, n=jede n-te schlecht"]]
+  }},
+  {{
+    key:"MAP0035",
+    title:"Drucksystem",
+    note:"Laser/TTO wird nicht getriggert; Bereit/Fertig wird ueber die simulierte Druckdauer erzeugt.",
+    fields:[["MAP0069", "Laser-Dauer ms", "Simulierte Laser-Druckdauer"], ["MAP0070", "TTO-Dauer ms", "Simulierte TTO-Druckdauer"]]
+  }},
+  {{
+    key:"MAP0037",
+    title:"Druck-Verifikationskamera",
+    note:"Trigger bleibt aktiv, OCR-IOs werden ignoriert und die Rueckmeldung wird simuliert.",
+    fields:[["MAP0068", "Simulation", "0=alle gut, 1=alle schlecht, n=jede n-te schlecht"]]
+  }},
+  {{
+    key:"MAP0038",
+    title:"Etiketten-Entnahmesensor",
+    note:"Keine Entnahmekontrolle/Rueckspulung; Registerwerte bleiben trotzdem dokumentiert.",
+    fields:[]
+  }}
+];
 let refreshTimer = null;
 function token(){{ try{{return localStorage.getItem(TOKEN_KEY)||"";}}catch(e){{return"";}} }}
+function loadAuditPrefs(){{
+  try{{return JSON.parse(localStorage.getItem(AUDIT_PREF_KEY) || "{{}}") || {{}};}}catch(e){{return {{}};}}
+}}
+function saveAuditPrefs(){{
+  const prefs = loadAuditPrefs();
+  Object.assign(prefs, {{
+    keep_hours: num("keep_hours", 72, 1, 87600),
+    view_hours: num("view_hours", 72, 1, 87600),
+    entry_limit: num("entry_limit", 800, 50, 5000)
+  }});
+  try{{localStorage.setItem(AUDIT_PREF_KEY, JSON.stringify(prefs));}}catch(e){{}}
+  return prefs;
+}}
+function applyAuditPrefs(){{
+  const prefs = loadAuditPrefs();
+  document.getElementById("view_hours").value = Number.isFinite(Number(prefs.view_hours)) ? prefs.view_hours : 72;
+  document.getElementById("keep_hours").value = Number.isFinite(Number(prefs.keep_hours)) ? prefs.keep_hours : 72;
+  document.getElementById("entry_limit").value = Number.isFinite(Number(prefs.entry_limit)) ? prefs.entry_limit : 800;
+}}
 function esc(v){{return String(v ?? "").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");}}
 async function api(path,opt={{}}){{
   opt.headers = opt.headers || {{}};
@@ -183,10 +270,17 @@ function reasonHtml(reasons){{
     return `<span class="reason-chip"><span>${{esc(label)}}</span><span class="code">${{esc(code)}}</span></span>`;
   }}).join("")}}</div>`;
 }}
+function ioDetailHtml(point){{
+  if(!point) return '<span class="reason-empty">-</span>';
+  const ok = !!point.active;
+  const label = `${{point.device_code || ""}} ${{point.pin_label || ""}}`;
+  const meta = `${{point.value ?? "-"}} / ${{point.quality || "-"}} / ${{point.source || "-"}}`;
+  return `<span class="pill ${{ok ? "ok" : "bad"}}">${{ok ? "HIGH" : "LOW"}}</span> <span class="small muted">${{esc(label)}} · ${{esc(meta)}}</span>`;
+}}
 function formatTs(ts){{try{{return new Date(Number(ts||0)*1000).toLocaleString();}}catch(e){{return "-";}}}}
 function actionForButton(button, state, resetContext){{
   if(button === "start_pause") {{
-    if(resetContext) return "stop";
+    if(resetContext) return "start";
     return Number(state) === 5 ? "pause" : "start";
   }}
   return button;
@@ -207,7 +301,9 @@ function renderButtons(machine){{
   const mask = info.button_mask || {{}};
   document.getElementById("button_row").innerHTML = buttons.map(([key]) => {{
     const action = actionForButton(key, state, resetContext);
-    const enabled = (resetContext && key === "start_pause") || (!!allowed[action] && !!mask[action]);
+    const enabled = resetContext
+      ? (key === "start_pause")
+      : (!!allowed[action] && !!mask[action]);
     const label = buttonLabel(key, state, resetContext);
     const cls = key === "stop" ? " stop" : (resetContext && key === "start_pause" ? " reset" : "");
     return `<button class="control${{enabled?" enabled":""}}${{cls}}" onclick="pressButton('${{key}}')" ${{enabled?"":"disabled"}}>${{esc(label)}}</button>`;
@@ -226,6 +322,74 @@ async function pressButton(button){{
     await loadAll();
   }}catch(err){{
     el.textContent = `Fehler: ${{err.message}}`;
+  }}
+}}
+function bypassParamMap(payload){{
+  const map = {{}};
+  (payload?.parameters || []).forEach(p => map[p.pkey] = p);
+  return map;
+}}
+function paramNumber(map, key, fallback){{
+  const value = Number(map[key]?.value ?? fallback);
+  return Number.isFinite(value) ? value : fallback;
+}}
+function renderBypass(payload){{
+  const map = bypassParamMap(payload || {{}});
+  const grid = document.getElementById("bypass_grid");
+  grid.innerHTML = bypassCards.map(card => {{
+    const active = paramNumber(map, card.key, 0) ? 1 : 0;
+    const fields = card.fields.map(([key,label,hint]) => {{
+      const meta = map[key] || {{}};
+      const min = meta.min_v ?? 0;
+      const max = meta.max_v ?? 10000;
+      return `<div class="muted small">${{esc(label)}}<br/><span class="small">${{esc(hint)}}</span></div>
+        <input id="bypass_${{key}}" type="number" min="${{esc(min)}}" max="${{esc(max)}}" value="${{esc(paramNumber(map,key,0))}}"/>`;
+    }}).join("");
+    return `<div class="bypass-card ${{active?"active":""}}">
+      <h3><span>${{esc(card.title)}}</span><label class="check"><input id="bypass_${{card.key}}" type="checkbox" ${{active?"checked":""}}>Bypass</label></h3>
+      <div class="muted small" style="margin-top:6px">${{esc(card.note)}}</div>
+      <div class="bypass-fields">${{fields}}</div>
+    </div>`;
+  }}).join("");
+  document.getElementById("bypass_status").className = "pill ok";
+  document.getElementById("bypass_status").textContent = "geladen";
+}}
+async function loadBypass(){{
+  try{{
+    const j = await api("/api/machine/bypass");
+    renderBypass(j);
+    window.bypassLoaded = true;
+  }}catch(err){{
+    const el = document.getElementById("bypass_status");
+    el.className = "pill bad";
+    el.textContent = err.message;
+  }}
+}}
+async function saveBypass(){{
+  const values = {{}};
+  bypassCards.forEach(card => {{
+    values[card.key] = document.getElementById(`bypass_${{card.key}}`)?.checked ? 1 : 0;
+    card.fields.forEach(([key]) => {{
+      const input = document.getElementById(`bypass_${{key}}`);
+      values[key] = input ? Number(input.value || 0) : 0;
+    }});
+  }});
+  const el = document.getElementById("bypass_status");
+  el.className = "pill warn";
+  el.textContent = "speichere...";
+  try{{
+    const j = await api("/api/machine/bypass", {{
+      method:"POST",
+      headers:{{"Content-Type":"application/json"}},
+      body:JSON.stringify({{values}})
+    }});
+    renderBypass(j.bypass || j);
+    el.className = "pill ok";
+    el.textContent = "gespeichert";
+    await loadAudit();
+  }}catch(err){{
+    el.className = "pill bad";
+    el.textContent = err.message;
   }}
 }}
 function renderMachine(machine){{
@@ -248,6 +412,7 @@ function renderMachine(machine){{
     ["Warnung", flag(!!machine.warning_active)],
     ["Purge", flag(!!machine.purge_active)],
     ["Safety-Latch", flag(!!safety.latched)],
+    ["USV I0.6", ioDetailHtml((info.safety_status || {{}}).ups_input)],
     ["Kritische Gruende", reasonHtml(info.critical_reasons || [])],
     ["MAP0065", `<span class="mono code-wrap">${{esc(JSON.stringify(info.button_mask || {{}}))}}</span>`]
   ]);
@@ -256,21 +421,119 @@ function renderMachine(machine){{
   renderButtons(machine);
 }}
 function renderAudit(items){{
+  window.auditItems = Array.isArray(items) ? items : [];
+  renderFilteredAudit();
+}}
+function auditTruthy(v){{
+  const text = String(v ?? "").trim().toLowerCase();
+  return !["", "0", "false", "off", "no", "none", "null"].includes(text);
+}}
+function auditLevel(it){{
+  const dir = String(it.direction || "").toUpperCase();
+  const pkey = String(it.pkey || "").toUpperCase();
+  const value = String(it.value ?? "");
+  if(/^MAE/.test(pkey)) return auditTruthy(value) ? "error" : "info";
+  if(/^MAW/.test(pkey)) return auditTruthy(value) ? "warning" : "info";
+  if(pkey === "MAS0028") return auditTruthy(value) ? "warning" : "info";
+  const text = `${{it.direction||""}} ${{it.message||""}} ${{it.summary||""}} ${{it.description||""}}`.toLowerCase();
+  if(/ignored duplicate|ignored .*clear|ack_[a-z]{{3}}\\d+=0/.test(text)) return "info";
+  if(dir === "ERR" || dir === "ERROR" || /\\b(error|fehler|failed|failure|exception|traceback|nak_|nak-|timed out|timeout|störung|stoerung)\\b/.test(text)) return "error";
+  if(dir === "WARN" || dir === "WARNING" || /\\b(warn|warning|warnung|skipped|retry|cooldown)\\b/.test(text)) return "warning";
+  return "info";
+}}
+function checkedValues(group){{
+  return new Set(Array.from(document.querySelectorAll(`.audit-filter[data-filter="${{group}}"]:checked`)).map(x=>String(x.value)));
+}}
+function auditClearAfterTs(){{
+  const value = Number(loadAuditPrefs().audit_clear_after_ts || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}}
+function setAuditClearAfterTs(value){{
+  const prefs = loadAuditPrefs();
+  if(Number(value) > 0) prefs.audit_clear_after_ts = Number(value);
+  else delete prefs.audit_clear_after_ts;
+  try{{localStorage.setItem(AUDIT_PREF_KEY, JSON.stringify(prefs));}}catch(e){{}}
+}}
+function toggleAuditDisplayClear(){{
+  const current = auditClearAfterTs();
+  setAuditClearAfterTs(current > 0 ? 0 : Math.floor(Date.now() / 1000));
+  renderFilteredAudit();
+}}
+function updateAuditClearButton(){{
+  const button = document.getElementById("audit_clear_btn");
+  if(!button) return;
+  const cutoff = auditClearAfterTs();
+  button.textContent = cutoff > 0 ? "Verlauf wieder anzeigen" : "Anzeige leeren";
+  button.className = cutoff > 0 ? "btn primary" : "";
+  button.title = cutoff > 0
+    ? "Lokale Anzeige-Sperre aufheben; gespeicherte Auditdaten bleiben unveraendert."
+    : "Nur das sichtbare Fenster leeren; gespeicherte Auditdaten bleiben gemaess Retention erhalten.";
+}}
+function auditMatches(it){{
+  const cutoff = auditClearAfterTs();
+  if(cutoff > 0 && Number(it.ts || 0) <= cutoff) return false;
+  const directions = checkedValues("direction");
+  const levels = checkedValues("level");
+  const categories = checkedValues("category");
+  const direction = String(it.direction || "INFO").toUpperCase();
+  const category = String(it.category || "communication");
+  const level = auditLevel(it);
+  const directionOk = direction === "IN" || direction === "OUT" ? directions.has(direction) : true;
+  const levelOk = levels.has(level);
+  const categoryOk = categories.has(category);
+  const search = String(document.getElementById("audit_search")?.value || "").trim().toLowerCase();
+  const searchOk = !search || `${{it.ts_display||""}} ${{it.category||""}} ${{it.source||""}} ${{it.direction||""}} ${{it.device||""}} ${{it.pkey||""}} ${{it.value||""}} ${{it.summary||""}} ${{it.description||""}} ${{it.message||""}}`.toLowerCase().includes(search);
+  return directionOk && levelOk && categoryOk && searchOk;
+}}
+function auditGroupKey(it){{
+  return [
+    auditLevel(it),
+    String(it.category || ""),
+    String(it.device || it.source || ""),
+    String(it.direction || ""),
+    String(it.pkey || ""),
+    String(it.value ?? ""),
+    String(it.summary || it.message || "")
+  ].join("|");
+}}
+function groupAuditItems(items){{
+  const grouped = [];
+  for(const it of items){{
+    const key = auditGroupKey(it);
+    const ts = Number(it.ts || 0);
+    const prev = grouped[grouped.length - 1];
+    const prevTs = Number(prev?._lastTs || prev?.ts || 0);
+    if(prev && prev._groupKey === key && ts > 0 && prevTs > 0 && Math.abs(ts - prevTs) <= 1.5){{
+      prev._count = Number(prev._count || 1) + 1;
+      prev._lastTs = ts;
+      continue;
+    }}
+    grouped.push({{...it, _groupKey: key, _lastTs: ts, _count: 1}});
+  }}
+  return grouped;
+}}
+function renderFilteredAudit(){{
+  updateAuditClearButton();
+  const itemsAll = window.auditItems || [];
+  const items = itemsAll.filter(auditMatches);
+  const grouped = groupAuditItems(items);
   const box = document.getElementById("audit_entries");
-  document.getElementById("audit_count").textContent = `${{items.length}} Eintraege`;
+  document.getElementById("audit_count").textContent = `${{grouped.length}} / ${{itemsAll.length}} Eintraege`;
   if(!items.length){{
     box.innerHTML = '<div class="entry"><div class="muted">Keine Audit-Eintraege im gewaehlten Zeitfenster.</div></div>';
     return;
   }}
-  box.innerHTML = items.map(it => {{
+  box.innerHTML = grouped.map(it => {{
     const cat = esc(it.category || "communication");
+    const level = auditLevel(it);
     const code = it.pkey ? `<span class="pill">${{esc(it.pkey)}}${{it.value!==""?"="+esc(it.value):""}}</span>` : `<span class="pill">${{cat}}</span>`;
+    const count = Number(it._count || 1) > 1 ? `<span class="pill">x${{Number(it._count || 1)}}</span>` : "";
     const source = esc(it.device || it.source || "-");
     const raw = it.message ? `<div class="raw">${{esc(it.message)}}</div>` : "";
     const desc = it.description ? `<div class="small muted">${{esc(it.description)}}</div>` : "";
-    return `<div class="entry ${{cat}}">
+    return `<div class="entry ${{cat}} level-${{level}}">
       <div><div class="mono small">${{esc(it.ts_display || formatTs(it.ts))}}</div><div class="small muted">${{esc(it.direction || "")}}</div></div>
-      <div>${{code}}<div class="small muted" style="margin-top:5px">${{source}}</div></div>
+      <div>${{code}}${{count}}<div class="small muted" style="margin-top:5px">${{source}}</div></div>
       <div><div class="summary">${{esc(it.summary || it.message || "")}}</div>${{desc}}${{raw}}</div>
     </div>`;
   }}).join("");
@@ -281,18 +544,21 @@ function num(id, fallback, min, max){{
   return Math.max(min, Math.min(max, Math.round(v)));
 }}
 async function loadAudit(){{
+  saveAuditPrefs();
   const hours = num("view_hours", 72, 1, 87600);
   const limit = num("entry_limit", 800, 50, 5000);
   const j = await api(`/api/machine/audit?hours=${{hours}}&limit=${{limit}}`);
-  document.getElementById("keep_hours").value = j.keep_hours || hours;
+  const prefs = loadAuditPrefs();
+  document.getElementById("keep_hours").value = Number.isFinite(Number(prefs.keep_hours)) ? prefs.keep_hours : (j.keep_hours || hours);
   document.getElementById("view_hours").value = hours;
   renderAudit(j.entries || []);
-  document.getElementById("audit_status").textContent = `Fenster: ${{hours}} h, Aufbewahrung: ${{j.keep_hours}} h`;
+  document.getElementById("audit_status").textContent = `Fenster: ${{hours}} h, Limit: ${{limit}}, Aufbewahrung: ${{j.keep_hours}} h`;
 }}
 async function loadAll(){{
   try{{
     const machine = await api("/api/machine/overview");
     renderMachine(machine);
+    if(!window.bypassLoaded) await loadBypass();
     await loadAudit();
   }}catch(err){{
     document.getElementById("health_pill").className = "pill bad";
@@ -301,12 +567,15 @@ async function loadAll(){{
   }}
 }}
 async function saveRetention(){{
+  saveAuditPrefs();
   const keep = num("keep_hours", 72, 1, 87600);
   const j = await api("/api/machine/audit/retention", {{
     method:"POST",
     headers:{{"Content-Type":"application/json"}},
     body:JSON.stringify({{keep_hours:keep}})
   }});
+  document.getElementById("keep_hours").value = j.keep_hours || keep;
+  saveAuditPrefs();
   document.getElementById("audit_status").textContent = `Aufbewahrung gespeichert: ${{j.keep_hours}} h`;
   await loadAudit();
 }}
@@ -317,13 +586,15 @@ function downloadAudit(){{
 }}
 function schedule(){{
   if(refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }}, 3000);
+  refreshTimer = setInterval(()=>{{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }}, 1000);
 }}
 document.getElementById("auto_refresh").addEventListener("change", schedule);
-document.getElementById("view_hours").addEventListener("change", loadAudit);
-document.getElementById("entry_limit").addEventListener("change", loadAudit);
-document.getElementById("view_hours").value = 72;
-document.getElementById("keep_hours").value = 72;
+document.getElementById("keep_hours").addEventListener("change", saveAuditPrefs);
+document.getElementById("view_hours").addEventListener("change", ()=>{{saveAuditPrefs(); loadAudit();}});
+document.getElementById("entry_limit").addEventListener("change", ()=>{{saveAuditPrefs(); loadAudit();}});
+document.querySelectorAll(".audit-filter").forEach(el => el.addEventListener("change", renderFilteredAudit));
+document.getElementById("audit_search").addEventListener("input", renderFilteredAudit);
+applyAuditPrefs();
 schedule();
 loadAll();
 </script>

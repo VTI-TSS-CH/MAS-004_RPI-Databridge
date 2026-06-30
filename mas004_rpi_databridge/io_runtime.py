@@ -8,16 +8,26 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.io_master import IoStore
-from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client
+from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client, MoxaE1213Client
 
 
 _RPIPLC_MODULE = None
 _RPIPLC_MODEL = ""
 _RPIPLC_ERROR = ""
+_RPIPLC_LOCK = threading.RLock()
 _MOXA_ENDPOINT_LOCKS: dict[tuple[str, int], threading.Lock] = {}
 _MOXA_ENDPOINT_LOCKS_GUARD = threading.Lock()
+_MOXA_CLIENTS: dict[tuple[str, int, str, float], Any] = {}
 _MOXA_COOLDOWN_UNTIL: dict[tuple[str, int], float] = {}
 _MOXA_COOLDOWN_ERROR: dict[tuple[str, int], str] = {}
+_MOXA_DEVICE_CODES = {
+    "moxa_e1211_1",
+    "moxa_e1211_2",
+    "moxa_e1213_1",
+    "moxa_e1213_2",
+    "moxa_e1213_3",
+}
+_RPIPLC21_ANALOG_DIGITAL_INPUTS = {"I0.7", "I0.8", "I0.9", "I0.10", "I0.11", "I0.12"}
 
 
 def _to_int01(value: Any) -> int:
@@ -32,30 +42,49 @@ def _to_int01(value: Any) -> int:
 
 def _ensure_rpiplc(model: str):
     global _RPIPLC_MODULE, _RPIPLC_MODEL, _RPIPLC_ERROR
-    if _RPIPLC_MODULE is not None and _RPIPLC_MODEL == model:
-        return _RPIPLC_MODULE, ""
-    try:
-        from rpiplc_lib import rpiplc  # type: ignore
-
-        rpiplc.init(model)
-        _RPIPLC_MODULE = rpiplc
-        _RPIPLC_MODEL = model
-        _RPIPLC_ERROR = ""
-        return _RPIPLC_MODULE, ""
-    except Exception as first_exc:
+    with _RPIPLC_LOCK:
+        if _RPIPLC_MODULE is not None and _RPIPLC_MODEL == model:
+            return _RPIPLC_MODULE, ""
         try:
-            from mas004_rpi_databridge import rpiplc_compat as rpiplc
+            from rpiplc_lib import rpiplc  # type: ignore
 
             rpiplc.init(model)
             _RPIPLC_MODULE = rpiplc
             _RPIPLC_MODEL = model
             _RPIPLC_ERROR = ""
             return _RPIPLC_MODULE, ""
-        except Exception as fallback_exc:
-            _RPIPLC_MODULE = None
-            _RPIPLC_MODEL = ""
-            _RPIPLC_ERROR = f"{first_exc}; fallback failed: {fallback_exc}"
-            return None, _RPIPLC_ERROR
+        except Exception as first_exc:
+            try:
+                from mas004_rpi_databridge import rpiplc_compat as rpiplc
+
+                rpiplc.init(model)
+                _RPIPLC_MODULE = rpiplc
+                _RPIPLC_MODEL = model
+                _RPIPLC_ERROR = ""
+                return _RPIPLC_MODULE, ""
+            except Exception as fallback_exc:
+                _RPIPLC_MODULE = None
+                _RPIPLC_MODEL = ""
+                _RPIPLC_ERROR = f"{first_exc}; fallback failed: {fallback_exc}"
+                return None, _RPIPLC_ERROR
+
+
+def _is_rpiplc21_analog_digital_input(cfg: Settings, pin_label: str) -> bool:
+    return (
+        str(getattr(cfg, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21").strip() == "RPIPLC_21"
+        and str(pin_label or "").strip() in _RPIPLC21_ANALOG_DIGITAL_INPUTS
+    )
+
+
+def _read_raspi_input(rpiplc: Any, cfg: Settings, pin_label: str) -> int:
+    pin = str(pin_label or "").strip()
+    with _RPIPLC_LOCK:
+        if _is_rpiplc21_analog_digital_input(cfg, pin):
+            raw = int(rpiplc.analog_read(pin))
+            threshold = cfg.get_float("raspi_analog_input_high_threshold", 1000.0)
+            return 1 if raw >= threshold else 0
+        rpiplc.pin_mode(pin, rpiplc.INPUT)
+        return _to_int01(rpiplc.digital_read(pin))
 
 
 class IoRuntime:
@@ -63,10 +92,16 @@ class IoRuntime:
         self.cfg = cfg
         self.store = store
 
-    def refresh(self) -> Dict[str, Any]:
-        points = self.store.list_points(include_reserved=True)
+    def refresh(self, *, include_points: bool = True, device_codes: Optional[set[str]] = None) -> Dict[str, Any]:
+        wanted_devices = {str(code or "") for code in (device_codes or set()) if str(code or "")}
+        if len(wanted_devices) == 1:
+            points = self.store.list_points(device_code=next(iter(wanted_devices)), include_reserved=True)
+        else:
+            points = self.store.list_points(include_reserved=True)
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for point in points:
+            if wanted_devices and str(point.get("device_code") or "") not in wanted_devices:
+                continue
             grouped.setdefault(point["device_code"], []).append(point)
 
         devices: List[Dict[str, Any]] = []
@@ -77,12 +112,14 @@ class IoRuntime:
             devices.append(device_result)
             changed += int(device_result.get("changed", 0) or 0)
 
-        return {
+        result = {
             "ok": True,
             "changed": changed,
             "devices": devices,
-            "points": self.store.list_points(include_reserved=True),
         }
+        if include_points:
+            result["points"] = self.store.list_points(include_reserved=True)
+        return result
 
     def write_output(
         self,
@@ -135,15 +172,15 @@ class IoRuntime:
             self.store.upsert_value(io_key, 1 if enabled else 0, "live", "esp32")
             return {"ok": True, "simulation": False, "response": response, "value": 1 if enabled else 0}
 
-        if device_code in {"moxa_e1211_1", "moxa_e1211_2"}:
+        if device_code in _MOXA_DEVICE_CODES:
             host, port, simulation = self._moxa_target(device_code)
             if simulation or not host or int(port or 0) <= 0:
                 self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", device_code)
                 return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
             try:
                 def _write():
-                    client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
-                    return client.write_output(int(point["channel_no"] or 0), enabled)
+                    client = self._moxa_client(device_code, host, int(port))
+                    return client.write_output_label(str(point["pin_label"]), enabled)
 
                 self._moxa_call(device_code, _write)
                 self.store.upsert_value(io_key, 1 if enabled else 0, "live", device_code)
@@ -168,8 +205,9 @@ class IoRuntime:
             if rpiplc is None:
                 raise RuntimeError(f"rpiplc unavailable: {error}")
             pin = point["pin_label"]
-            rpiplc.pin_mode(pin, rpiplc.OUTPUT)
-            rpiplc.digital_write(pin, rpiplc.HIGH if enabled else rpiplc.LOW)
+            with _RPIPLC_LOCK:
+                rpiplc.pin_mode(pin, rpiplc.OUTPUT)
+                rpiplc.digital_write(pin, rpiplc.HIGH if enabled else rpiplc.LOW)
             self.store.upsert_value(io_key, 1 if enabled else 0, "live", "raspi")
             return {"ok": True, "simulation": False, "value": 1 if enabled else 0}
 
@@ -202,7 +240,7 @@ class IoRuntime:
             return self._refresh_esp(device_points)
         if device_code == "raspi_plc21":
             return self._refresh_raspi(device_points)
-        if device_code in {"moxa_e1211_1", "moxa_e1211_2"}:
+        if device_code in _MOXA_DEVICE_CODES:
             return self._refresh_moxa(device_code, device_points)
         return self._apply_static_quality(device_code, device_points, "offline", device_code, "Unsupported IO device")
 
@@ -225,11 +263,15 @@ class IoRuntime:
             )
             payload = json.loads(raw or "{}")
             snapshot = payload.get("points") if isinstance(payload, dict) else {}
-            changed = 0
-            for point in device_points:
-                value = _to_int01((snapshot or {}).get(point["pin_label"], point.get("value", "0")))
-                if self._upsert_runtime_value(point, value, "live", "esp32"):
-                    changed += 1
+            changed = self._upsert_runtime_values(
+                (
+                    point,
+                    _to_int01((snapshot or {}).get(point["pin_label"], point.get("value", "0"))),
+                    "live",
+                    "esp32",
+                )
+                for point in device_points
+            )
             return self._device_result("esp32_plc58", device_points, False, True, "", changed)
         except Exception as exc:
             return self._apply_static_quality("esp32_plc58", device_points, "offline", "esp32", str(exc))
@@ -240,24 +282,21 @@ class IoRuntime:
         rpiplc, error = _ensure_rpiplc(str(getattr(self.cfg, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21"))
         if rpiplc is None:
             return self._apply_static_quality("raspi_plc21", device_points, "offline", "raspi", f"rpiplc unavailable: {error}")
-        changed = 0
+        values: list[tuple[Dict[str, Any], Any, str, str]] = []
         for point in device_points:
             pin = point["pin_label"]
             try:
                 if point["io_dir"] == "input":
-                    rpiplc.pin_mode(pin, rpiplc.INPUT)
-                    value = _to_int01(rpiplc.digital_read(pin))
+                    value = _read_raspi_input(rpiplc, self.cfg, pin)
                 else:
-                    rpiplc.pin_mode(pin, rpiplc.OUTPUT)
-                    try:
-                        value = _to_int01(rpiplc.digital_read(pin))
-                    except Exception:
-                        value = _to_int01(point.get("value", "0"))
-                if self._upsert_runtime_value(point, value, "live", "raspi"):
-                    changed += 1
+                    # Raspberry-PLC outputs are write-owned. Reading them back in the
+                    # refresh loop can race with blinking/status writes and is not
+                    # needed for the HMI state, which is updated by write_output().
+                    continue
+                values.append((point, value, "live", "raspi"))
             except Exception:
-                if self._upsert_runtime_value(point, point.get("value", "0"), "offline", "raspi"):
-                    changed += 1
+                values.append((point, point.get("value", "0"), "offline", "raspi"))
+        changed = self._upsert_runtime_values(values)
         return self._device_result("raspi_plc21", device_points, False, True, "", changed)
 
     def _refresh_moxa(self, device_code: str, device_points: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -268,15 +307,19 @@ class IoRuntime:
             return self._apply_static_quality(device_code, device_points, "offline", device_code, "MOXA endpoint missing")
         try:
             def _read():
-                client = MoxaE1211Client(host, int(port), timeout_s=self._moxa_timeout_s())
+                client = self._moxa_client(device_code, host, int(port))
                 return client.read_outputs()
 
             snapshot = self._moxa_call(device_code, _read)
-            changed = 0
-            for point in device_points:
-                value = _to_int01(snapshot.get(point["pin_label"], point.get("value", "0")))
-                if self._upsert_runtime_value(point, value, "live", device_code):
-                    changed += 1
+            changed = self._upsert_runtime_values(
+                (
+                    point,
+                    _to_int01(snapshot.get(point["pin_label"], point.get("value", "0"))),
+                    "live",
+                    device_code,
+                )
+                for point in device_points
+            )
             return self._device_result(device_code, device_points, False, True, "", changed)
         except Exception as exc:
             return self._apply_static_quality(device_code, device_points, "offline", device_code, str(exc))
@@ -289,12 +332,37 @@ class IoRuntime:
         source: str,
         error: str,
     ) -> Dict[str, Any]:
-        changed = 0
+        values: list[tuple[Dict[str, Any], Any, str, str]] = []
         for point in device_points:
             fallback = point.get("value", "0")
-            if self._upsert_runtime_value(point, fallback, quality, source):
-                changed += 1
+            if (
+                device_code == "esp32_plc58"
+                and quality == "simulation"
+                and str(point.get("pin_label") or "") in {"I0.7", "I0.8"}
+            ):
+                # On the Microtom test Raspi no ESP32-PLC hardware is present.
+                # Safety OK inputs are active-high; keep them high in simulation
+                # so a missing PLC does not create a permanent fake Not-Aus.
+                fallback = "1"
+            values.append((point, fallback, quality, source))
+        changed = self._upsert_runtime_values(values)
         return self._device_result(device_code, device_points, quality == "simulation", False, error, changed)
+
+    def _upsert_runtime_values(self, values) -> int:
+        items: list[tuple[str, Any, str, str]] = []
+        for point, value, quality, source in values:
+            if bool(point.get("override_active")):
+                items.append(
+                    (
+                        point["io_key"],
+                        _to_int01(point.get("override_value", point.get("value", "0"))),
+                        "override",
+                        point.get("override_source") or "manual-ui",
+                    )
+                )
+            else:
+                items.append((point["io_key"], value, quality, source))
+        return self.store.upsert_values(items)
 
     def _upsert_runtime_value(self, point: Dict[str, Any], value: Any, quality: str, source: str) -> bool:
         if bool(point.get("override_active")):
@@ -307,7 +375,7 @@ class IoRuntime:
         return self.store.upsert_value(point["io_key"], value, quality, source)
 
     def _is_pulse_only(self, point: Dict[str, Any]) -> bool:
-        return str(point.get("pin_label") or "").strip().upper() == "GPIO0"
+        return False
 
     def _device_result(
         self,
@@ -339,6 +407,12 @@ class IoRuntime:
             return str(getattr(self.cfg, "moxa1_host", "") or ""), int(getattr(self.cfg, "moxa1_port", 0) or 0)
         if device_code == "moxa_e1211_2":
             return str(getattr(self.cfg, "moxa2_host", "") or ""), int(getattr(self.cfg, "moxa2_port", 0) or 0)
+        if device_code == "moxa_e1213_1":
+            return str(getattr(self.cfg, "moxa1_host", "") or ""), int(getattr(self.cfg, "moxa1_port", 0) or 0)
+        if device_code == "moxa_e1213_2":
+            return str(getattr(self.cfg, "moxa2_host", "") or ""), int(getattr(self.cfg, "moxa2_port", 0) or 0)
+        if device_code == "moxa_e1213_3":
+            return str(getattr(self.cfg, "moxa3_host", "") or ""), int(getattr(self.cfg, "moxa3_port", 0) or 0)
         if device_code == "raspi_plc21":
             return str(self.cfg.eth0_ip or "127.0.0.1"), 0
         return "", 0
@@ -350,11 +424,45 @@ class IoRuntime:
                 int(getattr(self.cfg, "moxa1_port", 0) or 0),
                 bool(getattr(self.cfg, "moxa1_simulation", True)),
             )
-        return (
-            str(getattr(self.cfg, "moxa2_host", "") or "").strip(),
-            int(getattr(self.cfg, "moxa2_port", 0) or 0),
-            bool(getattr(self.cfg, "moxa2_simulation", True)),
-        )
+        if device_code == "moxa_e1211_2":
+            return (
+                str(getattr(self.cfg, "moxa2_host", "") or "").strip(),
+                int(getattr(self.cfg, "moxa2_port", 0) or 0),
+                bool(getattr(self.cfg, "moxa2_simulation", True)),
+            )
+        if device_code == "moxa_e1213_1":
+            return (
+                str(getattr(self.cfg, "moxa1_host", "") or "").strip(),
+                int(getattr(self.cfg, "moxa1_port", 0) or 0),
+                bool(getattr(self.cfg, "moxa1_simulation", True)),
+            )
+        if device_code == "moxa_e1213_2":
+            return (
+                str(getattr(self.cfg, "moxa2_host", "") or "").strip(),
+                int(getattr(self.cfg, "moxa2_port", 0) or 0),
+                bool(getattr(self.cfg, "moxa2_simulation", True)),
+            )
+        if device_code == "moxa_e1213_3":
+            return (
+                str(getattr(self.cfg, "moxa3_host", "") or "").strip(),
+                int(getattr(self.cfg, "moxa3_port", 0) or 0),
+                bool(getattr(self.cfg, "moxa3_simulation", True)),
+            )
+        raise RuntimeError(f"Unsupported MOXA device '{device_code}'")
+
+    def _moxa_client(self, device_code: str, host: str, port: int):
+        model = "e1213" if "e1213" in str(device_code).lower() else "e1211"
+        timeout_s = self._moxa_timeout_s()
+        key = (str(host or ""), int(port), model, float(timeout_s))
+        with _MOXA_ENDPOINT_LOCKS_GUARD:
+            client = _MOXA_CLIENTS.get(key)
+            if client is None:
+                if model == "e1213":
+                    client = MoxaE1213Client(host, int(port), timeout_s=timeout_s)
+                else:
+                    client = MoxaE1211Client(host, int(port), timeout_s=timeout_s)
+                _MOXA_CLIENTS[key] = client
+            return client
 
     def _moxa_timeout_s(self) -> float:
         # MOXA lives on the local eth1 machine subnet. Keep this much shorter
