@@ -16,8 +16,13 @@ $repos = @(
     @{ Name = "MAS-004_SmartWickler"; Path = Join-Path $gitRoot "MAS-004_SmartWickler" }
 )
 
-function Get-GitValue([string]$RepoPath, [string[]]$Args) {
-    $value = & git -C $RepoPath @Args 2>$null
+function Get-GitValue {
+    param(
+        [string]$RepoPath,
+        [string[]]$GitArgs
+    )
+
+    $value = & git -C $RepoPath @GitArgs 2>$null
     if ($LASTEXITCODE -ne 0) {
         return ""
     }
@@ -50,12 +55,12 @@ foreach ($repo in $repos) {
         name = $repo.Name
         path = (Resolve-Path $path).Path
         exists = $true
-        branch = Get-GitValue $path @("branch", "--show-current")
-        head = Get-GitValue $path @("rev-parse", "HEAD")
-        head_short = Get-GitValue $path @("rev-parse", "--short", "HEAD")
-        remote = Get-GitValue $path @("remote", "get-url", "origin")
-        upstream = Get-GitValue $path @("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-        status = (Get-GitValue $path @("status", "-sb"))
+        branch = Get-GitValue -RepoPath $path -GitArgs @("branch", "--show-current")
+        head = Get-GitValue -RepoPath $path -GitArgs @("rev-parse", "HEAD")
+        head_short = Get-GitValue -RepoPath $path -GitArgs @("rev-parse", "--short", "HEAD")
+        remote = Get-GitValue -RepoPath $path -GitArgs @("remote", "get-url", "origin")
+        upstream = Get-GitValue -RepoPath $path -GitArgs @("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        status = (Get-GitValue -RepoPath $path -GitArgs @("status", "-sb"))
         dirty = $dirty
         timestamp = (Get-Date).ToString("o")
     }
