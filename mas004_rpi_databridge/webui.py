@@ -1930,11 +1930,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         esp_errors: list[str] = []
         machine_info = dict((machine or {}).get("info") or {})
         production_info = dict(machine_info.get("production_runtime") or {})
-        start_window = int((machine or {}).get("current_state") or 0) == 4 or bool(
+        machine_state = int((machine or {}).get("current_state") or 0)
+        critical_motion_window = machine_state in (2, 3, 4, 5, 6) or bool(
             production_info.get("pending_start")
         )
-        if start_window:
-            esp_errors.append("ESP-Liveabfrage waehrend Produktionsstart zur Kanalentlastung pausiert")
+        if critical_motion_window:
+            esp_errors.append("ESP-Liveabfrage waehrend Einrichten/Produktion zur Kanalentlastung pausiert")
         elif bool(getattr(cfg2, "esp_simulation", False)) or not str(getattr(cfg2, "esp_host", "") or "").strip():
             esp_errors.append("ESP-Simulation aktiv" if bool(getattr(cfg2, "esp_simulation", False)) else "ESP-Endpunkt fehlt")
         else:

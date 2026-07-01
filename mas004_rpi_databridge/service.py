@@ -297,7 +297,7 @@ def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
         time.sleep(5.0)
 
 
-def _esp_io_poll_paused_for_production_start(db: DB) -> bool:
+def _esp_io_poll_paused_for_critical_motion(db: DB) -> bool:
     try:
         with db._conn() as conn:
             row = conn.execute(
@@ -305,7 +305,7 @@ def _esp_io_poll_paused_for_production_start(db: DB) -> bool:
             ).fetchone()
         if not row:
             return False
-        if int(row[0] or 0) == 4:
+        if int(row[0] or 0) in (2, 3, 4, 5, 6):
             return True
         info = json.loads(row[1] or "{}")
         production = dict(info.get("production_runtime") or {})
@@ -356,7 +356,7 @@ def io_runtime_loop(cfg_path: str):
                 for device_code, interval_s in intervals.items()
                 if now_m >= float(next_due_by_device.get(device_code, 0.0))
             }
-            if "esp32_plc58" in due_devices and _esp_io_poll_paused_for_production_start(db):
+            if "esp32_plc58" in due_devices and _esp_io_poll_paused_for_critical_motion(db):
                 due_devices.discard("esp32_plc58")
                 next_due_by_device["esp32_plc58"] = now_m + max(
                     2.0,

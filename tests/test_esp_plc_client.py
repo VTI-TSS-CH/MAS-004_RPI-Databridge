@@ -63,14 +63,14 @@ class EspPlcClientTests(unittest.TestCase):
         finally:
             server.close()
 
-    def test_exchange_line_reuses_persistent_connection(self):
+    def test_exchange_line_closes_answered_connection(self):
         server = _LineServer("PONG\n")
         try:
             client = EspPlcClient(server.host, server.port, timeout_s=1.0)
             self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
             self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
-            self.assertEqual(1, server.connection_count)
-            self.assertTrue(client.diagnostics()["connected"])
+            self.assertEqual(2, server.connection_count)
+            self.assertFalse(client.diagnostics()["connected"])
         finally:
             client.close()
             server.close()

@@ -123,12 +123,12 @@ class _EndpointState:
         self.last_ok_at = 0.0
         self.last_error = ""
 
-    def close_socket(self) -> None:
+    def close_socket(self, *, count_reconnect: bool = True) -> None:
         sock = self.sock
         self.sock = None
-        self.exchange_count = 0
         if sock is not None:
-            self.reconnect_count += 1
+            if count_reconnect:
+                self.reconnect_count += 1
             try:
                 sock.close()
             except Exception:
@@ -137,8 +137,10 @@ class _EndpointState:
 
 _ESP_ENDPOINTS_GUARD = threading.Lock()
 _ESP_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
-_ESP_COMMAND_IDLE_REUSE_S = 12.0
-_ESP_COMMAND_MAX_ATTEMPTS = 3
+_ESP_COMMAND_IDLE_REUSE_S = 0.75
+_ESP_COMMAND_MAX_ATTEMPTS = 5
+_ESP_COMMAND_CLOSE_AFTER_RESPONSE = True
+_ESP_COMMAND_MIN_SPACING_S = 0.08
 _ULTIMATE_ENDPOINTS_GUARD = threading.Lock()
 _ULTIMATE_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
 _ZBC_ENDPOINTS_GUARD = threading.Lock()
@@ -180,7 +182,14 @@ def _esp_interprocess_lock(host: str, port: int, timeout_s: float):
     deadline = time.monotonic() + max(0.2, float(timeout_s or 0.2))
     fd: int | None = None
     try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+            try:
+                os.fchmod(fd, 0o666)
+            except Exception:
+                pass
+        except PermissionError:
+            fd = os.open(path, os.O_RDONLY)
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -254,12 +263,15 @@ class EspPlcClient:
         payload = ((line or "").strip() + "\n").encode("utf-8")
         read_timeout_s = float(read_timeout_s or self.timeout_s)
         state = _esp_endpoint_state(self.host, self.port)
-        lock_wait_s = max(0.5, min(self.timeout_s + read_timeout_s + 3.0, 12.0))
+        lock_wait_s = max(0.5, min(self.timeout_s + read_timeout_s + 20.0, 60.0))
         if not state.lock.acquire(timeout=lock_wait_s):
             raise TimeoutError(f"ESP command channel busy >{lock_wait_s:.1f}s")
         try:
             with _esp_interprocess_lock(self.host, self.port, lock_wait_s):
-                deadline = time.monotonic() + max(2.0, min(self.timeout_s + read_timeout_s + 1.5, 6.0))
+                deadline = time.monotonic() + max(
+                    3.0,
+                    min(self.timeout_s + (read_timeout_s * _ESP_COMMAND_MAX_ATTEMPTS) + 2.0, 18.0),
+                )
                 last_error: Optional[Exception] = None
                 for attempt in range(_ESP_COMMAND_MAX_ATTEMPTS):
                     now = time.monotonic()
@@ -267,6 +279,15 @@ class EspPlcClient:
                         time.sleep(min(state.next_allowed_at - now, max(0.0, deadline - now)))
                     if time.monotonic() >= deadline:
                         break
+                    if state.last_ok_at > 0.0:
+                        quiet_for_s = time.monotonic() - state.last_ok_at
+                        if quiet_for_s < _ESP_COMMAND_MIN_SPACING_S:
+                            time.sleep(
+                                min(
+                                    _ESP_COMMAND_MIN_SPACING_S - quiet_for_s,
+                                    max(0.0, deadline - time.monotonic()),
+                                )
+                            )
                     try:
                         if (
                             state.sock is not None
@@ -299,6 +320,8 @@ class EspPlcClient:
                         state.exchange_count += 1
                         state.last_ok_at = time.monotonic()
                         state.last_error = ""
+                        if _ESP_COMMAND_CLOSE_AFTER_RESPONSE:
+                            state.close_socket(count_reconnect=False)
                         return reply
                     except Exception as exc:
                         last_error = exc
