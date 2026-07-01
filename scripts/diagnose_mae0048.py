@@ -41,6 +41,18 @@ def main() -> int:
         f"abs={reg.get('abs_error_mm')} mm, "
         f"attempts={reg.get('registration_attempts')}/{reg.get('max_attempts')}"
     )
+    attempts = reg.get("attempts") or []
+    if attempts:
+        print("Korrekturversuche:")
+        for item in attempts:
+            if not (item.get("ms") or item.get("commanded") or item.get("error_mm") or item.get("command_mm")):
+                continue
+            print(
+                f"- #{item.get('index')}: "
+                f"restfehler={item.get('error_mm')} mm, "
+                f"id3_befehl={item.get('command_mm')} mm, "
+                f"gesendet={item.get('commanded')}"
+            )
     print(
         "Motor 3: "
         f"ready={motor.get('ready')}, busy={motor.get('busy')}, move={motor.get('move')}, "

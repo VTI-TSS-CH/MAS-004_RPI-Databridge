@@ -88,7 +88,7 @@ def build_mae0048_diagnostics_ui_html(nav_html: str) -> str:
 
   <section class="card section">
     <div class="title"><h2>Korrekturversuche</h2><span id="attempt_count" class="pill">0</span></div>
-    <div class="table-wrap"><table><thead><tr><th>#</th><th>Zeit ms</th><th>Fehler mm</th><th>Command</th></tr></thead><tbody id="attempt_rows"></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>Zeit ms</th><th>Restfehler mm</th><th>ID3-Befehl mm</th><th>Gesendet</th></tr></thead><tbody id="attempt_rows"></tbody></table></div>
   </section>
 
   <section class="card section">
@@ -184,11 +184,11 @@ function renderWicklers(w){
 }
 function renderAttempts(reg){
   const attempts = reg.attempts || [];
-  const used = attempts.filter(a => Number(a.ms || 0) > 0 || Number(a.error_mm || 0) !== 0 || bool(a.commanded));
+  const used = attempts.filter(a => Number(a.ms || 0) > 0 || Number(a.error_mm || 0) !== 0 || Number(a.command_mm || 0) !== 0 || bool(a.commanded));
   document.getElementById("attempt_count").textContent = `${reg.registration_attempts ?? used.length}/${reg.max_attempts ?? 3}`;
   document.getElementById("attempt_rows").innerHTML = attempts.length ? attempts.map(a => `
-    <tr><td>${rowValue(a.index)}</td><td>${rowValue(a.ms)}</td><td>${fmt(a.error_mm,4)}</td><td>${pill(a.commanded)}</td></tr>
-  `).join("") : '<tr><td colspan="4" class="muted">Noch keine Korrekturversuche im Snapshot.</td></tr>';
+    <tr><td>${rowValue(a.index)}</td><td>${rowValue(a.ms)}</td><td>${fmt(a.error_mm,4)}</td><td>${fmt(a.command_mm,4)}</td><td>${pill(a.commanded)}</td></tr>
+  `).join("") : '<tr><td colspan="5" class="muted">Noch keine Korrekturversuche im Snapshot.</td></tr>';
 }
 function renderLogs(logs){
   document.getElementById("log_count").textContent = String(logs.length || 0);
