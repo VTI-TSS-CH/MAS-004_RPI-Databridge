@@ -61,8 +61,8 @@ function Show-Plan {
     Write-Host "5. Keep laptop NIC on 10.141.94.212/24, gateway 10.141.94.1, then check https://10.141.94.213:8080"
     Write-Host "6. Run: powershell -ExecutionPolicy Bypass -File scripts/mas004_production_ibn.ps1 -Phase StatusAfterCutover -Execute"
     Write-Host "7. Deploy ESP via USB on Raspi: -Phase DeployEspFromRaspi -Execute"
-    Write-Host "8. Deploy Abwickler and Aufwickler one after another via USB on laptop only: -Phase DeployWicklerUsb"
-    Write-Host "   Note: Smart Wickler modules stay autonomous and are not flashed through the Raspi USB gateway."
+    Write-Host "8. Deploy Abwickler and Aufwickler via USB on the production Raspi: -Phase DeployWicklerUsb -WicklerRole abwickler -Execute, then -WicklerRole aufwickler -Execute"
+    Write-Host "   Note: Wickler USB mapping on Raspi is Abwickler /dev/ttyACM1, Aufwickler /dev/ttyACM0; /dev/ttyUSB0 is ESP32-PLC."
 }
 
 function Invoke-Precheck {
@@ -187,29 +187,25 @@ function Resolve-PlatformIoCommand {
 }
 
 function Invoke-DeployWickler {
-    Write-Section "Smart Wickler autonomous USB deploy guidance"
+    Write-Section "Smart Wickler Raspi USB deploy guidance"
     $wicklerRepo = Join-Path $gitRoot "MAS-004_SmartWickler"
-    Write-Host "The Smart Wicklers stay autonomous; do not connect them to the Raspi for flashing."
-    Write-Host "Connect exactly one Smart Wickler ESP32-S3 to this laptop by USB."
-    Write-Host "Open/keep the repo: $wicklerRepo"
+    $uploadPort = if ($WicklerRole -eq "abwickler") { "/dev/ttyACM1" } else { "/dev/ttyACM0" }
+    Write-Host "The Smart Wicklers are connected to the production Raspi by USB."
+    Write-Host "Remote repo: /opt/MAS-004_SmartWickler on $ProductionSsh"
+    Write-Host "Local repo for source/sync reference: $wicklerRepo"
     Write-Host "Recommended order:"
-    Write-Host "  1. Connect Abwickler only, run this phase with -WicklerRole abwickler -Execute, then unplug it."
-    Write-Host "  2. Connect Aufwickler only, run this phase with -WicklerRole aufwickler -Execute."
+    Write-Host "  1. Run this phase with -WicklerRole abwickler -Execute; uses /dev/ttyACM1."
+    Write-Host "  2. Run this phase with -WicklerRole aufwickler -Execute; uses /dev/ttyACM0."
+    Write-Host "  3. Never use /dev/ttyUSB0 here; that is the ESP32-PLC."
     Write-Host "Equivalent manual command:"
-    Write-Host ("  pio run -e {0} -t upload" -f $WicklerRole)
+    Write-Host ("  ssh {0} 'cd /opt/MAS-004_SmartWickler && pio run -e {1} -t upload --upload-port {2}'" -f $ProductionSsh, $WicklerRole, $uploadPort)
     Write-Host "After both flashes, set/check their web/network config:"
     Write-Host "  Abwickler: 10.141.94.216, port 3011"
     Write-Host "  Aufwickler: 10.141.94.217, port 3012"
     if ($Execute) {
-        Push-Location $wicklerRepo
-        try {
-            $platformIo = Resolve-PlatformIoCommand
-            & $platformIo run -e $WicklerRole -t upload
-        } finally {
-            Pop-Location
-        }
+        ssh $ProductionSsh "cd /opt/MAS-004_SmartWickler && pio run -e $WicklerRole -t upload --upload-port $uploadPort"
     } else {
-        Write-Host "Plan only. Re-run with -Execute after connecting the correct Wickler USB cable." -ForegroundColor DarkYellow
+        Write-Host "Plan only. Re-run with -Execute after syncing the intended Wickler source to the Raspi." -ForegroundColor DarkYellow
     }
 }
 

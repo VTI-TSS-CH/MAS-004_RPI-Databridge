@@ -131,6 +131,10 @@ class _EndpointState:
             if count_reconnect:
                 self.reconnect_count += 1
             try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
                 sock.close()
             except Exception:
                 pass

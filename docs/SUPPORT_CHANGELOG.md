@@ -1,5 +1,10 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-07-01 (ESP command short connections)
+- Der `EspPlcClient` schliesst den ESP-TCP-Socket nach jeder Antwort wieder, damit kein Raspi-Prozess den Single-Client-Port der ESP32-PLC prozessuebergreifend blockiert.
+- Die Reihenfolge bleibt ueber Prozess- und Interprozess-Lock geschuetzt; schnelle Wiederverbindungen werden durch die ESP-Firmware mit kurzer Antwort-Freigabe abgefangen.
+- Vor dem lokalen `close()` wird der Socket mit `shutdown(SHUT_RDWR)` beendet, damit die ESP32-PLC das Verbindungsende bei schnellen Kurzverbindungen frueher erkennt.
+
 ## 2026-06-29 (Microtom DIClient Adapter Header)
 - Ausgehende Raspi -> Microtom Outbox-Requests ergaenzen fuer alle konfigurierten Microtom-Peers zentral den Header `X-DIClient-Adapter-Key`.
 - Der Key liegt als `diclient_adapter_key` in der lokalen Raspi-Konfiguration und wird erst unmittelbar beim Senden hinzugefuegt; Outbox-Jobs speichern den Key nicht selbst.

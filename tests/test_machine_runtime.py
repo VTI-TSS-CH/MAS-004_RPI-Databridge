@@ -904,6 +904,40 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["104.600", "104.600"], [payload.get("indexedTravelMm") for payload in master_payloads])
         self.assertTrue(all(item["ready"]["unchanged"] for item in result))
 
+    def test_production_motion_plan_uses_label_length_compensation_for_wickler_travel(self):
+        runtime = self.build_runtime()
+
+        plan = runtime._production_motion_plan(
+            {"MAP0002": "1000", "MAP0076": "48", "MAP0014": "100"},
+            {
+                "label": {"length_tenths_mm": 1000},
+                "printer": {"stop_distance_tenths_mm": 6200},
+                "process": {"label_length_compensation_tenths_mm": 48},
+            },
+        )
+
+        self.assertAlmostEqual(100.0, plan["nominal_travel_mm"])
+        self.assertAlmostEqual(4.8, plan["label_length_compensation_mm"])
+        self.assertAlmostEqual(104.8, plan["travel_mm"])
+
+    def test_production_wickler_base_prefers_last_esp_position_command(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        plan = {"travel_mm": 104.8}
+
+        before_mm, before_source = runtime._production_wickler_base_travel(plan)
+        runtime._remember_production_wickler_observed_travel(
+            label_no=2,
+            remaining_mm=104.782,
+            payload={"target_abs_mm": 724.976, "speed_mm_s": 100.0, "ramp_mm_s2": 300.0},
+        )
+        after_mm, after_source = runtime._production_wickler_base_travel(plan)
+
+        self.assertAlmostEqual(104.8, before_mm)
+        self.assertEqual("format_plan_map0002_plus_map0076", before_source)
+        self.assertAlmostEqual(104.782, after_mm)
+        self.assertEqual("last_esp_remaining_label_2", after_source)
+
     def test_production_start_fails_if_post_start_wickler_leaves_ready(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))

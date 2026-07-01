@@ -1184,6 +1184,7 @@ class MachineRuntime:
                 production_info["active"] = True
                 production_info["active_since_ts"] = now_ts()
                 production_info["plan"] = dict(start_result.get("plan") or {})
+                production_info.pop("last_wickler_observed_travel", None)
             else:
                 self.logs.log("machine", "error", f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
                 self._record_event(
@@ -1624,6 +1625,11 @@ class MachineRuntime:
                 f"Druckposition befohlen: Label {label_no}, Ziel {target:.3f}mm, Restweg {remaining:.3f}mm",
                 dict(payload or {}),
             )
+            self._remember_production_wickler_observed_travel(
+                label_no=label_no,
+                remaining_mm=remaining,
+                payload=payload,
+            )
             return {"ok": True, "accepted": True, "event": event_type, **event_result}
         if event_type == "production_print_position_reached":
             label_no = _safe_int(payload.get("label_no"), 0)
@@ -1966,6 +1972,52 @@ class MachineRuntime:
             last_label_no=int(state.get("last_label_no") or 0),
             info=info,
         )
+
+    def _remember_production_wickler_observed_travel(
+        self,
+        *,
+        label_no: int,
+        remaining_mm: float,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        travel_mm = float(remaining_mm)
+        if travel_mm < 10.0 or travel_mm > PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
+            return
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_info["last_wickler_observed_travel"] = {
+            "label_no": int(label_no),
+            "travel_mm": travel_mm,
+            "target_abs_mm": _safe_float((payload or {}).get("target_abs_mm"), 0.0),
+            "speed_mm_s": _safe_float((payload or {}).get("speed_mm_s"), 0.0),
+            "ramp_mm_s2": _safe_float((payload or {}).get("ramp_mm_s2"), 0.0),
+            "ts": now_ts(),
+            "source": "esp_production_print_position_commanded.remaining_mm",
+        }
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=int(state.get("current_state") or 1),
+            requested_state=int(state.get("requested_state") or state.get("current_state") or 1),
+            state_source=str(state.get("state_source") or "runtime"),
+            warning_active=bool(state.get("warning_active")),
+            purge_active=bool(state.get("purge_active")),
+            production_label=str(state.get("production_label") or ""),
+            last_label_no=int(state.get("last_label_no") or 0),
+            info=info,
+        )
+
+    def _production_wickler_base_travel(self, plan: dict[str, Any]) -> tuple[float, str]:
+        fallback_mm = float(plan["travel_mm"])
+        state_info = dict(self._state_row().get("info") or {})
+        production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        observed = production_info.get("last_wickler_observed_travel")
+        if isinstance(observed, dict):
+            observed_mm = _safe_float(observed.get("travel_mm"), 0.0)
+            if 10.0 <= observed_mm <= PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
+                label_no = _safe_int(observed.get("label_no"), 0)
+                return observed_mm, f"last_esp_remaining_label_{label_no}"
+        return fallback_mm, "format_plan_map0002_plus_map0076"
 
     def _latch_registration_fault(
         self,
@@ -2823,9 +2875,21 @@ class MachineRuntime:
         label_plan = dict((format_plan or {}).get("label") or {})
         printer_plan = dict((format_plan or {}).get("printer") or {})
         length_tenths = _safe_float(label_plan.get("length_tenths_mm", param_map.get("MAP0002")), 0.0)
-        travel_mm = length_tenths / 10.0
+        compensation_tenths = _safe_float(
+            ((format_plan or {}).get("process") or {}).get(
+                "label_length_compensation_tenths_mm",
+                param_map.get("MAP0076"),
+            ),
+            0.0,
+        )
+        nominal_travel_mm = length_tenths / 10.0
+        label_length_compensation_mm = compensation_tenths / 10.0
+        travel_mm = (length_tenths + compensation_tenths) / 10.0
         if travel_mm < 1.0 or travel_mm > PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
-            raise RuntimeError(f"Etikettenlaenge ausserhalb ESP-Grenze: {travel_mm:.3f}mm")
+            raise RuntimeError(
+                f"Etikettenlaenge ausserhalb ESP-Grenze: {travel_mm:.3f}mm "
+                f"(MAP0002={nominal_travel_mm:.3f}mm, MAP0076={label_length_compensation_mm:.3f}mm)"
+            )
         first_print_tenths = _safe_float(printer_plan.get("stop_distance_tenths_mm"), 0.0)
         first_wickler_travel_mm = first_print_tenths / 10.0
         if first_wickler_travel_mm < 1.0:
@@ -2840,6 +2904,8 @@ class MachineRuntime:
         ramp_mm_s2 = PRODUCTION_MOTOR3_RAMP_MM_S2
         return {
             "travel_mm": travel_mm,
+            "nominal_travel_mm": nominal_travel_mm,
+            "label_length_compensation_mm": label_length_compensation_mm,
             "first_wickler_travel_mm": first_wickler_travel_mm,
             "speed_mm_s": speed_mm_s,
             "ramp_mm_s2": ramp_mm_s2,
@@ -3241,6 +3307,7 @@ class MachineRuntime:
         plan: dict[str, Any],
         *,
         travel_mm: float | None = None,
+        travel_source: str = "explicit",
         reason: str = "production_start",
         timeout_s: float = 5.0,
     ) -> list[dict[str, Any]]:
@@ -3262,16 +3329,49 @@ class MachineRuntime:
                 role,
                 timeout_s=timeout_s,
             )
+            telemetry = dict((state or {}).get("telemetry") or {})
+            master = dict((state or {}).get("master") or {})
+            indexed_plan = {
+                "base_travel_mm": planned_travel_mm,
+                "master_travel_mm": _safe_float(master.get("indexedTravelMm"), planned_travel_mm),
+                "prepared_travel_mm": _safe_float(telemetry.get("indexedTravelMm"), planned_travel_mm),
+                "prepared_trim_mm": _safe_float(telemetry.get("indexedTrimMm"), 0.0),
+                "next_trim_mm": _safe_float(telemetry.get("indexedNextTrimMm"), 0.0),
+                "role_error_percent": _safe_float(telemetry.get("indexedRoleErrorPercent"), 0.0),
+                "trim_mm_per_percent": _safe_float(telemetry.get("indexedTrimMmPerPercent"), 0.0),
+                "wipe_percent": _safe_float(telemetry.get("wipePercent"), 0.0),
+                "standby_percent": _safe_float(
+                    telemetry.get("indexedStandbyPercent"),
+                    float(plan.get("wickler_standby_percent", PRODUCTION_WICKLER_STANDBY_PERCENT)),
+                ),
+                "command_seq": _safe_int(telemetry.get("indexedCommandSeq"), 0),
+            }
             result = {
                 "ok": bool(verify.get("ok")),
                 "role": role,
                 "reason": reason,
                 "travel_mm": planned_travel_mm,
+                "travel_source": travel_source,
+                "indexed_plan": indexed_plan,
                 "ready": {"ok": True, "unchanged": True, "source": "hardware_start_only"},
                 "master": master_reply,
                 "verify": verify,
             }
             results.append(result)
+            self.logs.log(
+                "machine",
+                "info",
+                (
+                    f"Wickler-Takt vorbereitet {client.descriptor.label}: "
+                    f"Basis {indexed_plan['base_travel_mm']:.3f}mm, "
+                    f"Quelle {travel_source}, "
+                    f"Wippe {indexed_plan['wipe_percent']:.1f}%, "
+                    f"Korrektur {indexed_plan['prepared_trim_mm']:.3f}mm "
+                    f"(naechste {indexed_plan['next_trim_mm']:.3f}mm), "
+                    f"effektiv {indexed_plan['prepared_travel_mm']:.3f}mm, "
+                    f"Seq {indexed_plan['command_seq']}"
+                ),
+            )
             if not verify.get("ok"):
                 raise RuntimeError(f"{client.descriptor.label} nicht produktionsbereit: {verify}")
         return results
@@ -3283,13 +3383,21 @@ class MachineRuntime:
                 return {"ok": True, "skipped": f"machine_state={machine_state}"}
             param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
             plan = self._production_motion_plan(param_map, build_format_plan(param_map))
+            base_travel_mm, base_source = self._production_wickler_base_travel(plan)
             results = self._prepare_production_wicklers(
                 plan,
-                travel_mm=float(plan["travel_mm"]),
+                travel_mm=base_travel_mm,
+                travel_source=base_source,
                 reason=reason,
                 timeout_s=1.2,
             )
-            return {"ok": all(bool(item.get("ok", True)) for item in results), "label_no": int(label_no), "results": results}
+            return {
+                "ok": all(bool(item.get("ok", True)) for item in results),
+                "label_no": int(label_no),
+                "base_travel_mm": base_travel_mm,
+                "base_source": base_source,
+                "results": results,
+            }
         except Exception as exc:
             self.logs.log("machine", "warning", f"Folge-Wicklertakt konnte nicht vorbereitet werden: {exc}")
             return {"ok": False, "label_no": int(label_no), "error": repr(exc)}
