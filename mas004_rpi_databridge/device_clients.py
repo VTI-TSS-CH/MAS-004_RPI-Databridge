@@ -122,6 +122,7 @@ class _EndpointState:
         self.reconnect_count = 0
         self.last_ok_at = 0.0
         self.last_error = ""
+        self.priority_until_at = 0.0
 
     def close_socket(self, *, count_reconnect: bool = True) -> None:
         sock = self.sock
@@ -249,6 +250,7 @@ class EspPlcClient:
         read_timeout_s: float | None = None,
         *,
         read_limit: int = 8192,
+        priority: bool = False,
     ) -> str:
         if not self.host or self.port <= 0:
             raise RuntimeError("ESP endpoint missing")
@@ -263,6 +265,12 @@ class EspPlcClient:
         payload = ((line or "").strip() + "\n").encode("utf-8")
         read_timeout_s = float(read_timeout_s or self.timeout_s)
         state = _esp_endpoint_state(self.host, self.port)
+        if priority:
+            state.priority_until_at = max(state.priority_until_at, time.monotonic() + 2.0)
+        else:
+            quiet_until = state.priority_until_at
+            if quiet_until > time.monotonic():
+                time.sleep(min(quiet_until - time.monotonic(), 0.5))
         lock_wait_s = max(0.5, min(self.timeout_s + read_timeout_s + 20.0, 60.0))
         if not state.lock.acquire(timeout=lock_wait_s):
             raise TimeoutError(f"ESP command channel busy >{lock_wait_s:.1f}s")
@@ -281,10 +289,11 @@ class EspPlcClient:
                         break
                     if state.last_ok_at > 0.0:
                         quiet_for_s = time.monotonic() - state.last_ok_at
-                        if quiet_for_s < _ESP_COMMAND_MIN_SPACING_S:
+                        min_spacing_s = 0.0 if priority else _ESP_COMMAND_MIN_SPACING_S
+                        if quiet_for_s < min_spacing_s:
                             time.sleep(
                                 min(
-                                    _ESP_COMMAND_MIN_SPACING_S - quiet_for_s,
+                                    min_spacing_s - quiet_for_s,
                                     max(0.0, deadline - time.monotonic()),
                                 )
                             )
@@ -320,6 +329,8 @@ class EspPlcClient:
                         state.exchange_count += 1
                         state.last_ok_at = time.monotonic()
                         state.last_error = ""
+                        if priority:
+                            state.priority_until_at = max(state.priority_until_at, time.monotonic() + 0.4)
                         if _ESP_COMMAND_CLOSE_AFTER_RESPONSE:
                             state.close_socket(count_reconnect=False)
                         return reply
@@ -354,6 +365,7 @@ class EspPlcClient:
                 "fail_count": state.fail_count,
                 "last_ok_at": state.last_ok_at,
                 "last_error": state.last_error,
+                "priority_until_at": state.priority_until_at,
             }
 
 

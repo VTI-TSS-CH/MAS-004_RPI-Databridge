@@ -550,7 +550,7 @@ class MachineRuntimeTests(unittest.TestCase):
             'JSON {"motor":{"state":{"move":false,"busy":false,"velocity_mode":false,"target_speed_mm_s":0.0,"feedback_tenths_mm":1200}}}',
         ]
 
-        def fake_esp(command, read_timeout_s=None):
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
             calls.append(command)
             if command == "MOTOR 3 REFRESH":
                 return status_replies.pop(0)
@@ -571,7 +571,7 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_production_stop_reports_failure_when_motor3_remains_active(self):
         runtime = self.build_runtime()
 
-        def fake_esp(command, read_timeout_s=None):
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
             if command == "MOTOR 3 REFRESH":
                 return (
                     'JSON {"motor":{"state":{"move":true,"busy":false,'
@@ -591,7 +591,7 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_production_stop_accepts_stale_velocity_fields_when_motor3_is_idle(self):
         runtime = self.build_runtime()
 
-        def fake_esp(command, read_timeout_s=None):
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
             if command == "MOTOR 3 REFRESH":
                 return (
                     'JSON {"motor":{"state":{"move":false,"busy":false,'
@@ -656,22 +656,75 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(5, result["synced_state"])
         self.assertTrue(result["post_start_wicklers"]["ok"], result)
 
-    def test_production_param_sync_skips_unchanged_quick_setup_snapshot(self):
+    def test_production_param_sync_forces_start_readback_keys(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         previous_values = runtime._production_esp_sync_values(param_map)
 
-        with patch.object(runtime, "_production_esp") as esp:
+        with patch.object(runtime, "_production_esp", return_value="ACK") as esp:
             result = runtime._sync_production_params_to_esp(
                 param_map,
                 previous_values=previous_values,
             )
 
-        esp.assert_not_called()
-        self.assertEqual([], result["synced"])
+        commands = [call.args[0] for call in esp.call_args_list]
+        self.assertIn("SYNC MAP0004=100", commands)
+        self.assertIn("SYNC MAP0006=0", commands)
+        self.assertIn("SYNC MAP0016=0", commands)
+        self.assertIn("SYNC MAP0019=11000", commands)
+        expected_forced = ["MAP0004", "MAP0006", "MAP0016", "MAP0018", "MAP0019", "MAP0020", "MAP0021"]
+        self.assertEqual(expected_forced, result["synced"])
+        self.assertEqual(expected_forced, result["forced"])
         self.assertNotIn("MAP0068", result["values"])
         self.assertNotIn("MAP0068", result["skipped"])
         self.assertEqual(previous_values, result["values"])
+
+    def test_production_param_sync_rejects_esp_readback_mismatch(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        param_map["MAP0019"] = "6000"
+
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
+            if command.startswith("SYNC "):
+                return "ACK"
+            if command == "MAP0019=?":
+                return "MAP0019=11000"
+            if command.endswith("=?"):
+                key = command[:-2]
+                return f"{key}={param_map[key]}"
+            return "ACK"
+
+        with patch.object(runtime, "_production_esp", side_effect=fake_esp):
+            with self.assertRaisesRegex(RuntimeError, "MAP0019 expected 6000 got 11000"):
+                runtime._sync_production_params_to_esp(param_map, previous_values=param_map)
+
+    def test_wickler_ready_timeout_after_ready_event_is_ignored(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True}},
+        )
+        runtime.handle_event({"type": "production_wickler_indexed_ready", "label_no": 1})
+
+        result = runtime.handle_event(
+            {
+                "type": "production_fault",
+                "fault": "wickler_indexed_ready_timeout",
+                "label_no": 1,
+                "timeout_ms": 30000,
+            }
+        )
+
+        self.assertEqual("wickler_ready_already_seen", result["result"]["ignored"])
+        events = runtime._recent_events(limit=3)
+        self.assertEqual("production_fault_ignored", events[0]["event_type"])
 
     def test_production_param_sync_includes_simulation_values_only_when_bypass_active(self):
         runtime = self.build_runtime()
@@ -706,7 +759,7 @@ class MachineRuntimeTests(unittest.TestCase):
         runtime = self.build_runtime()
         calls: list[str] = []
 
-        def fake_esp(command, read_timeout_s=None):
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
             calls.append(command)
             if command == "MOTOR 3 SET_POSITION_MM=0.000":
                 return "ACK_SET_POSITION_MM"
@@ -2996,9 +3049,10 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         runtime._production_esp_retry.assert_called_once_with(
             "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1",
-            read_timeout_s=5.0,
-            attempts=3,
-            settle_s=0.25,
+            read_timeout_s=8.0,
+            attempts=5,
+            settle_s=0.2,
+            priority=True,
         )
 
     def test_first_print_position_duplicate_does_not_reprepare_wicklers(self):

@@ -239,6 +239,15 @@ PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0075",
     "MAP0076",
 )
+PRODUCTION_ESP_START_READBACK_KEYS = (
+    "MAP0016",
+    "MAP0018",
+    "MAP0019",
+    "MAP0004",
+    "MAP0006",
+    "MAP0020",
+    "MAP0021",
+)
 WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
 WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
@@ -1569,9 +1578,10 @@ class MachineRuntime:
                 try:
                     response = self._production_esp_retry(
                         f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
-                        read_timeout_s=5.0,
-                        attempts=3,
-                        settle_s=0.25,
+                        read_timeout_s=8.0,
+                        attempts=5,
+                        settle_s=0.2,
+                        priority=True,
                     )
                     esp_ready = {"ok": True, "response": response}
                     self._remember_first_print_wickler_ready_sent(
@@ -1712,6 +1722,16 @@ class MachineRuntime:
 
     def _handle_production_fault(self, payload: dict[str, Any]) -> dict[str, Any]:
         fault = str(payload.get("fault") or "").strip() or "unknown"
+        if fault == "wickler_indexed_ready_timeout" and self._wickler_indexed_ready_seen_recently(payload):
+            label_no = _safe_int(payload.get("label_no"), 0)
+            message = (
+                "Veralteter Wickler-Ready-Timeout ignoriert: "
+                f"Label {label_no}, Ready wurde bereits verarbeitet"
+            )
+            ignored_payload = dict(payload or {})
+            ignored_payload["ignored"] = "wickler_ready_already_seen"
+            self._record_event("production_fault_ignored", "info", message, ignored_payload)
+            return {"fault": fault, "ignored": "wickler_ready_already_seen", "message": message}
         if fault == "label_edge_timeout":
             acquire = _safe_float(payload.get("label_acquire_mm"), 0.0)
             limit = _safe_float(payload.get("label_acquire_limit_mm"), 0.0)
@@ -1727,6 +1747,44 @@ class MachineRuntime:
             message = f"Produktionsfehler: {fault}"
         self._record_event("production_fault", "warning", message, dict(payload or {}))
         return {"fault": fault, "message": message}
+
+    def _wickler_indexed_ready_seen_recently(self, payload: dict[str, Any] | None) -> bool:
+        label_no = _safe_int((payload or {}).get("label_no"), 0)
+        if label_no <= 0:
+            return False
+        cutoff = now_ts() - 20.0
+        try:
+            with self.db._conn() as c:
+                rows = c.execute(
+                    """SELECT ts,payload_json
+                         FROM machine_events
+                        WHERE event_type='production_wickler_indexed_ready' AND ts>=?
+                        ORDER BY id DESC LIMIT 8""",
+                    (cutoff,),
+                ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            try:
+                previous = json.loads(row[1] or "{}")
+            except Exception:
+                previous = {}
+            if _safe_int(previous.get("label_no"), 0) == label_no:
+                return True
+
+        state_info = dict(self._state_row().get("info") or {})
+        production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        for key in ("first_print_wickler_ready", "first_print_wickler_ready_attempt"):
+            item = production_info.get(key)
+            if not isinstance(item, dict):
+                continue
+            if _safe_int(item.get("label_no"), 0) != label_no:
+                continue
+            if _safe_float(item.get("ts"), 0.0) < cutoff:
+                continue
+            if bool(item.get("wickler_takt_ok")):
+                return True
+        return False
 
     def _handle_registration_diagnostic_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         diag = dict((payload or {}).get("diag") or {})
@@ -2788,7 +2846,7 @@ class MachineRuntime:
             "wickler_standby_percent": PRODUCTION_WICKLER_STANDBY_PERCENT,
         }
 
-    def _production_esp(self, line: str, *, read_timeout_s: float | None = None) -> str:
+    def _production_esp(self, line: str, *, read_timeout_s: float | None = None, priority: bool = False) -> str:
         command = str(line or "").strip()
         if bool(getattr(self.cfg, "esp_simulation", False)):
             response = f"SIM_{command}"
@@ -2802,6 +2860,7 @@ class MachineRuntime:
         response = client.exchange_line(
             command,
             read_timeout_s=read_timeout_s or self.cfg.get_float("esp_command_timeout_s", 8.0),
+            priority=priority,
         )
         self.logs.log("esp-plc", "info", f"production motion: {command} -> {response}")
         if str(response or "").strip().upper().startswith("NAK"):
@@ -2815,12 +2874,13 @@ class MachineRuntime:
         read_timeout_s: float | None = None,
         attempts: int = 2,
         settle_s: float = 0.2,
+        priority: bool = False,
     ) -> str:
         command = str(line or "").strip()
         errors: list[str] = []
         for attempt in range(1, max(1, int(attempts)) + 1):
             try:
-                return self._production_esp(command, read_timeout_s=read_timeout_s)
+                return self._production_esp(command, read_timeout_s=read_timeout_s, priority=priority)
             except Exception as exc:
                 errors.append(repr(exc))
                 if attempt >= max(1, int(attempts)):
@@ -2838,7 +2898,7 @@ class MachineRuntime:
         try:
             for attempt in range(1, 6):
                 try:
-                    response = self._production_esp("PROCESS PRODUCTION STATUS?", read_timeout_s=5.0)
+                    response = self._production_esp("PROCESS PRODUCTION STATUS?", read_timeout_s=5.0, priority=True)
                     text = str(response or "").strip()
                     payload = json.loads(text.removeprefix("JSON ").strip())
                     if bool(payload.get("running")):
@@ -2863,6 +2923,7 @@ class MachineRuntime:
                 read_timeout_s=5.0 if required else 3.0,
                 attempts=4 if required else 3,
                 settle_s=0.35,
+                priority=required,
             )
             return True
         except Exception as exc:
@@ -2903,6 +2964,32 @@ class MachineRuntime:
                 return {str(key): str(value) for key, value in candidate.items()}
         return {}
 
+    @staticmethod
+    def _normalize_esp_param_value(value: Any) -> str:
+        text = str(value if value is not None else "").strip()
+        if re.fullmatch(r"[+-]?\d+", text):
+            return str(int(text, 10))
+        if re.fullmatch(r"[+-]?\d+\.0+", text):
+            return str(int(float(text)))
+        return text
+
+    @staticmethod
+    def _parse_esp_param_readback(key: str, response: str) -> str:
+        text = str(response or "").strip()
+        if text.upper().startswith("JSON "):
+            try:
+                payload = json.loads(text.removeprefix("JSON ").strip())
+            except Exception as exc:
+                raise RuntimeError(f"{key} readback JSON invalid: {text[:160]!r}") from exc
+            for candidate in (key, key.lower(), "value"):
+                if candidate in payload:
+                    return str(payload.get(candidate))
+            raise RuntimeError(f"{key} readback JSON missing value: {text[:160]!r}")
+        prefix = f"{key}="
+        if text.upper().startswith(prefix.upper()):
+            return text.split("=", 1)[1].strip()
+        raise RuntimeError(f"{key} readback unexpected response: {text[:160]!r}")
+
     def _sync_production_params_to_esp(
         self,
         param_map: dict[str, str],
@@ -2913,15 +3000,68 @@ class MachineRuntime:
         previous = {str(key): str(value) for key, value in (previous_values or {}).items()}
         synced: list[str] = []
         skipped: list[str] = []
+        forced: list[str] = []
+        readback: dict[str, str] = {}
+        readback_errors: dict[str, str] = {}
+        required = tuple(key for key in PRODUCTION_ESP_START_READBACK_KEYS if key in values)
         for key, value in values.items():
-            if previous.get(key) == value:
+            force = key in PRODUCTION_ESP_START_READBACK_KEYS
+            if force:
+                forced.append(key)
+            if not force and previous.get(key) == value:
                 skipped.append(key)
                 continue
-            self._production_esp_retry(f"SYNC {key}={value}", read_timeout_s=5.0, attempts=2)
+            self._production_esp_retry(f"SYNC {key}={value}", read_timeout_s=5.0, attempts=3, priority=force)
             synced.append(key)
+        if not bool(getattr(self.cfg, "esp_simulation", False)):
+            mismatches: list[dict[str, str]] = []
+            for key in required:
+                expected = self._normalize_esp_param_value(values.get(key, ""))
+                actual = ""
+                for attempt in range(1, 3):
+                    if attempt > 1:
+                        self._production_esp_retry(
+                            f"SYNC {key}={values[key]}",
+                            read_timeout_s=5.0,
+                            attempts=3,
+                            settle_s=0.25,
+                            priority=True,
+                        )
+                    try:
+                        response = self._production_esp_retry(
+                            f"{key}=?",
+                            read_timeout_s=5.0,
+                            attempts=3,
+                            settle_s=0.25,
+                            priority=True,
+                        )
+                        actual = self._normalize_esp_param_value(self._parse_esp_param_readback(key, response))
+                        readback[key] = actual
+                        if actual == expected:
+                            readback_errors.pop(key, None)
+                            break
+                    except Exception as exc:
+                        readback_errors[key] = repr(exc)
+                        actual = ""
+                if actual != expected:
+                    mismatches.append(
+                        {
+                            "key": key,
+                            "expected": expected,
+                            "actual": actual or readback_errors.get(key, ""),
+                        }
+                    )
+            if mismatches:
+                details = ", ".join(
+                    f"{item['key']} expected {item['expected']} got {item['actual']}" for item in mismatches
+                )
+                raise RuntimeError(f"ESP production parameter readback mismatch before START: {details}")
         return {
             "synced": synced,
             "skipped": skipped,
+            "forced": forced,
+            "readback": readback,
+            "readback_errors": readback_errors,
             "values": values,
         }
 
@@ -3597,13 +3737,13 @@ class MachineRuntime:
                 param_map,
                 previous_values=previous_sync_values,
             )
-            self._production_esp_retry("PROCESS WICKLER CANCEL", read_timeout_s=2.0, attempts=2)
-            self._production_esp_retry("PROCESS PROFILE STOP", read_timeout_s=2.0, attempts=2)
-            self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2)
-            self._production_esp_retry("PROCESS PRODUCTION STOP", read_timeout_s=2.0, attempts=2)
-            self._production_esp_retry("PROCESS PRODUCTION_RESET", read_timeout_s=5.0, attempts=2)
-            self._production_esp_retry("MOTOR 3 RESET_ALARM", read_timeout_s=5.0, attempts=2)
-            self._production_esp_retry("MOTOR 3 RECOVER_ETO", read_timeout_s=5.0, attempts=2)
+            self._production_esp_retry("PROCESS WICKLER CANCEL", read_timeout_s=2.0, attempts=2, priority=True)
+            self._production_esp_retry("PROCESS PROFILE STOP", read_timeout_s=2.0, attempts=2, priority=True)
+            self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2, priority=True)
+            self._production_esp_retry("PROCESS PRODUCTION STOP", read_timeout_s=2.0, attempts=2, priority=True)
+            self._production_esp_retry("PROCESS PRODUCTION_RESET", read_timeout_s=5.0, attempts=2, priority=True)
+            self._production_esp_retry("MOTOR 3 RESET_ALARM", read_timeout_s=5.0, attempts=2, priority=True)
+            self._production_esp_retry("MOTOR 3 RECOVER_ETO", read_timeout_s=5.0, attempts=2, priority=True)
             motor3_zero = self._zero_motor3_for_production_start()
             self._production_esp_retry(
                 "MOTOR 3 SET "
@@ -3612,6 +3752,7 @@ class MachineRuntime:
                 f"decel_mm_s2={float(plan['ramp_mm_s2']):.3f}",
                 read_timeout_s=5.0,
                 attempts=2,
+                priority=True,
             )
             wicklers = self._prepare_production_wicklers_continuous(plan)
             # The ESP command endpoint is single-client and the production start
@@ -3619,7 +3760,13 @@ class MachineRuntime:
             # HTTP writes and the ESP parameter sync a short quiet window, then
             # verify the command channel once before the critical START.
             time.sleep(0.25)
-            self._production_esp_retry("PROCESS PRODUCTION STATUS?", read_timeout_s=5.0, attempts=3, settle_s=0.35)
+            self._production_esp_retry(
+                "PROCESS PRODUCTION STATUS?",
+                read_timeout_s=5.0,
+                attempts=3,
+                settle_s=0.35,
+                priority=True,
+            )
             setup_info = dict(state_info.get("setup") or {})
             setup_result = setup_info.get("last_result") if isinstance(setup_info.get("last_result"), dict) else {}
             quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
@@ -3631,7 +3778,7 @@ class MachineRuntime:
             if quick_band_break_bypass:
                 start_command += " BAND_BREAK_BYPASS=1"
             try:
-                response = self._production_esp(start_command, read_timeout_s=15.0)
+                response = self._production_esp(start_command, read_timeout_s=15.0, priority=True)
             except Exception as exc:
                 running, detail = self._production_status_after_start_error(start_command, exc)
                 if not running:
@@ -3688,7 +3835,7 @@ class MachineRuntime:
 
     def _zero_motor3_for_production_start(self) -> dict[str, Any]:
         command = "MOTOR 3 SET_POSITION_MM=0.000"
-        response = self._production_esp_retry(command, read_timeout_s=5.0, attempts=2)
+        response = self._production_esp_retry(command, read_timeout_s=5.0, attempts=2, priority=True)
         result: dict[str, Any] = {"ok": True, "command": command, "response": response}
         if bool(getattr(self.cfg, "esp_simulation", False)):
             result["simulated"] = True
@@ -3704,6 +3851,7 @@ class MachineRuntime:
                         status_command,
                         read_timeout_s=5.0,
                         attempts=1,
+                        priority=True,
                     )
                     text = str(status_response or "").strip()
                     if not text.startswith("JSON "):
