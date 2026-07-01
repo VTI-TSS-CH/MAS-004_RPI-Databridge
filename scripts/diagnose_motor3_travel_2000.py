@@ -12,6 +12,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from esp_broker_api import exchange_via_databridge, load_settings
+
 
 ESP_HOST = "192.168.2.101"
 ESP_PORT = 3010
@@ -41,10 +45,18 @@ NUMERIC_KEYS = {
 }
 BOOL_KEYS = {"ok", "running", "completed", "labels_truncated"}
 STRING_KEYS = {"last_error"}
+_CFG_CACHE = None
 
 
 def _print(message: str) -> None:
     print(message, flush=True)
+
+
+def _settings():
+    global _CFG_CACHE
+    if _CFG_CACHE is None:
+        _CFG_CACHE = load_settings()
+    return _CFG_CACHE
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -152,19 +164,15 @@ def planned_motion_duration_s(distance_mm: float, speed_mm_s: float, ramp_mm_s2:
 
 
 def esp(command: str, *, timeout_s: float = 3.0, idle_timeout_s: float = 0.35) -> str:
-    with socket.create_connection((ESP_HOST, ESP_PORT), timeout=timeout_s) as sock:
-        sock.sendall((command.strip() + "\n").encode("utf-8"))
-        sock.settimeout(idle_timeout_s)
-        chunks: list[bytes] = []
-        while True:
-            try:
-                part = sock.recv(8192)
-            except socket.timeout:
-                break
-            if not part:
-                break
-            chunks.append(part)
-    return b"".join(chunks).decode("utf-8", errors="replace").strip()
+    reply, _payload = exchange_via_databridge(
+        _settings(),
+        command,
+        read_timeout_s=max(float(timeout_s or 3.0), float(idle_timeout_s or 0.35)),
+        read_limit=65536,
+        priority=command.strip().upper().startswith(("MOTOR 3 ", "PROCESS TRAVEL_DIAG ")),
+        request_timeout_s=max(5.0, float(timeout_s or 3.0) + 2.0),
+    )
+    return reply.strip()
 
 
 def esp_json(command: str, *, timeout_s: float = 3.0, idle_timeout_s: float = 0.35) -> dict[str, Any]:

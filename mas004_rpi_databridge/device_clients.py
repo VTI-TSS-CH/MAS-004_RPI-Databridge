@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import queue
 import os
 import re
 import socket
@@ -117,6 +118,7 @@ class _EndpointState:
         self.fail_count = 0
         self.next_allowed_at = 0.0
         self.sock: Optional[socket.socket] = None
+        self.broker: Optional["_EspCommandBroker"] = None
         self.exchange_count = 0
         self.connect_count = 0
         self.reconnect_count = 0
@@ -146,6 +148,11 @@ _ESP_COMMAND_IDLE_REUSE_S = 0.75
 _ESP_COMMAND_MAX_ATTEMPTS = 5
 _ESP_COMMAND_CLOSE_AFTER_RESPONSE = True
 _ESP_COMMAND_MIN_SPACING_S = 0.08
+_ESP_COMMAND_BROKER_ENABLED = True
+_ESP_COMMAND_BROKER_QUEUE_MAX = 256
+_ESP_COMMAND_BROKER_KEEPALIVE_S = 5.0
+_ESP_COMMAND_BROKER_MODE_COMMAND = "TCP BROKER=1"
+_ESP_COMMAND_BROKER_SETUP_TIMEOUT_S = 1.0
 _ULTIMATE_ENDPOINTS_GUARD = threading.Lock()
 _ULTIMATE_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
 _ZBC_ENDPOINTS_GUARD = threading.Lock()
@@ -175,6 +182,57 @@ def _esp_lock_path(host: str, port: int) -> str:
     safe_host = re.sub(r"[^A-Za-z0-9_.-]+", "_", (host or "esp").strip()) or "esp"
     base_dir = "/run/lock" if os.path.isdir("/run/lock") else "/tmp"
     return os.path.join(base_dir, f"mas004-esp-plc-{safe_host}-{int(port or 0)}.lock")
+
+
+class _EspInterprocessLockHandle:
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+        self.fd: int | None = None
+
+    def acquire(self, timeout_s: float) -> None:
+        if fcntl is None:
+            return
+        if self.fd is not None:
+            return
+        path = _esp_lock_path(self.host, self.port)
+        deadline = time.monotonic() + max(0.2, float(timeout_s or 0.2))
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+            try:
+                os.fchmod(fd, 0o666)
+            except Exception:
+                pass
+        except PermissionError:
+            fd = os.open(path, os.O_RDONLY)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.fd = fd
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                    raise TimeoutError(f"ESP command broker interprocess busy >{timeout_s:.1f}s")
+                time.sleep(0.05)
+
+    def release(self) -> None:
+        fd = self.fd
+        self.fd = None
+        if fd is None:
+            return
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+        try:
+            os.close(fd)
+        except Exception:
+            pass
 
 
 @contextlib.contextmanager
@@ -214,6 +272,338 @@ def _esp_interprocess_lock(host: str, port: int, timeout_s: float):
                 os.close(fd)
             except Exception:
                 pass
+
+
+class _EspBrokerRequest:
+    def __init__(
+        self,
+        *,
+        line: str,
+        read_timeout_s: float,
+        read_limit: int,
+        deadline: float,
+        priority: int,
+    ) -> None:
+        self.line = str(line or "").strip()
+        self.read_timeout_s = float(read_timeout_s or 1.0)
+        self.read_limit = int(read_limit or 8192)
+        self.deadline = float(deadline)
+        self.priority = int(priority)
+        self.event = threading.Event()
+        self.response: str | None = None
+        self.exception: Exception | None = None
+        self.created_at = time.monotonic()
+
+    def complete(self, response: str) -> None:
+        self.response = response
+        self.event.set()
+
+    def fail(self, exc: Exception) -> None:
+        self.exception = exc
+        self.event.set()
+
+
+def _esp_command_priority(line: str, explicit_priority: bool) -> int:
+    text = str(line or "").strip().upper()
+    if explicit_priority:
+        return 0
+    if not text:
+        return 90
+    if any(token in text for token in (" STOP", " CANCEL", "RESET", "MOVE_VEL_MM_S=0")):
+        return 0
+    if text.startswith("PROCESS PRODUCTION") or text.startswith("PROCESS WICKLER") or text.startswith("PROCESS INDEXED"):
+        return 10
+    if text.startswith("PROCESS SETUP_MEASURE") or text.startswith("MOTOR 3 "):
+        return 15
+    if text.startswith("SYNC "):
+        return 30
+    if text in {"PING", "STATUS?", "INFO", "IP?"}:
+        return 70
+    if text.endswith("LIST?") or text.endswith("SNAPSHOT?") or text.endswith("VISUALIZATION?") or text.endswith("LOG?"):
+        return 80
+    return 50
+
+
+class _EspCommandBroker:
+    def __init__(self, host: str, port: int, timeout_s: float, state: _EndpointState) -> None:
+        self.host = (host or "").strip()
+        self.port = int(port or 0)
+        self.timeout_s = float(timeout_s or 1.0)
+        self.state = state
+        self._queue: "queue.PriorityQueue[tuple[int, int, _EspBrokerRequest]]" = queue.PriorityQueue(
+            maxsize=_ESP_COMMAND_BROKER_QUEUE_MAX
+        )
+        self._seq = 0
+        self._seq_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._file_lock = _EspInterprocessLockHandle(self.host, self.port)
+        self._broker_supported: bool | None = None
+        self._broker_confirmed_at = 0.0
+        self._last_keepalive_at = 0.0
+        self._active_line = ""
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"esp-command-broker-{self.host}:{self.port}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(
+        self,
+        line: str,
+        *,
+        read_timeout_s: float,
+        read_limit: int,
+        priority: int,
+        wait_timeout_s: float,
+    ) -> str:
+        self.start()
+        deadline = time.monotonic() + max(0.5, float(wait_timeout_s or 0.5))
+        req = _EspBrokerRequest(
+            line=line,
+            read_timeout_s=read_timeout_s,
+            read_limit=read_limit,
+            deadline=deadline,
+            priority=priority,
+        )
+        with self._seq_lock:
+            self._seq += 1
+            seq = self._seq
+        try:
+            self._queue.put((int(priority), seq, req), timeout=min(0.5, max(0.05, deadline - time.monotonic())))
+        except queue.Full as exc:
+            raise TimeoutError("ESP command broker queue full") from exc
+        remaining = max(0.05, deadline - time.monotonic())
+        if not req.event.wait(timeout=remaining):
+            req.fail(TimeoutError("ESP command broker request timed out"))
+            raise TimeoutError("ESP command broker request timed out")
+        if req.exception is not None:
+            raise req.exception
+        return str(req.response or "")
+
+    def close_socket(self) -> None:
+        with self.state.lock:
+            self.state.close_socket()
+            self._active_line = ""
+            self._file_lock.release()
+
+    def diagnostics(self) -> dict[str, object]:
+        thread = self._thread
+        with self.state.lock:
+            return {
+                "host": self.host,
+                "port": self.port,
+                "enabled": True,
+                "thread_alive": bool(thread and thread.is_alive()),
+                "connected": self.state.sock is not None,
+                "broker_supported": self._broker_supported,
+                "broker_confirmed_at": self._broker_confirmed_at,
+                "queue_depth": self._queue.qsize(),
+                "active_line": self._active_line,
+                "connect_count": self.state.connect_count,
+                "reconnect_count": self.state.reconnect_count,
+                "exchange_count": self.state.exchange_count,
+                "fail_count": self.state.fail_count,
+                "last_ok_at": self.state.last_ok_at,
+                "last_error": self.state.last_error,
+                "priority_until_at": self.state.priority_until_at,
+            }
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                _prio, _seq, req = self._queue.get(timeout=_ESP_COMMAND_BROKER_KEEPALIVE_S)
+            except queue.Empty:
+                self._keepalive()
+                continue
+            try:
+                if req.event.is_set():
+                    continue
+                if time.monotonic() >= req.deadline:
+                    req.fail(TimeoutError("ESP command broker request expired before send"))
+                    continue
+                self._active_line = req.line
+                reply = self._execute_with_retries(req)
+                req.complete(reply)
+            except Exception as exc:
+                req.fail(exc)
+            finally:
+                self._active_line = ""
+                self._queue.task_done()
+
+    def _execute_with_retries(self, req: _EspBrokerRequest) -> str:
+        last_error: Exception | None = None
+        for attempt in range(_ESP_COMMAND_MAX_ATTEMPTS):
+            if time.monotonic() >= req.deadline:
+                break
+            try:
+                reply = self._exchange_once(req.line, req.read_timeout_s, req.read_limit, req.deadline)
+                if reply.strip().upper() == "NAK_BUSY" and attempt < (_ESP_COMMAND_MAX_ATTEMPTS - 1):
+                    raise RuntimeError("ESP endpoint busy")
+                return reply
+            except Exception as exc:
+                last_error = exc
+                with self.state.lock:
+                    self.state.last_error = repr(exc)
+                    self.state.fail_count += 1
+                    self.state.next_allowed_at = time.monotonic() + min(
+                        0.8,
+                        0.15 * (2 ** min(self.state.fail_count, 3)),
+                    )
+                self.close_socket()
+                time.sleep(min(0.15, max(0.0, req.deadline - time.monotonic())))
+        if last_error is not None:
+            raise last_error
+        raise TimeoutError("ESP endpoint command deadline exceeded")
+
+    def _ensure_socket(self, deadline: float) -> socket.socket:
+        with self.state.lock:
+            if self.state.sock is not None:
+                return self.state.sock
+        lock_timeout_s = max(0.2, min(5.0, deadline - time.monotonic()))
+        self._file_lock.acquire(lock_timeout_s)
+        try:
+            created_socket = False
+            with self.state.lock:
+                if self.state.sock is None:
+                    sock = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
+                    _tune_command_socket(sock)
+                    self.state.sock = sock
+                    self.state.connect_count += 1
+                    created_socket = True
+                sock = self.state.sock
+            self._enable_broker_mode_if_needed(sock, deadline, force=created_socket)
+            with self.state.lock:
+                sock = self.state.sock
+                if sock is None:
+                    raise RuntimeError("ESP broker mode unsupported")
+                return sock
+        except Exception:
+            self.close_socket()
+            raise
+
+    def _enable_broker_mode_if_needed(self, sock: socket.socket, deadline: float, *, force: bool = False) -> None:
+        if self._broker_supported is False:
+            return
+        if self._broker_supported is True and not force:
+            return
+        timeout_s = max(0.2, min(_ESP_COMMAND_BROKER_SETUP_TIMEOUT_S, deadline - time.monotonic()))
+        try:
+            sock.settimeout(timeout_s)
+            sock.sendall((_ESP_COMMAND_BROKER_MODE_COMMAND + "\n").encode("utf-8"))
+            reply = _recv_line(sock, limit=512).strip()
+        except Exception:
+            if self._broker_supported is False:
+                pass
+            elif self._broker_supported is True:
+                # Broker support is a firmware property; a reconnect timeout
+                # must not permanently downgrade a previously confirmed ESP.
+                self._broker_supported = True
+            else:
+                self._broker_supported = None
+            raise
+        upper = reply.upper()
+        if upper.startswith("ACK_TCP_BROKER") or upper.startswith("ACK_TCP_PERSISTENT"):
+            self._broker_supported = True
+            self._broker_confirmed_at = time.monotonic()
+            with self.state.lock:
+                self.state.exchange_count += 1
+                self.state.last_ok_at = time.monotonic()
+                self.state.last_error = ""
+            return
+        self._broker_supported = False
+        self.close_socket()
+
+    def _exchange_once(self, line: str, read_timeout_s: float, read_limit: int, deadline: float) -> str:
+        now = time.monotonic()
+        with self.state.lock:
+            next_allowed_at = self.state.next_allowed_at
+            last_ok_at = self.state.last_ok_at
+        if next_allowed_at > now:
+            time.sleep(min(next_allowed_at - now, max(0.0, deadline - now)))
+        quiet_for_s = time.monotonic() - last_ok_at if last_ok_at > 0.0 else 999.0
+        if quiet_for_s < _ESP_COMMAND_MIN_SPACING_S:
+            time.sleep(min(_ESP_COMMAND_MIN_SPACING_S - quiet_for_s, max(0.0, deadline - time.monotonic())))
+        sock = self._ensure_socket(deadline)
+        sock.settimeout(float(read_timeout_s or self.timeout_s))
+        sock.sendall((str(line or "").strip() + "\n").encode("utf-8"))
+        reply = _recv_line(sock, limit=read_limit).strip()
+        if not reply:
+            raise RuntimeError("ESP endpoint empty reply")
+        with self.state.lock:
+            self.state.fail_count = 0
+            self.state.next_allowed_at = 0.0
+            self.state.exchange_count += 1
+            self.state.last_ok_at = time.monotonic()
+            self.state.last_error = ""
+        if self._broker_supported is not True and _ESP_COMMAND_CLOSE_AFTER_RESPONSE:
+            self.close_socket()
+        return reply
+
+    def _keepalive(self) -> None:
+        if self._broker_supported is not True:
+            return
+        with self.state.lock:
+            connected = self.state.sock is not None
+            last_ok_at = self.state.last_ok_at
+        if not connected:
+            return
+        if (time.monotonic() - max(last_ok_at, self._last_keepalive_at)) < _ESP_COMMAND_BROKER_KEEPALIVE_S:
+            return
+        deadline = time.monotonic() + max(2.0, self.timeout_s + 1.0)
+        req = _EspBrokerRequest(
+            line="PING",
+            read_timeout_s=max(1.0, self.timeout_s),
+            read_limit=512,
+            deadline=deadline,
+            priority=90,
+        )
+        try:
+            self._exchange_once(req.line, req.read_timeout_s, req.read_limit, req.deadline)
+            self._last_keepalive_at = time.monotonic()
+        except Exception as exc:
+            with self.state.lock:
+                self.state.last_error = repr(exc)
+            self.close_socket()
+
+
+def _esp_command_broker(host: str, port: int, timeout_s: float) -> _EspCommandBroker:
+    state = _esp_endpoint_state(host, port)
+    with state.lock:
+        broker = state.broker
+        if broker is None:
+            broker = _EspCommandBroker(host, port, timeout_s, state)
+            state.broker = broker
+        else:
+            broker.timeout_s = float(timeout_s or broker.timeout_s)
+        broker.start()
+        return broker
+
+
+def start_esp_command_broker(host: str, port: int, timeout_s: float = 1.0) -> dict[str, object]:
+    if not (host or "").strip() or int(port or 0) <= 0:
+        return {"enabled": False, "error": "endpoint missing"}
+    broker = _esp_command_broker(host, int(port), timeout_s)
+    try:
+        reply = broker.submit(
+            "PING",
+            read_timeout_s=max(0.5, float(timeout_s or 1.0)),
+            read_limit=512,
+            priority=_esp_command_priority("PING", False),
+            wait_timeout_s=max(3.0, float(timeout_s or 1.0) + 2.0),
+        )
+        diag = broker.diagnostics()
+        diag["warmup_reply"] = reply
+        return diag
+    except Exception as exc:
+        diag = broker.diagnostics()
+        diag["warmup_error"] = repr(exc)
+        return diag
 
 
 def _ultimate_endpoint_state(host: str, port: int) -> _EndpointState:
@@ -266,8 +656,48 @@ class EspPlcClient:
                 "/ui/machine-setup/motors erlaubt"
             )
 
-        payload = ((line or "").strip() + "\n").encode("utf-8")
         read_timeout_s = float(read_timeout_s or self.timeout_s)
+        if _ESP_COMMAND_BROKER_ENABLED:
+            state = _esp_endpoint_state(self.host, self.port)
+            if priority:
+                state.priority_until_at = max(state.priority_until_at, time.monotonic() + 2.0)
+            else:
+                quiet_until = state.priority_until_at
+                if quiet_until > time.monotonic():
+                    time.sleep(min(quiet_until - time.monotonic(), 0.5))
+            command_window_s = max(
+                3.0,
+                min(self.timeout_s + (read_timeout_s * _ESP_COMMAND_MAX_ATTEMPTS) + 2.0, 18.0),
+            )
+            wait_timeout_s = max(command_window_s, min(self.timeout_s + read_timeout_s + 20.0, 60.0))
+            broker = _esp_command_broker(self.host, self.port, self.timeout_s)
+            reply = broker.submit(
+                line,
+                read_timeout_s=read_timeout_s,
+                read_limit=read_limit,
+                priority=_esp_command_priority(line, priority),
+                wait_timeout_s=wait_timeout_s,
+            )
+            if priority:
+                state.priority_until_at = max(state.priority_until_at, time.monotonic() + 0.4)
+            return reply
+
+        return self._exchange_line_direct(
+            line,
+            read_timeout_s=read_timeout_s,
+            read_limit=read_limit,
+            priority=priority,
+        )
+
+    def _exchange_line_direct(
+        self,
+        line: str,
+        *,
+        read_timeout_s: float,
+        read_limit: int,
+        priority: bool,
+    ) -> str:
+        payload = ((line or "").strip() + "\n").encode("utf-8")
         state = _esp_endpoint_state(self.host, self.port)
         if priority:
             state.priority_until_at = max(state.priority_until_at, time.monotonic() + 2.0)
@@ -353,15 +783,23 @@ class EspPlcClient:
 
     def close(self) -> None:
         state = _esp_endpoint_state(self.host, self.port)
+        broker = state.broker
+        if broker is not None:
+            broker.close_socket()
+            return
         with state.lock:
             state.close_socket()
 
     def diagnostics(self) -> dict[str, object]:
         state = _esp_endpoint_state(self.host, self.port)
+        broker = state.broker
+        if broker is not None:
+            return broker.diagnostics()
         with state.lock:
             return {
                 "host": self.host,
                 "port": self.port,
+                "enabled": False,
                 "connected": state.sock is not None,
                 "connect_count": state.connect_count,
                 "reconnect_count": state.reconnect_count,

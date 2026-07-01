@@ -57,7 +57,8 @@
   - ESP32/W5500 devices that cannot speak HTTPS post machine events to `http://10.141.94.213:8081/api/inbox`.
   - The `8081` listener is intentionally limited to `/api/inbox` and `/health` and still requires `X-Shared-Secret`.
 - ESP ownership note:
-  - The RPI-Databridge is the only service that should actively use `192.168.2.101:3010` on the production/commissioning Raspi.
+  - The RPI-Databridge ESP command broker is the only service that should actively use `192.168.2.101:3010` on the production/commissioning Raspi.
+  - The broker keeps one persistent `TCP BROKER=1` connection open; WebUI, runtime and scripts should submit ESP commands through the Databridge API instead of opening their own TCP client.
   - Keep the legacy standalone `mas004-esp32-plc-bridge.service` disabled unless the architecture is deliberately changed back; otherwise it can compete for the ESP single-client W5500 command socket.
   - Check with: `ssh pi@10.141.94.213 "systemctl is-active mas004-esp32-plc-bridge.service; systemctl is-enabled mas004-esp32-plc-bridge.service"`.
 - Browser certificate note:
@@ -130,9 +131,9 @@
     - `MOTOR 3 STATUS?`
     - `MOTOR 3 REFRESH`
 - ESP eth1 communication hygiene:
-  - `192.168.2.101:3010` is treated as a single-client command socket; do not run additional polling tools continuously in parallel with the Databridge.
-  - Raspi runtime serializes ESP commands internally, but external manual tests should still be short and deliberate.
-  - Normal quick checks from the Raspi are `PING`, `INFO`, `STATUS?`, `MOTOR POLL?` and one targeted command such as `MOTOR 3 STATUS?`.
+  - `192.168.2.101:3010` is treated as the broker-owned single-client command socket; do not run additional polling tools directly against it in parallel with the Databridge.
+  - Raspi runtime serializes ESP commands internally through a priority queue. External manual tests should use `POST /api/esp/command` or `scripts/esp_eth1_stress.py --phase api-parallel`.
+  - Normal quick checks through the broker are `PING`, `INFO`, `STATUS?`, `MOTOR POLL?` and one targeted command such as `MOTOR 3 STATUS?`.
   - If the ESP is slow or temporarily unreachable, let the Databridge cooldown expire instead of starting rapid repeated commands.
   - ESP timeout defaults are intentionally shorter than generic HTTP: connect `1.5 s`, read `2.0 s`, command `8.0 s`.
   - When diagnosing process/Wickler tests, leave diagnostics low: no continuous `MOTOR LIST?`, no background `MOTOR POLL=1`, no parallel shell stress loops.
@@ -415,13 +416,13 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - Do not reintroduce fixed column numbers in workbook-sync scripts; use header lookup so `KI-Anweisungen` remains correct if Microtom adds more metadata columns.
   - Do not promote transient live statuses (`MAS`/`MAE`/`MAW` state values) into workbook defaults unless explicitly requested; those belong in `param_values`.
 - For ESP32-PLC eth1 reliability:
-  - all production traffic to `192.168.2.101:3010` must use `EspPlcClient`
-  - do not add ad-hoc raw socket loops in runtime code; they bypass endpoint locking, pacing and retry protection
+  - all production traffic to `192.168.2.101:3010` must use the Databridge ESP command broker (`EspPlcClient` inside the service, `/api/esp/command` for separate scripts)
+  - do not add ad-hoc raw socket loops in runtime code; they bypass broker priority, pacing, reconnect and retry protection
   - safe non-invasive stress test:
     - `cd /opt/MAS-004_RPI-Databridge`
-    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase locked-serial --iterations 1500`
-    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase locked-parallel --workers 8 --per-worker 200`
-    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase busy-probe --line-timeout-wait-s 2.2`
+    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase api-serial --iterations 1500`
+    - `./.venv/bin/python scripts/esp_eth1_stress.py --phase api-parallel --workers 8 --per-worker 200`
+    - run `--phase busy-probe` only with production stopped, because it intentionally opens a raw partial TCP line
   - expected result on the current production/test stand:
     - serial and parallel phases have only `ok` classes
     - busy probe returns `NAK_Busy` for a held partial line and recovers to `PONG`

@@ -18,6 +18,8 @@ try:
 except Exception:
     from mas004_rpi_databridge.device_clients import EspPlcClient
 
+from esp_broker_api import exchange_via_databridge, load_settings
+
 
 SAFE_COMMANDS = [
     ("PING", "PONG"),
@@ -91,6 +93,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
 def run_one(
     *,
     mode: str,
+    cfg: Any | None,
     host: str,
     port: int,
     connect_timeout: float,
@@ -101,7 +104,17 @@ def run_one(
     command, expected = command_for_index(index)
     started = time.perf_counter()
     try:
-        if mode == "locked":
+        if mode == "api":
+            if cfg is None:
+                cfg = load_settings()
+            reply, _payload = exchange_via_databridge(
+                cfg,
+                command,
+                read_timeout_s=read_timeout,
+                read_limit=65536,
+                request_timeout_s=max(3.0, read_timeout + 2.0),
+            )
+        elif mode == "locked":
             client = EspPlcClient(host, port, timeout_s=connect_timeout)
             reply = client.exchange_line(command, read_timeout_s=read_timeout, read_limit=65536)
         else:
@@ -127,6 +140,7 @@ def run_serial(args: argparse.Namespace, mode: str) -> dict[str, Any]:
     results = [
         run_one(
             mode=mode,
+            cfg=getattr(args, "cfg", None),
             host=args.host,
             port=args.port,
             connect_timeout=args.connect_timeout,
@@ -155,6 +169,7 @@ def run_parallel(args: argparse.Namespace, mode: str) -> dict[str, Any]:
             local.append(
                 run_one(
                     mode=mode,
+                    cfg=getattr(args, "cfg", None),
                     host=args.host,
                     port=args.port,
                     connect_timeout=args.connect_timeout,
@@ -214,7 +229,13 @@ def run_busy_probe(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Non-invasive eth1 stress test for Raspi <-> ESP32-PLC TCP.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Non-invasive ESP command stress test. The default phase uses the local "
+            "Databridge API/Broker; raw phases intentionally bypass production arbitration."
+        )
+    )
+    parser.add_argument("--config", default="/etc/mas004_rpi_databridge/config.json")
     parser.add_argument("--host", default="192.168.2.101")
     parser.add_argument("--port", type=int, default=3010)
     parser.add_argument("--iterations", type=int, default=1000)
@@ -227,12 +248,26 @@ def main() -> int:
     parser.add_argument("--allow-busy", action="store_true")
     parser.add_argument(
         "--phase",
-        choices=["raw-serial", "locked-serial", "locked-parallel", "raw-parallel", "busy-probe", "all"],
-        default="all",
+        choices=[
+            "api-serial",
+            "api-parallel",
+            "raw-serial",
+            "locked-serial",
+            "locked-parallel",
+            "raw-parallel",
+            "busy-probe",
+            "all",
+        ],
+        default="api-parallel",
     )
     args = parser.parse_args()
+    args.cfg = load_settings(args.config)
 
     phases = []
+    if args.phase in ("api-serial", "all"):
+        phases.append(run_serial(args, "api"))
+    if args.phase in ("api-parallel", "all"):
+        phases.append(run_parallel(args, "api"))
     if args.phase in ("raw-serial", "all"):
         phases.append(run_serial(args, "raw"))
     if args.phase in ("locked-serial", "all"):

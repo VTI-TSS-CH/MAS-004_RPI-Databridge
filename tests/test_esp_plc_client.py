@@ -6,9 +6,10 @@ from mas004_rpi_databridge.device_clients import EspPlcClient, motor_setup_write
 
 
 class _LineServer:
-    def __init__(self, response: str, *, keep_open: bool = True):
+    def __init__(self, response: str, *, keep_open: bool = True, support_broker: bool = True):
         self.response = response.encode("utf-8")
         self.keep_open = bool(keep_open)
+        self.support_broker = bool(support_broker)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(8)
@@ -16,6 +17,7 @@ class _LineServer:
         self._closed = threading.Event()
         self._lock = threading.Lock()
         self.connection_count = 0
+        self.received_lines: list[str] = []
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
@@ -47,8 +49,19 @@ class _LineServer:
                             break
                         data += chunk
                     if b"\n" in data:
-                        conn.sendall(self.response)
-                        if not self.keep_open:
+                        line = data.split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+                        with self._lock:
+                            self.received_lines.append(line)
+                        upper = line.upper()
+                        is_broker_handshake = upper in {"TCP BROKER=1", "TCP PERSISTENT=1", "BROKER=1"}
+                        if is_broker_handshake:
+                            if self.support_broker:
+                                conn.sendall(b"ACK_TCP_BROKER=1\n")
+                            else:
+                                conn.sendall(b"NAK_Syntax\n")
+                        else:
+                            conn.sendall(self.response)
+                        if not self.keep_open and not (is_broker_handshake and self.support_broker):
                             keep_client_open = False
 
 
@@ -63,25 +76,46 @@ class EspPlcClientTests(unittest.TestCase):
         finally:
             server.close()
 
-    def test_exchange_line_closes_answered_connection(self):
+    def test_exchange_line_reuses_broker_connection(self):
         server = _LineServer("PONG\n")
         try:
             client = EspPlcClient(server.host, server.port, timeout_s=1.0)
             self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
             self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
-            self.assertEqual(2, server.connection_count)
-            self.assertFalse(client.diagnostics()["connected"])
+            self.assertEqual(1, server.connection_count)
+            self.assertEqual(["TCP BROKER=1", "PING", "PING"], server.received_lines)
+            diag = client.diagnostics()
+            self.assertTrue(diag["connected"])
+            self.assertTrue(diag["broker_supported"])
         finally:
             client.close()
             server.close()
 
-    def test_exchange_line_reconnects_when_peer_closes(self):
+    def test_exchange_line_falls_back_when_broker_mode_is_unsupported(self):
+        server = _LineServer("PONG\n", support_broker=False)
+        client = EspPlcClient(server.host, server.port, timeout_s=1.0)
+        try:
+            self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
+            self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
+            self.assertGreaterEqual(server.connection_count, 3)
+            diag = client.diagnostics()
+            self.assertFalse(diag["broker_supported"])
+            self.assertFalse(diag["connected"])
+        finally:
+            client.close()
+            server.close()
+
+    def test_exchange_line_reenables_broker_mode_after_reconnect(self):
         server = _LineServer("PONG\n", keep_open=False)
         client = EspPlcClient(server.host, server.port, timeout_s=1.0)
         try:
             self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
             self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=1.0))
             self.assertGreaterEqual(server.connection_count, 2)
+            self.assertEqual(
+                ["TCP BROKER=1", "PING", "TCP BROKER=1", "PING"],
+                server.received_lines,
+            )
         finally:
             client.close()
             server.close()

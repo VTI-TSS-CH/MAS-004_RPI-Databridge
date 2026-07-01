@@ -1,5 +1,12 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-07-01 (ESP command broker)
+- Der `EspPlcClient` laeuft wieder zentral ueber einen pro Endpoint eindeutigen ESP-Command-Broker im Databridge-Prozess. Der Broker haelt eine persistente Verbindung offen, serialisiert alle Kommandos ueber eine priorisierte Queue und macht Reconnect/Retry/Keepalive an einer Stelle.
+- WebUI, MachineRuntime, Setup-Orchestrator, IO/Motor-Diagnose und separate Wartungsscripts gehen ueber denselben Brokerpfad. Separate Scripts koennen `POST /api/esp/command` beziehungsweise `scripts/esp_broker_api.py` nutzen, statt einen eigenen ESP-TCP-Client zu starten.
+- Der Broker sendet beim Verbindungsaufbau `TCP BROKER=1`. Aeltere ESP-Firmware ohne ACK faellt kontrolliert auf Kurzverbindungen zurueck; ein einzelner Timeout downgrades den Broker nicht dauerhaft.
+- `/api/ui/status` zeigt lokale Brokerdiagnosewerte ohne zusaetzlichen ESP-Live-Request.
+- `scripts/esp_eth1_stress.py` verwendet standardmaessig die API-/Brokerphase. Raw-Socket-Phasen bleiben nur fuer explizite isolierte Tests erhalten.
+
 ## 2026-07-01 (ESP command short connections)
 - Der `EspPlcClient` schliesst den ESP-TCP-Socket nach jeder Antwort wieder, damit kein Raspi-Prozess den Single-Client-Port der ESP32-PLC prozessuebergreifend blockiert.
 - Die Reihenfolge bleibt ueber Prozess- und Interprozess-Lock geschuetzt; schnelle Wiederverbindungen werden durch die ESP-Firmware mit kurzer Antwort-Freigabe abgefangen.

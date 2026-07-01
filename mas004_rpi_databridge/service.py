@@ -36,6 +36,7 @@ from mas004_rpi_databridge.peers import (
 from mas004_rpi_databridge.watchdog import Watchdog
 from mas004_rpi_databridge.webui import build_app
 from mas004_rpi_databridge.ntp_sync import ntp_loop
+from mas004_rpi_databridge.device_clients import start_esp_command_broker
 from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
@@ -86,6 +87,33 @@ def disable_global_esp_motor_polling(cfg: Settings) -> None:
             print(f"[MOTORS] global ESP motor auto-poll disabled: {result.get('reply')}", flush=True)
     except Exception as exc:
         print(f"[MOTORS] global ESP motor auto-poll disable skipped: {exc!r}", flush=True)
+
+
+def start_global_esp_command_broker(cfg: Settings) -> None:
+    if bool(getattr(cfg, "esp_simulation", False)):
+        print("[ESP-BROKER] skipped: esp_simulation=true", flush=True)
+        return
+    host = str(getattr(cfg, "esp_host", "") or "").strip()
+    port = int(getattr(cfg, "esp_port", 0) or 0)
+    if not host or port <= 0:
+        print("[ESP-BROKER] skipped: ESP endpoint missing", flush=True)
+        return
+    timeout_s = float(getattr(cfg, "esp_connect_timeout_s", 1.5) or 1.5)
+    try:
+        diag = start_esp_command_broker(host, port, timeout_s=timeout_s)
+        if diag.get("warmup_error"):
+            print(
+                f"[ESP-BROKER] started host={host}:{port} warmup_error={diag.get('warmup_error')}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[ESP-BROKER] started host={host}:{port} persistent={diag.get('broker_supported')} "
+                f"reply={diag.get('warmup_reply')}",
+                flush=True,
+            )
+    except Exception as exc:
+        print(f"[ESP-BROKER] startup skipped: {exc!r}", flush=True)
 
 
 def install_thread_dump_signal() -> None:
@@ -637,6 +665,7 @@ def main():
     except Exception as e:
         print(f"[IO] startup import skipped: {repr(e)}", flush=True)
 
+    start_global_esp_command_broker(cfg)
     disable_global_esp_motor_polling(cfg)
 
     ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True, name="ntp-loop")

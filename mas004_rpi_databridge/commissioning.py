@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.io_master import IoStore
 
 
@@ -808,7 +809,10 @@ class CommissioningStore:
             simulation = bool(getattr(self.cfg, sim_key, True))
             if simulation:
                 return ("success", "Simulation ist aktiv", {"host": host, "port": port, "simulation": True})
-            reachable, error = self._probe_socket(host, port)
+            if check_key == "esp":
+                reachable, error = self._probe_esp_broker(host, port)
+            else:
+                reachable, error = self._probe_socket(host, port)
             note = "Endpoint erreichbar" if reachable else (error or "Endpoint nicht erreichbar")
             return (
                 "success" if reachable else "failed",
@@ -816,6 +820,16 @@ class CommissioningStore:
                 {"host": host, "port": port, "simulation": False, "reachable": reachable, "error": error},
             )
         return ("pending", "Manueller Schritt ohne Auto-Check", {"check_key": check_key})
+
+    def _probe_esp_broker(self, host: str, port: int, timeout_s: float = 1.5) -> tuple[bool, str]:
+        if not host or int(port or 0) <= 0:
+            return False, "Endpoint fehlt"
+        try:
+            client = EspPlcClient(host, int(port), timeout_s=timeout_s)
+            reply = client.exchange_line("PING", read_timeout_s=timeout_s, priority=True)
+            return reply.strip().upper() == "PONG", reply
+        except Exception as exc:
+            return False, str(exc)
 
     def _probe_socket(self, host: str, port: int, timeout_s: float = 1.5) -> tuple[bool, str]:
         if not host or int(port or 0) <= 0:

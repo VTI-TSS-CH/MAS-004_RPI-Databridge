@@ -619,6 +619,13 @@ class MotorPollReq(BaseModel):
     enabled: bool
 
 
+class EspCommandReq(BaseModel):
+    line: str
+    read_timeout_s: float = 2.0
+    read_limit: int = 8192
+    priority: bool = False
+
+
 class IoWriteReq(BaseModel):
     value: int
 
@@ -2564,6 +2571,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     def ui_status(x_token: Optional[str] = Header(default=None)):
         cfg2 = Settings.load(cfg_path)
         require_token(x_token, cfg2)
+        esp_broker_diag: dict[str, Any] = {}
+        if not bool(getattr(cfg2, "esp_simulation", False)) and str(getattr(cfg2, "esp_host", "") or "").strip():
+            try:
+                esp_broker_diag = EspPlcClient(
+                    cfg2.esp_host,
+                    int(cfg2.esp_port),
+                    timeout_s=float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5),
+                ).diagnostics()
+            except Exception as exc:
+                esp_broker_diag = {"error": repr(exc)}
         return {
             "ok": True,
             "outbox_count": outbox.count(),
@@ -2586,6 +2603,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     "simulation": cfg2.esp_simulation,
                     "watchdog_host": cfg2.esp_watchdog_host,
                     "poll_interval_s": float(getattr(cfg2, "esp_io_poll_interval_s", 1.0) or 1.0),
+                    "broker": esp_broker_diag,
                 },
                 "moxa1": {
                     "host": getattr(cfg2, "moxa1_host", ""),
@@ -2629,6 +2647,37 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 },
             }
         }
+
+    @app.post("/api/esp/command")
+    def api_esp_command(body: EspCommandReq, x_token: Optional[str] = Header(default=None)):
+        cfg2 = Settings.load(cfg_path)
+        require_token(x_token, cfg2)
+        line = str(body.line or "").strip()
+        if not line or "\n" in line or "\r" in line or len(line) > 1024:
+            raise HTTPException(status_code=400, detail="Invalid ESP command line")
+        if bool(getattr(cfg2, "esp_simulation", False)) or not str(getattr(cfg2, "esp_host", "") or "").strip():
+            return {
+                "ok": True,
+                "simulation": True,
+                "line": line,
+                "reply": f"SIM_{line}",
+                "broker": {},
+            }
+        try:
+            client = EspPlcClient(
+                cfg2.esp_host,
+                int(cfg2.esp_port),
+                timeout_s=float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5),
+            )
+            reply = client.exchange_line(
+                line,
+                read_timeout_s=max(0.2, float(body.read_timeout_s or 2.0)),
+                read_limit=max(128, min(65536, int(body.read_limit or 8192))),
+                priority=bool(body.priority),
+            )
+            return {"ok": True, "line": line, "reply": reply, "broker": client.diagnostics()}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"ESP command failed: {exc!r}") from exc
 
     @app.post("/api/queues/outbox/clear")
     def clear_outbox_queue(x_token: Optional[str] = Header(default=None)):

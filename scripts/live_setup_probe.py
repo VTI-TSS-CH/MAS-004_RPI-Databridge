@@ -17,7 +17,6 @@ from typing import Any
 
 from mas004_rpi_databridge.config import DEFAULT_CFG_PATH, Settings
 from mas004_rpi_databridge.db import DB, now_ts
-from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.machine_runtime import MachineRuntime
@@ -25,6 +24,7 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.setup_wickler_orchestrator import SetupWicklerOrchestrator
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
+from esp_broker_api import exchange_via_databridge
 
 
 WICKLER_ABORT_LOW_PERCENT = 8.0
@@ -52,11 +52,17 @@ WATCH_PARAMS = (
 
 
 def esp_exchange(cfg: Settings, line: str, timeout_s: float = 1.5, attempts: int = 3) -> tuple[bool, Any]:
-    client = EspPlcClient(cfg.esp_host, int(cfg.esp_port), cfg.esp_connect_timeout_s)
     last_error = ""
     for attempt in range(1, max(1, int(attempts)) + 1):
         try:
-            text = client.exchange_line(line, read_timeout_s=timeout_s, read_limit=8192).strip()
+            text, _payload = exchange_via_databridge(
+                cfg,
+                line,
+                read_timeout_s=timeout_s,
+                read_limit=8192,
+                request_timeout_s=max(3.0, timeout_s + 2.0),
+            )
+            text = text.strip()
             if text.startswith("JSON "):
                 return True, json.loads(text[5:].strip())
             if text:

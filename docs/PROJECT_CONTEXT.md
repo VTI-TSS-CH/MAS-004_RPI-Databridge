@@ -64,8 +64,9 @@
   - Microtom writes to such `MA*` values are stored locally on the Raspi and then mirrored to the ESP via the firmware `SYNC <key>=<value>` command
   - `ESP32 R/W = W` remains the path for ESP-leading values such as motor setpoints/status mirrors
 - ESP32-PLC eth1 command channel contract:
-  - The ESP endpoint `192.168.2.101:3010` is a short-lived, single-client W5500/TCP command socket.
-  - The RPI-Databridge serializes all Raspi-originated ESP commands per endpoint and applies a short cooldown after connection failures.
+  - The ESP endpoint `192.168.2.101:3010` is a single-client W5500/TCP command socket owned by the RPI-Databridge ESP command broker.
+  - The broker keeps one persistent Raspi -> ESP connection open with `TCP BROKER=1`, serializes all Raspi-originated ESP commands and applies a short cooldown after connection failures.
+  - WebUI, runtime and maintenance scripts must use the Databridge broker/API; raw sockets are reserved for isolated explicit stress tests with production stopped.
   - ESP timeouts are separated from normal HTTP timeouts: connect, short read and longer command paths are tuned independently.
   - Writes are not blindly retried; only safe read-style commands may be retried once with a short backoff.
   - ESP-originated `MA*` readbacks on the push listener are answered locally from the Raspi parameter store to avoid reentrant calls back into the ESP while the ESP is waiting for a reply.
