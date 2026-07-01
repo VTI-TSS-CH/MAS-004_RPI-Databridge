@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 from typing import Any
 
 import httpx
@@ -33,6 +34,9 @@ _DESCRIPTORS = {
         simulation_attr="smart_rewinder_simulation",
     ),
 }
+
+_ENDPOINT_LOCKS: dict[tuple[str, int], threading.Lock] = {}
+_ENDPOINT_LOCKS_GUARD = threading.Lock()
 
 
 def normalize_winder_role(role: str) -> str:
@@ -130,6 +134,15 @@ class SmartWicklerClient:
     def device_ui_url(self) -> str:
         return f"http://{self.host}:{self.port}" if self.host and self.port > 0 else ""
 
+    def _endpoint_lock(self) -> threading.Lock:
+        key = (self.host, int(self.port))
+        with _ENDPOINT_LOCKS_GUARD:
+            lock = _ENDPOINT_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _ENDPOINT_LOCKS[key] = lock
+            return lock
+
     def _request_context(self, method: str, path: str, data: dict[str, Any] | None, timeout_s: float) -> str:
         safe_data = {str(key): str(value) for key, value in (data or {}).items()}
         return (
@@ -145,13 +158,14 @@ class SmartWicklerClient:
         url = self.device_ui_url().rstrip("/") + path
         context = self._request_context("POST", path, data, req_timeout)
         try:
-            with httpx.Client(timeout=req_timeout) as client:
-                response = client.post(url, data=data or {})
-                response.raise_for_status()
-                try:
-                    payload = response.json()
-                except Exception:
-                    payload = {"ok": True, "text": response.text}
+            with self._endpoint_lock():
+                with httpx.Client(timeout=req_timeout) as client:
+                    response = client.post(url, data=data or {})
+                    response.raise_for_status()
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        payload = {"ok": True, "text": response.text}
         except httpx.TimeoutException as exc:
             raise RuntimeError(f"{context} failed: timeout") from exc
         except httpx.HTTPStatusError as exc:
@@ -225,10 +239,11 @@ class SmartWicklerClient:
                 if timeout_s is not None
                 else max(1.0, min(5.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0)))
             )
-            with httpx.Client(timeout=req_timeout) as client:
-                response = client.get(self.device_ui_url().rstrip("/") + "/api/state")
-                response.raise_for_status()
-                payload = response.json()
+            with self._endpoint_lock():
+                with httpx.Client(timeout=req_timeout) as client:
+                    response = client.get(self.device_ui_url().rstrip("/") + "/api/state")
+                    response.raise_for_status()
+                    payload = response.json()
         except Exception as exc:
             return _simulation_payload(
                 role=self.descriptor.role,

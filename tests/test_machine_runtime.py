@@ -17,6 +17,8 @@ from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.machine_runtime import (
     MachineRuntime,
+    PRODUCTION_RUNTIME_INFO_KEY,
+    PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES,
     mark_external_purge_clear,
     mark_external_purge_start,
     recent_external_purge_clear,
@@ -140,6 +142,7 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0066", "MAP", "0066", "8000", "W", "R", "uint16"),
             ("MAE0008", "MAE", "0008", "0", "R", "W", "bool"),
             ("MAE0009", "MAE", "0009", "0", "R", "W", "bool"),
+            ("MAE0010", "MAE", "0010", "0", "R", "W", "bool"),
             ("MAE0025", "MAE", "0025", "0", "R", "W", "bool"),
             ("MAE0026", "MAE", "0026", "0", "R", "W", "bool"),
             ("MAE0027", "MAE", "0027", "0", "R", "W", "bool"),
@@ -181,6 +184,18 @@ class MachineRuntimeTests(unittest.TestCase):
 
     def build_runtime(self) -> MachineRuntime:
         return MachineRuntime(self.cfg, self.db, self.params, self.io_store, self.logs, self.outbox)
+
+    def mark_production_active(self, runtime: MachineRuntime) -> None:
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
 
     def test_microtom_command_is_mapped_to_transition_and_final_state(self):
         runtime = self.build_runtime()
@@ -918,6 +933,154 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertIn("Wippe nicht eingemessen", result["errors"])
         self.assertIn("MAE0028", result["mae_keys"])
+
+    def test_production_wickler_http_failure_is_only_communication_error(self):
+        runtime = self.build_runtime()
+
+        result = runtime._verify_wickler_production_state(
+            "rewinder",
+            {
+                "device": {"reachable": False, "simulation": False, "error": "timed out"},
+                "telemetry": {
+                    "modeLabel": "Offline",
+                    "modeCss": "fault",
+                    "wipePercent": 0.0,
+                    "calibrated": False,
+                    "requiresCalibration": True,
+                    "externalStopActive": True,
+                    "indexedModeEnabled": False,
+                    "indexedCommandSeq": 0,
+                },
+                "drive": {
+                    "alarm": True,
+                    "alarmCode": 7,
+                    "online": False,
+                    "continuousModeReady": False,
+                    "lastCommandOk": False,
+                },
+                "values": {"maeLow": True, "maeHigh": True, "maeBlocked": True},
+                "master": {"indexedModeEnabled": False},
+            },
+            require_indexed_mode=True,
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertTrue(result["communication_error"])
+        self.assertEqual(["communication_error: timed out"], result["errors"])
+        self.assertEqual([], result["mae_keys"])
+
+    def test_production_wickler_monitor_tolerates_short_communication_gap(self):
+        runtime = self.build_runtime()
+        runtime._stop_production_motion = Mock(return_value={"ok": True})
+        runtime._notify_microtom = Mock()
+
+        def comm_monitor(**_kwargs):
+            return {
+                "ok": False,
+                "results": [
+                    {"role": "unwinder", "ok": True, "verify": {"ok": True}},
+                    {
+                        "role": "rewinder",
+                        "ok": False,
+                        "verify": {
+                            "role": "rewinder",
+                            "ok": False,
+                            "errors": ["communication_error: timed out"],
+                            "communication_error": True,
+                            "device_reachable": False,
+                            "device_error": "timed out",
+                            "mae_keys": [],
+                        },
+                    },
+                ],
+                "errors": ["Aufwickler: communication_error: timed out"],
+            }
+
+        runtime._production_wickler_verifications = Mock(side_effect=comm_monitor)
+        production_info: dict[str, object] = {}
+
+        result = runtime._monitor_active_production_wicklers(production_info, 100.0)
+
+        self.assertIsNone(result)
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        self.assertEqual(1, production_info["wickler_monitor_pending_fault"]["count"])
+        runtime._stop_production_motion.assert_not_called()
+        runtime._notify_microtom.assert_not_called()
+
+    def test_production_wickler_monitor_stops_after_repeated_communication_gap(self):
+        runtime = self.build_runtime()
+        runtime._stop_production_motion = Mock(return_value={"ok": True})
+        runtime._notify_microtom = Mock()
+
+        def comm_monitor(**_kwargs):
+            return {
+                "ok": False,
+                "results": [
+                    {
+                        "role": "rewinder",
+                        "ok": False,
+                        "verify": {
+                            "role": "rewinder",
+                            "ok": False,
+                            "errors": ["communication_error: timed out"],
+                            "communication_error": True,
+                            "device_reachable": False,
+                            "device_error": "timed out",
+                            "mae_keys": [],
+                        },
+                    }
+                ],
+                "errors": ["Aufwickler: communication_error: timed out"],
+            }
+
+        runtime._production_wickler_verifications = Mock(side_effect=comm_monitor)
+        production_info: dict[str, object] = {}
+
+        self.assertIsNone(runtime._monitor_active_production_wicklers(production_info, 100.0))
+        self.assertIsNone(runtime._monitor_active_production_wicklers(production_info, 100.6))
+        result = runtime._monitor_active_production_wicklers(production_info, 101.2)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["communication_only"])
+        self.assertEqual(PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES, result["consecutive_failures"])
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+        runtime._stop_production_motion.assert_called_once_with(
+            reason="production_wickler_monitor_failed",
+            target_state=21,
+        )
+        runtime._notify_microtom.assert_called_once_with("MAS0028", "1", dedupe_key="machine:MAS0028")
+
+    def test_production_wickler_monitor_stops_immediately_on_hard_fault(self):
+        runtime = self.build_runtime()
+        runtime._stop_production_motion = Mock(return_value={"ok": True})
+        runtime._notify_microtom = Mock()
+        runtime._production_wickler_verifications = Mock(
+            return_value={
+                "ok": False,
+                "results": [
+                    {
+                        "role": "rewinder",
+                        "ok": False,
+                        "verify": {
+                            "role": "rewinder",
+                            "ok": False,
+                            "errors": ["drive alarm 7"],
+                            "communication_error": False,
+                            "mae_keys": [],
+                        },
+                    }
+                ],
+                "errors": ["Aufwickler: drive alarm 7"],
+            }
+        )
+        production_info: dict[str, object] = {}
+
+        result = runtime._monitor_active_production_wicklers(production_info, 100.0)
+
+        self.assertIsNotNone(result)
+        self.assertNotIn("wickler_monitor_pending_fault", production_info)
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+        runtime._stop_production_motion.assert_called_once()
 
     def test_setup_positions_format_axes_as_one_set_before_wickler_measurement(self):
         class FakeEspMotorClient:
@@ -2756,6 +2919,7 @@ class MachineRuntimeTests(unittest.TestCase):
 
     def test_production_print_position_reached_dedupes_same_label(self):
         runtime = self.build_runtime()
+        self.mark_production_active(runtime)
         runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
 
         first = runtime.handle_event(
@@ -2798,8 +2962,206 @@ class MachineRuntimeTests(unittest.TestCase):
         payloads = [json.loads(row[1]) for row in rows]
         self.assertEqual([2, 3], [payload["label_no"] for payload in payloads])
 
+    def test_first_print_position_prepares_wicklers_before_esp_ready(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        result = runtime.handle_event(
+            {
+                "type": "production_first_print_position_reached",
+                "label_no": 1,
+                "target_error_mm": 0.327,
+                "infeed_speed_mm_s": 0.0,
+                "drive_speed_mm_s": 0.0,
+            }
+        )
+
+        self.assertTrue(result["recorded"])
+        self.assertTrue(result["wickler_takt"]["ok"])
+        self.assertTrue(result["esp_ready"]["ok"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once_with(
+            label_no=1,
+            reason="first_print_position_reached",
+        )
+        runtime._production_esp_retry.assert_called_once_with(
+            "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1",
+            read_timeout_s=5.0,
+            attempts=3,
+            settle_s=0.25,
+        )
+
+    def test_first_print_position_duplicate_does_not_reprepare_wicklers(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+        payload = {
+            "type": "production_first_print_position_reached",
+            "label_no": 1,
+            "target_abs_mm": 1120.885,
+            "target_error_mm": -0.047,
+            "infeed_speed_mm_s": 0.0,
+            "drive_speed_mm_s": 0.0,
+        }
+
+        first = runtime.handle_event(dict(payload))
+        duplicate = runtime.handle_event(dict(payload))
+
+        self.assertTrue(first["esp_ready"]["ok"])
+        self.assertEqual("duplicate_first_print_position_reached", duplicate["wickler_takt"]["skipped"])
+        self.assertEqual("already_handled", duplicate["esp_ready"]["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once()
+        runtime._production_esp_retry.assert_called_once()
+
+    def test_first_print_position_stale_event_in_stop_does_not_prepare_wicklers(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=9,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": False}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        result = runtime.handle_event(
+            {
+                "type": "production_first_print_position_reached",
+                "label_no": 1,
+                "target_abs_mm": 1120.885,
+                "target_error_mm": -0.047,
+            }
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual("stale_production_event", result["ignored"])
+        runtime._prepare_next_production_wickler_takt.assert_not_called()
+        runtime._production_esp_retry.assert_not_called()
+
+    def test_first_print_position_failed_ready_attempt_is_not_retried_by_duplicate_event(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": False, "error": "rewinder low"})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+        payload = {
+            "type": "production_first_print_position_reached",
+            "label_no": 1,
+            "target_abs_mm": 1120.885,
+            "target_error_mm": -0.047,
+        }
+
+        first = runtime.handle_event(dict(payload))
+        duplicate = runtime.handle_event(dict(payload))
+
+        self.assertFalse(first["wickler_takt"]["ok"])
+        self.assertEqual("duplicate_first_print_position_reached", duplicate["wickler_takt"]["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once()
+        runtime._production_esp_retry.assert_not_called()
+
+    def test_position_axis_preflight_alarm_latches_axis_mae(self):
+        runtime = self.build_runtime()
+        runtime._notify_microtom = Mock()
+
+        latch = runtime._latch_position_axis_preflight_fault(
+            5,
+            {
+                "reason": "Achse im Alarm 48",
+                "state": {
+                    "alarm": True,
+                    "alarm_code": 48,
+                    "feedback_tenths_mm": 1,
+                },
+            },
+            context="unit-test",
+        )
+
+        self.assertEqual("MAE0010", latch["pkey"])
+        self.assertEqual("1", self.params.get_effective_value("MAE0010"))
+        runtime._notify_microtom.assert_called_with("MAE0010", "1", dedupe_key="machine:MAE0010")
+
+    def test_registration_fault_latches_mae0048_and_leaves_production(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True}},
+        )
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "reason": "registration_fault"})
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+        runtime._notify_microtom = Mock()
+
+        result = runtime.handle_event(
+            {
+                "type": "production_registration_fault",
+                "reason": "print_registration_failed",
+                "diag": {
+                    "label_no": 2,
+                    "error_mm": 0.0633,
+                    "abs_error_mm": 0.0633,
+                    "tolerance_mm": 0.05,
+                    "target_mm": 610.0,
+                    "progressed_mm": 609.937,
+                    "registration_attempts": 3,
+                    "max_attempts": 3,
+                    "infeed_speed_mm_s": -0.004,
+                    "motor_busy": False,
+                    "motor_ready": True,
+                },
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("1", self.params.get_effective_value("MAE0048"))
+        self.assertEqual("7", self.params.get_effective_value("MAS0001"))
+        runtime._stop_production_motion.assert_called_once_with(
+            reason="registration_fault:print_registration_failed",
+            target_state=7,
+        )
+        snapshot = runtime.snapshot()
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertIn("last_registration_fault", snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY])
+
     def test_velocity_stop_keeps_wicklers_in_continuous_until_print_position_reached(self):
         runtime = self.build_runtime()
+        self.mark_production_active(runtime)
         runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
 
         first = runtime.handle_event(
@@ -2829,6 +3191,7 @@ class MachineRuntimeTests(unittest.TestCase):
 
     def test_production_print_trigger_has_specific_deduped_event(self):
         runtime = self.build_runtime()
+        self.mark_production_active(runtime)
         payload = {
             "type": "production_print_trigger",
             "label_no": 4,
@@ -2853,6 +3216,7 @@ class MachineRuntimeTests(unittest.TestCase):
 
     def test_production_fault_event_logs_label_edge_timeout_details(self):
         runtime = self.build_runtime()
+        self.mark_production_active(runtime)
 
         result = runtime.handle_event(
             {

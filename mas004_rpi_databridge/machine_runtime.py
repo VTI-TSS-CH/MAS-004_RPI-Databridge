@@ -164,6 +164,21 @@ _MACHINE_REFRESH_LOCK = threading.RLock()
 _SETUP_PAUSE_RECOVERY_WINDOW_S = 2 * 60 * 60
 MACHINE_STATE_HEARTBEAT_WRITE_INTERVAL_S = 5.0
 PRODUCTION_RUNTIME_INFO_KEY = "production_runtime"
+PRODUCTION_RUNTIME_EVENT_TYPES = {
+    "production_fault",
+    "production_registration_late",
+    "production_registration_fault",
+    "production_velocity_stop_for_print",
+    "production_first_print_position_commanded",
+    "production_first_print_position_reached",
+    "production_print_position_commanded",
+    "production_print_position_reached",
+    "production_wickler_indexed_ready",
+    "production_wickler_runline_released",
+    "production_print_trigger",
+    "production_print_resolved",
+    "production_print_position_failed",
+}
 PRODUCTION_START_MOTION_ENABLED = True
 PRODUCTION_START_BLOCK_CODE = "NAK_ProductionRuntimeNotReleased"
 PRODUCTION_START_BLOCK_REASON = (
@@ -184,6 +199,7 @@ PRODUCTION_WICKLER_MAX_PERCENT = 92.0
 PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM = 1200.0
 PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S = 0.35
 PRODUCTION_WICKLER_MONITOR_INTERVAL_S = 0.5
+PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES = 3
 PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0001",
     "MAP0002",
@@ -1456,6 +1472,9 @@ class MachineRuntime:
 
     def handle_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         event_type = str((payload or {}).get("type") or "").strip().lower()
+        stale_production_event = self._stale_production_event_result(event_type, payload)
+        if stale_production_event is not None:
+            return stale_production_event
         if event_type == "label_complete":
             result = self._handle_label_complete(payload)
             return {"ok": True, "accepted": True, "event": event_type, "result": result}
@@ -1490,6 +1509,101 @@ class MachineRuntime:
                 },
                 **event_result,
             }
+        if event_type == "production_first_print_position_commanded":
+            target = _safe_float(payload.get("target_abs_mm"), 0.0)
+            lead = _safe_float(payload.get("first_label_lead_mm"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Erste Druckposition direkt befohlen: Ziel {target:.3f}mm, erstes Label +{lead:.3f}mm",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_first_print_position_reached":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            error_mm = _safe_float(payload.get("target_error_mm"), 0.0)
+            ready_key = self._first_print_wickler_ready_key(label_no=label_no, payload=payload)
+            if self._first_print_wickler_ready_already_sent(ready_key):
+                event_result = self._record_production_event_once(
+                    event_type,
+                    "info",
+                    f"Erste Druckposition bereits behandelt: Label {label_no}, Restfehler {error_mm:.3f}mm",
+                    dict(payload or {}),
+                    dedupe_window_s=300.0,
+                )
+                return {
+                    "ok": True,
+                    "accepted": True,
+                    "event": event_type,
+                    "wickler_takt": {
+                        "ok": True,
+                        "skipped": "duplicate_first_print_position_reached",
+                        "label_no": label_no,
+                    },
+                    "esp_ready": {
+                        "ok": True,
+                        "skipped": "already_handled",
+                        "label_no": label_no,
+                    },
+                    **event_result,
+                }
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Erste Druckposition erreicht: Label {label_no}, Restfehler {error_mm:.3f}mm; Wickler werden auf Takt vorbereitet",
+                dict(payload or {}),
+                dedupe_window_s=30.0,
+            )
+            self._remember_first_print_wickler_ready_attempt(
+                ready_key,
+                label_no=label_no,
+                payload=payload,
+                status="started",
+            )
+            wickler_takt = self._prepare_next_production_wickler_takt(
+                label_no=label_no,
+                reason="first_print_position_reached",
+            )
+            esp_ready: dict[str, Any] = {"ok": False, "skipped": "wickler_takt_not_ready"}
+            if bool(wickler_takt.get("ok")):
+                try:
+                    response = self._production_esp_retry(
+                        f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
+                        read_timeout_s=5.0,
+                        attempts=3,
+                        settle_s=0.25,
+                    )
+                    esp_ready = {"ok": True, "response": response}
+                    self._remember_first_print_wickler_ready_sent(
+                        ready_key,
+                        label_no=label_no,
+                        payload=payload,
+                        wickler_takt=wickler_takt,
+                        esp_ready=esp_ready,
+                    )
+                except Exception as exc:
+                    esp_ready = {"ok": False, "error": repr(exc)}
+                    self.logs.log(
+                        "esp-plc",
+                        "warning",
+                        f"Wickler-Takt bereit, aber ESP-Freigabe fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
+                    )
+            self._remember_first_print_wickler_ready_attempt(
+                ready_key,
+                label_no=label_no,
+                payload=payload,
+                status="finished",
+                wickler_takt=wickler_takt,
+                esp_ready=esp_ready,
+            )
+            return {
+                "ok": True,
+                "accepted": True,
+                "event": event_type,
+                "wickler_takt": wickler_takt,
+                "esp_ready": esp_ready,
+                **event_result,
+            }
         if event_type == "production_print_position_commanded":
             label_no = _safe_int(payload.get("label_no"), 0)
             target = _safe_float(payload.get("target_abs_mm"), 0.0)
@@ -1519,6 +1633,16 @@ class MachineRuntime:
                 else {"ok": True, "skipped": "duplicate_print_position_reached", "label_no": label_no}
             )
             return {"ok": True, "accepted": True, "event": event_type, "next_wickler_takt": next_wickler_takt, **event_result}
+        if event_type == "production_wickler_indexed_ready":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            error_mm = _safe_float(payload.get("target_error_mm"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Wickler-Takt bereit: Label {label_no}, ID3-Nachpositionierung freigegeben, Restfehler {error_mm:.3f}mm",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
         if event_type == "production_wickler_runline_released":
             label_no = _safe_int(payload.get("label_no"), 0)
             speed = _safe_float(payload.get("infeed_speed_mm_s"), 0.0)
@@ -1626,7 +1750,241 @@ class MachineRuntime:
             f"Infeed {infeed_speed:.3f}mm/s, Motor busy={int(motor_busy)} ready={int(motor_ready)}"
         )
         self._record_event(event_type, "warning", message, dict(payload or {}))
-        return {"reason": reason, "message": message, "diag": diag}
+        stop_result = self._latch_registration_fault(
+            event_type=event_type,
+            reason=reason,
+            message=message,
+            payload=payload,
+            diag=diag,
+        )
+        return {"reason": reason, "message": message, "diag": diag, "stop": stop_result}
+
+    def _stale_production_event_result(self, event_type: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if event_type not in PRODUCTION_RUNTIME_EVENT_TYPES:
+            return None
+        state = self._state_row()
+        current_state = _safe_int(state.get("current_state"), 1)
+        requested_state = _safe_int(state.get("requested_state"), current_state)
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_active = bool(production_info.get("active"))
+        if production_active and current_state == 5:
+            return None
+        if current_state == 5 and event_type in {
+            "production_fault",
+            "production_registration_late",
+            "production_registration_fault",
+        }:
+            return None
+
+        label_no = _safe_int((payload or {}).get("label_no"), 0)
+        stale_payload = {
+            "type": "production_stale_event_ignored",
+            "stale_event_type": event_type,
+            "label_no": label_no,
+            "machine_state": current_state,
+            "requested_state": requested_state,
+            "production_active": production_active,
+        }
+        event_result = self._record_production_event_once(
+            "production_stale_event_ignored",
+            "warning",
+            f"Veraltetes Produktionsevent ignoriert: {event_type} in {state_label(current_state)}",
+            stale_payload,
+            dedupe_window_s=600.0,
+        )
+        return {
+            "ok": True,
+            "accepted": False,
+            "event": event_type,
+            "ignored": "stale_production_event",
+            "machine_state": current_state,
+            "production_active": production_active,
+            **event_result,
+        }
+
+    def _first_print_wickler_ready_key(self, *, label_no: int, payload: dict[str, Any] | None) -> str:
+        state_info = dict(self._state_row().get("info") or {})
+        production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        run_marker = _safe_float(production_info.get("active_since_ts"), 0.0)
+        if run_marker <= 0.0:
+            last_start = production_info.get("last_start") if isinstance(production_info.get("last_start"), dict) else {}
+            run_marker = _safe_float(last_start.get("started_ts"), 0.0)
+        target_key = _event_float_key((payload or {}).get("target_abs_mm"), 3)
+        error_key = _event_float_key((payload or {}).get("target_error_mm"), 3)
+        return "|".join(
+            [
+                f"run={run_marker:.3f}" if run_marker > 0.0 else "run=unknown",
+                f"label={int(label_no)}",
+                f"target={target_key}",
+                f"error={error_key}",
+            ]
+        )
+
+    def _first_print_wickler_ready_already_sent(self, ready_key: str) -> bool:
+        if not ready_key:
+            return False
+        state_info = dict(self._state_row().get("info") or {})
+        production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        ready_info = production_info.get("first_print_wickler_ready")
+        if not isinstance(ready_info, dict):
+            attempt_info = production_info.get("first_print_wickler_ready_attempt")
+            if not isinstance(attempt_info, dict):
+                return False
+            return str(attempt_info.get("key") or "") == str(ready_key)
+        if str(ready_info.get("key") or "") == str(ready_key):
+            return True
+        attempt_info = production_info.get("first_print_wickler_ready_attempt")
+        return isinstance(attempt_info, dict) and str(attempt_info.get("key") or "") == str(ready_key)
+
+    def _remember_first_print_wickler_ready_attempt(
+        self,
+        ready_key: str,
+        *,
+        label_no: int,
+        payload: dict[str, Any] | None,
+        status: str,
+        wickler_takt: dict[str, Any] | None = None,
+        esp_ready: dict[str, Any] | None = None,
+    ) -> None:
+        if not ready_key:
+            return
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_info["first_print_wickler_ready_attempt"] = {
+            "key": str(ready_key),
+            "label_no": int(label_no),
+            "target_abs_mm": _safe_float((payload or {}).get("target_abs_mm"), 0.0),
+            "target_error_mm": _safe_float((payload or {}).get("target_error_mm"), 0.0),
+            "status": str(status or ""),
+            "ts": now_ts(),
+            "wickler_takt_ok": bool((wickler_takt or {}).get("ok")) if wickler_takt is not None else None,
+            "esp_ready_ok": bool((esp_ready or {}).get("ok")) if esp_ready is not None else None,
+        }
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=int(state.get("current_state") or 1),
+            requested_state=int(state.get("requested_state") or state.get("current_state") or 1),
+            state_source=str(state.get("state_source") or "runtime"),
+            warning_active=bool(state.get("warning_active")),
+            purge_active=bool(state.get("purge_active")),
+            production_label=str(state.get("production_label") or ""),
+            last_label_no=int(state.get("last_label_no") or 0),
+            info=info,
+        )
+
+    def _remember_first_print_wickler_ready_sent(
+        self,
+        ready_key: str,
+        *,
+        label_no: int,
+        payload: dict[str, Any] | None,
+        wickler_takt: dict[str, Any],
+        esp_ready: dict[str, Any],
+    ) -> None:
+        if not ready_key:
+            return
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_info["first_print_wickler_ready"] = {
+            "key": str(ready_key),
+            "label_no": int(label_no),
+            "target_abs_mm": _safe_float((payload or {}).get("target_abs_mm"), 0.0),
+            "target_error_mm": _safe_float((payload or {}).get("target_error_mm"), 0.0),
+            "ts": now_ts(),
+            "wickler_takt_ok": bool((wickler_takt or {}).get("ok")),
+            "esp_ready_ok": bool((esp_ready or {}).get("ok")),
+        }
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=int(state.get("current_state") or 1),
+            requested_state=int(state.get("requested_state") or state.get("current_state") or 1),
+            state_source=str(state.get("state_source") or "runtime"),
+            warning_active=bool(state.get("warning_active")),
+            purge_active=bool(state.get("purge_active")),
+            production_label=str(state.get("production_label") or ""),
+            last_label_no=int(state.get("last_label_no") or 0),
+            info=info,
+        )
+
+    def _latch_registration_fault(
+        self,
+        *,
+        event_type: str,
+        reason: str,
+        message: str,
+        payload: dict[str, Any] | None,
+        diag: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.params.apply_device_value("MAE0048", "1", promote_default=True)
+        self._notify_microtom("MAE0048", "1", dedupe_key="machine:MAE0048")
+        state = self._state_row()
+        current_state = int(state.get("current_state") or 1)
+        already_stopped = current_state not in (4, 5, 6)
+        target_state = 21 if current_state == 21 or _truthy(self.params.get_effective_value("MAS0028")) else 7
+        stop_result: dict[str, Any]
+        if already_stopped:
+            stop_result = {"ok": True, "skipped": f"machine_state={current_state}", "target_state": target_state}
+        else:
+            stop_result = self._stop_production_motion(reason=f"registration_fault:{reason}", target_state=target_state)
+
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_info["active"] = False
+        production_info["last_registration_fault"] = {
+            "event_type": str(event_type),
+            "reason": str(reason),
+            "message": str(message),
+            "diag": dict(diag or {}),
+            "payload": dict(payload or {}),
+            "stop": dict(stop_result or {}),
+            "ts": now_ts(),
+        }
+        if not already_stopped:
+            production_info["last_stop"] = dict(stop_result or {})
+        production_info.pop("pending_start", None)
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+
+        if target_state != current_state:
+            self.params.apply_device_value("MAS0001", str(target_state), promote_default=True)
+            self._notify_microtom("MAS0001", str(target_state), dedupe_key="machine:MAS0001")
+            self._sync_esp_machine_state(int(target_state), required=False)
+            self._write_state(
+                current_state=target_state,
+                requested_state=target_state,
+                state_source="production_registration_fault",
+                warning_active=bool(state.get("warning_active")),
+                purge_active=bool(target_state == 21 or state.get("purge_active")),
+                production_label=str(state.get("production_label") or self._current_production_label()),
+                last_label_no=int(state.get("last_label_no") or _safe_int(diag.get("label_no"), 0)),
+                info=info,
+            )
+            self._record_event(
+                "state_change",
+                "info",
+                f"Maschinenstatus gewechselt: {current_state} -> {target_state} ({state_label(target_state)})",
+                {
+                    "from_state": current_state,
+                    "to_state": target_state,
+                    "source": "production_registration_fault",
+                    "reason": reason,
+                    "mae": "MAE0048",
+                },
+            )
+        else:
+            self._write_state(
+                current_state=current_state,
+                requested_state=int(state.get("requested_state") or current_state),
+                state_source=str(state.get("state_source") or "runtime"),
+                warning_active=bool(state.get("warning_active")),
+                purge_active=bool(state.get("purge_active")),
+                production_label=str(state.get("production_label") or self._current_production_label()),
+                last_label_no=int(state.get("last_label_no") or _safe_int(diag.get("label_no"), 0)),
+                info=info,
+            )
+        return stop_result
 
     def _handle_label_length_fault(self, payload: dict[str, Any]) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
@@ -2013,6 +2371,15 @@ class MachineRuntime:
         payload = dict(payload or {})
         event_type = str(event_type or "").strip().lower()
         label_no = _safe_int(payload.get("label_no"), 0)
+        if event_type == "production_stale_event_ignored":
+            return "|".join(
+                [
+                    event_type,
+                    str(payload.get("stale_event_type") or ""),
+                    str(label_no),
+                    str(_safe_int(payload.get("machine_state"), 0)),
+                ]
+            )
         if label_no <= 0:
             return ""
         if event_type == "production_print_position_commanded":
@@ -2032,7 +2399,11 @@ class MachineRuntime:
                     _event_float_key(payload.get("remaining_mm"), 3),
                 ]
             )
+        if event_type == "production_first_print_position_reached":
+            return "|".join([event_type, str(label_no)])
         if event_type == "production_print_position_reached":
+            return "|".join([event_type, str(label_no)])
+        if event_type == "production_wickler_indexed_ready":
             return "|".join([event_type, str(label_no)])
         if event_type == "production_wickler_runline_released":
             return "|".join([event_type, str(label_no)])
@@ -2564,8 +2935,11 @@ class MachineRuntime:
         telemetry = dict((state or {}).get("telemetry") or {})
         drive = dict((state or {}).get("drive") or {})
         values = dict((state or {}).get("values") or {})
+        device = dict((state or {}).get("device") or {})
         mode = str(telemetry.get("modeLabel") or "")
         mode_css = str(telemetry.get("modeCss") or "")
+        communication_error = bool(device) and device.get("reachable") is False and not bool(device.get("simulation"))
+        device_error = str(device.get("error") or "").strip()
         try:
             wipe_percent = float(telemetry.get("wipePercent"))
         except Exception:
@@ -2578,25 +2952,27 @@ class MachineRuntime:
         indexed_enabled = bool((state.get("master") or {}).get("indexedModeEnabled")) or bool(
             telemetry.get("indexedModeEnabled")
         )
-        if mode not in {"Bereit", "Warnung"}:
+        if communication_error:
+            errors.append("communication_error" + (f": {device_error}" if device_error else ""))
+        elif mode not in {"Bereit", "Warnung"}:
             errors.append(f"mode={mode or '-'}")
-        if requires_calibration or not calibrated:
+        if not communication_error and (requires_calibration or not calibrated):
             errors.append("Wippe nicht eingemessen")
             if role_keys.get("blocked"):
                 mae_keys.add(role_keys["blocked"])
-        if mode_css.lower() == "fault":
+        if not communication_error and mode_css.lower() == "fault":
             errors.append(f"modeCss={mode_css}")
-        if bool(telemetry.get("externalStopActive")):
+        if not communication_error and bool(telemetry.get("externalStopActive")):
             errors.append("externalStopActive")
-        if drive.get("online") is False:
+        if not communication_error and drive.get("online") is False:
             errors.append("drive offline")
-        if bool(drive.get("alarm")):
+        if not communication_error and bool(drive.get("alarm")):
             errors.append(f"drive alarm {drive.get('alarmCode')}")
-        if require_indexed_mode is not True and not indexed_enabled and drive.get("continuousModeReady") is False:
+        if not communication_error and require_indexed_mode is not True and not indexed_enabled and drive.get("continuousModeReady") is False:
             errors.append("continuousModeReady=false")
-        if drive.get("lastCommandOk") is False:
+        if not communication_error and drive.get("lastCommandOk") is False:
             errors.append("lastCommandOk=false")
-        if wipe_percent <= PRODUCTION_WICKLER_MIN_PERCENT or wipe_percent >= PRODUCTION_WICKLER_MAX_PERCENT:
+        if not communication_error and (wipe_percent <= PRODUCTION_WICKLER_MIN_PERCENT or wipe_percent >= PRODUCTION_WICKLER_MAX_PERCENT):
             errors.append(f"Wippe {wipe_percent:.1f}%")
             if wipe_percent <= PRODUCTION_WICKLER_MIN_PERCENT and role_keys.get("low"):
                 mae_keys.add(role_keys["low"])
@@ -2607,7 +2983,7 @@ class MachineRuntime:
             ("maeHigh", "Taenzerarm zu hoch"),
             ("maeBlocked", "Taenzerarm blockiert"),
         ):
-            if bool(values.get(key)):
+            if not communication_error and bool(values.get(key)):
                 errors.append(text)
                 if key == "maeLow" and role_keys.get("low"):
                     mae_keys.add(role_keys["low"])
@@ -2616,14 +2992,14 @@ class MachineRuntime:
                 elif key == "maeBlocked" and role_keys.get("blocked"):
                     mae_keys.add(role_keys["blocked"])
         indexed_errors: list[str] = []
-        if require_indexed_mode is True and not indexed_enabled:
+        if not communication_error and require_indexed_mode is True and not indexed_enabled:
             indexed_errors.append("indexedModeEnabled=false")
         indexed_command_seq = _safe_int(telemetry.get("indexedCommandSeq"), 0)
-        if require_indexed_mode is True and indexed_command_seq <= 0:
+        if not communication_error and require_indexed_mode is True and indexed_command_seq <= 0:
             indexed_errors.append("indexedCommandSeq=0")
-        if require_indexed_mode is False and indexed_enabled:
+        if not communication_error and require_indexed_mode is False and indexed_enabled:
             indexed_errors.append("indexedModeEnabled=true")
-        if require_indexed_mode is None and indexed_enabled and indexed_command_seq <= 0:
+        if not communication_error and require_indexed_mode is None and indexed_enabled and indexed_command_seq <= 0:
             indexed_errors.append("indexedModeEnabled=true,indexedCommandSeq=0")
         return {
             "role": role,
@@ -2641,6 +3017,9 @@ class MachineRuntime:
             "indexed_command_seq": indexed_command_seq,
             "indexed_move_active": bool(telemetry.get("indexedMoveActive")) or bool(drive.get("move")),
             "indexed_mode_required": bool(require_indexed_mode),
+            "communication_error": communication_error,
+            "device_reachable": device.get("reachable"),
+            "device_error": device_error,
             "mae_keys": sorted(mae_keys),
         }
 
@@ -2806,9 +3185,44 @@ class MachineRuntime:
                     errors.append(f"{client.descriptor.label}: {', '.join(str(e) for e in verify.get('errors') or ['not_ready'])}")
             except Exception as exc:
                 error = f"{client.descriptor.label}: {repr(exc)}"
-                results.append({"role": role, "ok": False, "error": error})
+                results.append({
+                    "role": role,
+                    "ok": False,
+                    "error": error,
+                    "communication_error": True,
+                    "verify": {
+                        "role": role,
+                        "ok": False,
+                        "errors": [error],
+                        "communication_error": True,
+                        "device_reachable": False,
+                        "device_error": repr(exc),
+                        "mae_keys": [],
+                    },
+                })
                 errors.append(error)
         return {"ok": not errors, "results": results, "errors": errors}
+
+    @staticmethod
+    def _wickler_monitor_item_is_communication_error(item: dict[str, Any]) -> bool:
+        verify = dict((item or {}).get("verify") or {})
+        return bool((item or {}).get("communication_error")) or bool(verify.get("communication_error"))
+
+    def _wickler_monitor_is_communication_only(self, monitor: dict[str, Any]) -> bool:
+        failed = [dict(item or {}) for item in (monitor or {}).get("results") or [] if not bool((item or {}).get("ok", True))]
+        return bool(failed) and all(self._wickler_monitor_item_is_communication_error(item) for item in failed)
+
+    @staticmethod
+    def _wickler_monitor_signature(monitor: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for item in (monitor or {}).get("results") or []:
+            if bool((item or {}).get("ok", True)):
+                continue
+            role = str((item or {}).get("role") or "?")
+            verify = dict((item or {}).get("verify") or {})
+            errors = verify.get("errors") or [(item or {}).get("error") or "not_ready"]
+            parts.append(role + ":" + ",".join(str(error) for error in errors))
+        return "|".join(sorted(parts))
 
     def _latch_wickler_monitor_faults(self, monitor: dict[str, Any]) -> list[str]:
         latched: list[str] = []
@@ -3038,7 +3452,36 @@ class MachineRuntime:
         monitor["ts"] = float(ts)
         production_info["last_wickler_monitor"] = monitor
         if monitor.get("ok"):
+            production_info.pop("wickler_monitor_pending_fault", None)
             return None
+        if self._wickler_monitor_is_communication_only(monitor):
+            signature = self._wickler_monitor_signature(monitor)
+            pending = dict(production_info.get("wickler_monitor_pending_fault") or {})
+            same_signature = str(pending.get("signature") or "") == signature
+            count = (_safe_int(pending.get("count"), 0) + 1) if same_signature else 1
+            first_ts = _safe_float(pending.get("first_ts"), float(ts)) if same_signature else float(ts)
+            monitor["communication_only"] = True
+            monitor["consecutive_failures"] = count
+            monitor["required_failures"] = PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES
+            monitor["first_failure_ts"] = first_ts
+            production_info["wickler_monitor_pending_fault"] = {
+                "kind": "communication",
+                "signature": signature,
+                "count": count,
+                "first_ts": first_ts,
+                "last_ts": float(ts),
+                "monitor": monitor,
+            }
+            if count < PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES:
+                self._record_event(
+                    "production_wickler_monitor_transient",
+                    "warning",
+                    "Wickler-Statusabfrage kurzzeitig fehlgeschlagen; Produktionslauf bleibt aktiv",
+                    monitor,
+                )
+                return None
+        else:
+            production_info.pop("wickler_monitor_pending_fault", None)
         monitor["latched_mae"] = self._latch_wickler_monitor_faults(monitor)
         stop_result = self._stop_production_motion(reason="production_wickler_monitor_failed", target_state=21)
         monitor["stop"] = stop_result
@@ -3528,6 +3971,13 @@ class MachineRuntime:
                 preflight = self._motor_preflight_for_position_move(client, motor_id, target_mm)
                 phase_result["preflight"].append(preflight)
                 if not preflight.get("ok"):
+                    latch = self._latch_position_axis_preflight_fault(
+                        motor_id,
+                        preflight,
+                        context=f"Einrichten Formatachsen {phase_name}",
+                    )
+                    if latch:
+                        preflight["latched_mae"] = latch
                     errors.append(f"Motor {motor_id}: {preflight.get('reason') or 'Positionierfreigabe verweigert'}")
 
             if errors:
@@ -3768,6 +4218,41 @@ class MachineRuntime:
         result["reason"] = "safe"
         return result
 
+    def _latch_position_axis_preflight_fault(
+        self,
+        motor_id: int,
+        preflight: dict[str, Any],
+        *,
+        context: str,
+    ) -> dict[str, Any] | None:
+        pkey = POSITION_AXIS_MAE_BY_MOTOR.get(int(motor_id))
+        if not pkey:
+            return None
+        state = dict((preflight or {}).get("state") or {})
+        reason = str((preflight or {}).get("reason") or "Positionierfreigabe verweigert")
+        latch = (
+            bool(state.get("alarm"))
+            or bool(state.get("hwto"))
+            or "unter Min" in reason
+            or "ueber Max" in reason
+            or "Positionsreferenz" in reason
+        )
+        if not latch:
+            return None
+        self.params.apply_device_value(pkey, "1", promote_default=True)
+        self._notify_microtom(pkey, "1", dedupe_key=f"machine:{pkey}")
+        detail = {
+            "pkey": pkey,
+            "motor_id": int(motor_id),
+            "reason": reason,
+            "context": str(context or ""),
+            "alarm": bool(state.get("alarm")),
+            "alarm_code": state.get("alarm_code"),
+            "feedback_tenths_mm": state.get("feedback_tenths_mm"),
+        }
+        self.logs.log("machine", "warning", f"{context}: Motor {int(motor_id)} blockiert ({reason}), {pkey}=1")
+        return detail
+
     def _stop_mode_command_target_mm(self, target_mm: float, preflight: dict[str, Any]) -> tuple[float, dict[str, Any] | None]:
         """Keep automatic stop moves just inside active AZD soft limits.
 
@@ -3904,6 +4389,13 @@ class MachineRuntime:
                 preflight = self._motor_preflight_for_position_move(client, motor_id, target_mm)
                 if not preflight.get("ok"):
                     reason = str(preflight.get("reason") or "Positionierfreigabe verweigert")
+                    latch = self._latch_position_axis_preflight_fault(
+                        motor_id,
+                        preflight,
+                        context="Produktions-Stop Positionssatz",
+                    )
+                    if latch:
+                        preflight["latched_mae"] = latch
                     result = {
                         "motor_id": motor_id,
                         "target_mm": target_mm,
