@@ -38,6 +38,20 @@ RPI_AUTHORITATIVE_MA_KEYS = {
     "MAS0030",
 }
 
+POSITION_ACTUAL_STATUS_KEYS = frozenset(
+    {
+        "MAS0011",
+        "MAS0012",
+        "MAS0013",
+        "MAS0014",
+        "MAS0015",
+        "MAS0016",
+        "MAS0017",
+        "MAS0031",
+        "MAS0032",
+    }
+)
+
 
 def _channel_for_operation(params: ParamStore, ptype: str, pid: str, op: str = "") -> str:
     ptype = (ptype or "").upper()
@@ -120,6 +134,15 @@ def _duplicate_inactive_fault_clear(params: ParamStore, pkey: str, value: object
         return False
     try:
         return not _truthy_value(params.get_effective_value(pkey))
+    except Exception:
+        return False
+
+
+def _duplicate_position_actual(params: ParamStore, pkey: str, value: object) -> bool:
+    if pkey not in POSITION_ACTUAL_STATUS_KEYS:
+        return False
+    try:
+        return str(params.get_effective_value(pkey)).strip() == str(value).strip()
     except Exception:
         return False
 
@@ -266,6 +289,10 @@ class Router:
         ptype, pid, op, value = parsed
         pkey = f"{ptype}{pid}"
         device_source = (source or "device").strip() or "device"
+
+        if op == "write" and _duplicate_position_actual(self.params, pkey, value):
+            return f"ACK_{pkey}={value}"
+
         self.logs.log(device_source, "out", f"{device_source}->raspi: {line}")
 
         if op != "write":

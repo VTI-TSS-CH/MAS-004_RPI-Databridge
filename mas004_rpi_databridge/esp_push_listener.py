@@ -37,6 +37,20 @@ RPI_AUTHORITATIVE_MA_KEYS = {
     "MAS0030",
 }
 
+POSITION_ACTUAL_STATUS_KEYS = frozenset(
+    {
+        "MAS0011",
+        "MAS0012",
+        "MAS0013",
+        "MAS0014",
+        "MAS0015",
+        "MAS0016",
+        "MAS0017",
+        "MAS0031",
+        "MAS0032",
+    }
+)
+
 ESP_PUSH_CONNECTION_LOG = False
 
 
@@ -141,6 +155,15 @@ def _duplicate_inactive_fault_clear(params: ParamStore, pkey: str, value: object
         return False
 
 
+def _duplicate_position_actual(params: ParamStore, pkey: str, value: object) -> bool:
+    if pkey not in POSITION_ACTUAL_STATUS_KEYS:
+        return False
+    try:
+        return str(params.get_effective_value(pkey)).strip() == str(value).strip()
+    except Exception:
+        return False
+
+
 class EspPushListener:
     def __init__(self, cfg: Settings, log: Callable[[str], None]):
         self.cfg = cfg
@@ -239,16 +262,21 @@ class EspPushListener:
         bridge = DeviceBridge(self.cfg, params, logs)
         production_logs = ProductionLogManager(db, cfg=self.cfg, outbox=outbox)
 
-        logs.log("esp-plc", "in", f"esp->raspi: {line}")
-        logs.log("raspi", "in", f"esp-plc push: {line}")
-
         parsed = parse_operation_line(line)
         if not parsed:
+            logs.log("esp-plc", "in", f"esp->raspi: {line}")
+            logs.log("raspi", "in", f"esp-plc push: {line}")
             logs.log("esp-plc", "out", "raspi->esp: NAK_Syntax")
             return "NAK_Syntax"
 
         ptype, pid, op, value = parsed
         pkey = f"{ptype}{pid}"
+        if op == "write" and _duplicate_position_actual(params, pkey, value):
+            return f"ACK_{pkey}={value}"
+
+        logs.log("esp-plc", "in", f"esp->raspi: {line}")
+        logs.log("raspi", "in", f"esp-plc push: {line}")
+
         if not params.get_meta(pkey):
             resp = f"{pkey}=NAK_UnknownParam"
             logs.log("esp-plc", "out", f"raspi->esp: {resp}")
