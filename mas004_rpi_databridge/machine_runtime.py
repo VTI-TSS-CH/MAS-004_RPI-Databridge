@@ -264,17 +264,23 @@ WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
 STOP_MODE_AXIS_TARGETS_MM = {
     5: 0.0,    # Material-Kontrollkamera TV1
-    6: -20.0,  # Sensor Etikettenerfassung
-    7: -20.0,  # Sensor Auswurfkontrolle
     8: 100.0,  # Etikettenanschlag links
     9: 100.0,  # Etikettenanschlag vorne/rechts
+}
+STOP_MODE_FORMAT_AXIS_TARGET_PARAM_KEYS = {
+    6: "MAP0061",  # Sensor Etikettenerfassung
+    7: "MAP0062",  # Sensor Auswurfkontrolle
+}
+STOP_MODE_FORMAT_AXIS_FALLBACK_TARGETS_MM = {
+    6: -20.0,
+    7: -20.0,
 }
 STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
 STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
 STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 8.0
 STOP_MODE_POSITION_VERIFY_POLL_S = 0.1
-STOP_MODE_POSITION_LOGIC_VERSION = 10
+STOP_MODE_POSITION_LOGIC_VERSION = 11
 STOP_MODE_POSITION_LIMIT_MARGIN_TENTHS = 1
 SETUP_AXIS_POSITION_TOLERANCE_TENTHS = 1
 SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S = 45.0
@@ -5003,8 +5009,25 @@ class MachineRuntime:
         )
         return result
 
-    def _stop_mode_target_key(self) -> str:
-        return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()))
+    def _stop_mode_axis_targets_mm(self) -> dict[int, float]:
+        targets = dict(STOP_MODE_AXIS_TARGETS_MM)
+        for motor_id, pkey in sorted(STOP_MODE_FORMAT_AXIS_TARGET_PARAM_KEYS.items()):
+            fallback = STOP_MODE_FORMAT_AXIS_FALLBACK_TARGETS_MM.get(int(motor_id))
+            if not self.params.get_meta(pkey):
+                if fallback is not None:
+                    targets[int(motor_id)] = float(fallback)
+                continue
+            raw = self.params.get_effective_value(pkey)
+            try:
+                targets[int(motor_id)] = int(round(float(raw))) / 10.0
+            except Exception:
+                if fallback is not None:
+                    targets[int(motor_id)] = float(fallback)
+        return targets
+
+    def _stop_mode_target_key(self, targets_mm: dict[int, float] | None = None) -> str:
+        targets = targets_mm if targets_mm is not None else self._stop_mode_axis_targets_mm()
+        return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(targets.items()))
 
     def _block_position_axis_if_live_outside_limits(
         self,
@@ -5224,7 +5247,8 @@ class MachineRuntime:
         ts: float,
     ) -> None:
         stop_info = dict(info.get("stop_positions") or {})
-        target_key = self._stop_mode_target_key()
+        targets_mm = self._stop_mode_axis_targets_mm()
+        target_key = self._stop_mode_target_key(targets_mm)
         if int(state or 0) != 9:
             if stop_info.get("active"):
                 stop_info["active"] = False
@@ -5276,7 +5300,7 @@ class MachineRuntime:
             "attempt_count": (0 if reset_attempt_counter else int(stop_info.get("attempt_count") or 0)) + 1,
             "target_key": target_key,
             "last_attempt_ts": ts,
-            "targets_mm": dict(STOP_MODE_AXIS_TARGETS_MM),
+            "targets_mm": dict(targets_mm),
             "results": [],
         }
         if not client.available():
@@ -5286,7 +5310,7 @@ class MachineRuntime:
 
         errors: list[str] = []
         accepted_targets_mm: dict[int, float] = {}
-        for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()):
+        for motor_id, target_mm in sorted(targets_mm.items()):
             try:
                 restore = apply_motor_setup_master_config_to_client(
                     self.params,
@@ -5399,11 +5423,12 @@ class MachineRuntime:
             )
         else:
             stop_info.update({"ok": True, "errors": [], "finished_ts": now_ts()})
-            self.logs.log("machine", "info", "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=100mm")
+            target_text = ", ".join(f"ID{motor_id}={target_mm:g}mm" for motor_id, target_mm in sorted(targets_mm.items()))
+            self.logs.log("machine", "info", "Stop-Positionssatz gesendet: " + target_text)
             self._record_event(
                 "stop_mode_axis_targets",
                 "info",
-                "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=100mm",
+                "Stop-Positionssatz gesendet: " + target_text,
                 stop_info,
             )
         info["stop_positions"] = stop_info
@@ -5589,7 +5614,7 @@ class MachineRuntime:
     def _verify_stop_mode_axis_targets(self, client: EspMotorClient) -> dict[str, Any]:
         return self._verify_axis_targets(
             client,
-            STOP_MODE_AXIS_TARGETS_MM,
+            self._stop_mode_axis_targets_mm(),
             tolerance_tenths=STOP_MODE_POSITION_TOLERANCE_TENTHS,
             timeout_s=STOP_MODE_POSITION_VERIFY_TIMEOUT_S,
             poll_s=STOP_MODE_POSITION_VERIFY_POLL_S,
