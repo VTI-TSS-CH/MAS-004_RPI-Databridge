@@ -3374,6 +3374,87 @@ class MachineRuntimeTests(unittest.TestCase):
         runtime._prepare_next_production_wickler_takt.assert_called_once()
         runtime._production_esp_retry.assert_not_called()
 
+    def test_production_esp_monitor_fallback_sends_first_wickler_ready(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True, "active_since_ts": 1234.5}
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+
+        def fake_esp(command, **_kwargs):
+            if command == "PROCESS PRODUCTION DIAG?":
+                return (
+                    'JSON {"active":true,"running":true,"phase":9,'
+                    '"reason":"first_print_position_reached_wait_wickler",'
+                    '"last_error":"","label_no":1,"wickler_ready_accepted":false,'
+                    '"position_command_mm":620.178,"error_mm":-0.3324,'
+                    '"infeed_speed_mm_s":0.0,"drive_speed_mm_s":0.0}'
+                )
+            if command == "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1":
+                return "ACK_PROCESS_PRODUCTION_WICKLER_READY"
+            raise AssertionError(command)
+
+        runtime._production_esp = Mock(side_effect=fake_esp)
+
+        result = runtime._monitor_active_production_esp(production_info, 100.0)
+
+        self.assertIsNone(result)
+        fallback = production_info["esp_first_wickler_ready_fallback"]
+        self.assertTrue(fallback["ok"], fallback)
+        self.assertTrue(production_info["first_print_wickler_ready"]["esp_ready_ok"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once_with(
+            label_no=1,
+            reason="esp_diag_first_print_wait_fallback",
+        )
+        commands = [call.args[0] for call in runtime._production_esp.call_args_list]
+        self.assertEqual(
+            ["PROCESS PRODUCTION DIAG?", "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1"],
+            commands,
+        )
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT severity,event_type,message FROM machine_events "
+                "WHERE event_type='production_first_print_ready_fallback'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("info", row[0])
+        self.assertIn("Label 1", row[2])
+
+    def test_production_esp_monitor_stops_on_runner_last_error(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True}
+        runtime._production_esp = Mock(
+            return_value=(
+                'JSON {"active":true,"running":false,"phase":9,'
+                '"reason":"first_print_position_reached_wait_wickler",'
+                '"last_error":"wickler_indexed_ready_timeout","label_no":1}'
+            )
+        )
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "target_state": 21})
+        runtime._notify_microtom = Mock()
+
+        result = runtime._monitor_active_production_esp(production_info, 100.0)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["ok"])
+        self.assertEqual("wickler_indexed_ready_timeout", result["fault"])
+        runtime._stop_production_motion.assert_called_once_with(
+            reason="production_esp_runner_fault:wickler_indexed_ready_timeout",
+            target_state=21,
+        )
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+        runtime._notify_microtom.assert_called_with("MAS0028", "1", dedupe_key="machine:MAS0028")
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT severity,event_type,message FROM machine_events "
+                "WHERE event_type='production_esp_runner_fault'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("error", row[0])
+        self.assertIn("wickler_indexed_ready_timeout", row[2])
+
     def test_position_axis_preflight_alarm_latches_axis_mae(self):
         runtime = self.build_runtime()
         runtime._notify_microtom = Mock()

@@ -204,6 +204,9 @@ PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM = 1200.0
 PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S = 0.35
 PRODUCTION_WICKLER_MONITOR_INTERVAL_S = 0.5
 PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES = 3
+PRODUCTION_ESP_MONITOR_INTERVAL_S = 0.5
+PRODUCTION_ESP_MONITOR_COMM_MAX_MISSES = 3
+PRODUCTION_ESP_FIRST_READY_FALLBACK_INTERVAL_S = 0.75
 PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0001",
     "MAP0002",
@@ -1218,15 +1221,25 @@ class MachineRuntime:
                 purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
 
         if bool(production_info.get("active")) and int(new_state or 0) == 5:
-            wickler_monitor = self._monitor_active_production_wicklers(production_info, ts)
-            if wickler_monitor is not None:
+            esp_monitor = self._monitor_active_production_esp(production_info, ts)
+            if esp_monitor is not None:
                 production_info["active"] = False
-                production_info["last_stop"] = dict(wickler_monitor.get("stop") or {})
+                production_info["last_stop"] = dict(esp_monitor.get("stop") or {})
                 production_info.pop("pending_start", None)
                 new_state = 21
                 requested_state = 21
-                state_source = "production_wickler_fault"
+                state_source = "production_esp_runner_fault"
                 purge_active = True
+            else:
+                wickler_monitor = self._monitor_active_production_wicklers(production_info, ts)
+                if wickler_monitor is not None:
+                    production_info["active"] = False
+                    production_info["last_stop"] = dict(wickler_monitor.get("stop") or {})
+                    production_info.pop("pending_start", None)
+                    new_state = 21
+                    requested_state = 21
+                    state_source = "production_wickler_fault"
+                    purge_active = True
 
         esp_machine_state_sync = dict(info.get("esp_machine_state_sync") or {})
         esp_sync_failed_state = _safe_int(esp_machine_state_sync.get("failed_state"), -1)
@@ -3763,6 +3776,295 @@ class MachineRuntime:
             item["ok"] = True
             items.append(item)
         return items
+
+    @staticmethod
+    def _parse_esp_json_reply(reply: str) -> dict[str, Any]:
+        text = str(reply or "").strip()
+        if text.upper().startswith("JSON "):
+            text = text[5:].strip()
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError(f"ESP JSON reply is not an object: {reply!r}")
+        return payload
+
+    @staticmethod
+    def _production_esp_diag_summary(diag: dict[str, Any]) -> dict[str, Any]:
+        keys = (
+            "active",
+            "running",
+            "phase",
+            "reason",
+            "last_error",
+            "label_no",
+            "labels_printed",
+            "position_commanded",
+            "position_command_mm",
+            "target_mm",
+            "error_mm",
+            "abs_error_mm",
+            "registration_attempts",
+            "max_attempts",
+            "wickler_ready_accepted",
+            "motor_busy",
+            "motor_ready",
+            "infeed_speed_mm_s",
+            "drive_speed_mm_s",
+        )
+        return {key: diag.get(key) for key in keys if key in diag}
+
+    @staticmethod
+    def _production_esp_waits_for_first_wickler_ready(diag: dict[str, Any]) -> bool:
+        reason = str(diag.get("reason") or "").strip()
+        phase = _safe_int(diag.get("phase"), -1)
+        label_no = _safe_int(diag.get("label_no"), 0)
+        ready_accepted = bool(diag.get("wickler_ready_accepted"))
+        last_error = str(diag.get("last_error") or "").strip()
+        return (
+            label_no > 0
+            and not ready_accepted
+            and not last_error
+            and (
+                reason == "first_print_position_reached_wait_wickler"
+                or phase == 9
+            )
+        )
+
+    def _monitor_active_production_esp(self, production_info: dict[str, Any], ts: float) -> Optional[dict[str, Any]]:
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            return None
+        last_ts = _safe_float(production_info.get("last_esp_monitor_ts"), 0.0)
+        if last_ts > 0.0 and (float(ts) - last_ts) < PRODUCTION_ESP_MONITOR_INTERVAL_S:
+            return None
+        production_info["last_esp_monitor_ts"] = float(ts)
+        try:
+            response = self._production_esp_retry(
+                "PROCESS PRODUCTION DIAG?",
+                read_timeout_s=1.2,
+                attempts=1,
+                settle_s=0.15,
+                priority=True,
+            )
+            diag = self._parse_esp_json_reply(response)
+        except Exception as exc:
+            return self._handle_production_esp_monitor_comm_error(production_info, ts, exc)
+
+        monitor: dict[str, Any] = {
+            "ok": True,
+            "ts": float(ts),
+            "diag": self._production_esp_diag_summary(diag),
+        }
+        production_info["last_esp_monitor"] = monitor
+        production_info.pop("esp_monitor_pending_fault", None)
+
+        last_error = str(diag.get("last_error") or "").strip()
+        active = bool(diag.get("active"))
+        running = bool(diag.get("running"))
+        if active and not running and last_error:
+            monitor["ok"] = False
+            monitor["fault"] = last_error
+            stop_result = self._stop_production_motion(
+                reason=f"production_esp_runner_fault:{last_error}",
+                target_state=21,
+            )
+            monitor["stop"] = stop_result
+            self.params.apply_device_value("MAS0028", "1", promote_default=True)
+            self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+            self._record_event(
+                "production_esp_runner_fault",
+                "error",
+                f"Produktionslauf gestoppt: ESP-Runner meldet {last_error}",
+                monitor,
+            )
+            return monitor
+
+        if active and running and self._production_esp_waits_for_first_wickler_ready(diag):
+            fallback = self._production_first_wickler_ready_diag_fallback(production_info, diag, ts)
+            monitor["first_wickler_ready_fallback"] = fallback
+            production_info["last_esp_monitor"] = monitor
+        return None
+
+    def _handle_production_esp_monitor_comm_error(
+        self,
+        production_info: dict[str, Any],
+        ts: float,
+        exc: Exception,
+    ) -> Optional[dict[str, Any]]:
+        monitor: dict[str, Any] = {
+            "ok": False,
+            "ts": float(ts),
+            "communication_error": True,
+            "error": repr(exc),
+        }
+        pending = dict(production_info.get("esp_monitor_pending_fault") or {})
+        same_signature = str(pending.get("signature") or "") == str(monitor["error"])
+        count = (_safe_int(pending.get("count"), 0) + 1) if same_signature else 1
+        first_ts = _safe_float(pending.get("first_ts"), float(ts)) if same_signature else float(ts)
+        monitor["consecutive_failures"] = count
+        monitor["required_failures"] = PRODUCTION_ESP_MONITOR_COMM_MAX_MISSES
+        monitor["first_failure_ts"] = first_ts
+        production_info["last_esp_monitor"] = monitor
+        production_info["esp_monitor_pending_fault"] = {
+            "kind": "communication",
+            "signature": str(monitor["error"]),
+            "count": count,
+            "first_ts": first_ts,
+            "last_ts": float(ts),
+            "monitor": monitor,
+        }
+        if count < PRODUCTION_ESP_MONITOR_COMM_MAX_MISSES:
+            self._record_event(
+                "production_esp_monitor_transient",
+                "warning",
+                "ESP-Produktionsdiagnose kurzzeitig fehlgeschlagen; Produktionslauf bleibt aktiv",
+                monitor,
+            )
+            return None
+
+        stop_result = self._stop_production_motion(reason="production_esp_monitor_comm_failed", target_state=21)
+        monitor["stop"] = stop_result
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+        self._record_event(
+            "production_esp_runner_fault",
+            "error",
+            "Produktionslauf gestoppt: ESP-Produktionsdiagnose nicht erreichbar",
+            monitor,
+        )
+        return monitor
+
+    def _production_first_wickler_ready_diag_fallback(
+        self,
+        production_info: dict[str, Any],
+        diag: dict[str, Any],
+        ts: float,
+    ) -> dict[str, Any]:
+        label_no = _safe_int(diag.get("label_no"), 0)
+        target_abs = _safe_float(diag.get("position_command_mm"), _safe_float(diag.get("target_mm"), 0.0))
+        target_error = _safe_float(diag.get("error_mm"), 0.0)
+        key = "|".join(
+            (
+                f"label={label_no}",
+                f"target={target_abs:.3f}",
+                f"error={target_error:.3f}",
+            )
+        )
+        previous = dict(production_info.get("esp_first_wickler_ready_fallback") or {})
+        if (
+            str(previous.get("key") or "") == key
+            and (float(ts) - _safe_float(previous.get("ts"), 0.0)) < PRODUCTION_ESP_FIRST_READY_FALLBACK_INTERVAL_S
+        ):
+            return {
+                "ok": True,
+                "skipped": "cooldown",
+                "key": key,
+                "label_no": label_no,
+                "previous": previous,
+            }
+
+        payload = {
+            "type": "production_first_print_position_reached",
+            "label_no": label_no,
+            "target_abs_mm": target_abs,
+            "target_error_mm": target_error,
+            "infeed_speed_mm_s": _safe_float(diag.get("infeed_speed_mm_s"), 0.0),
+            "drive_speed_mm_s": _safe_float(diag.get("drive_speed_mm_s"), 0.0),
+            "source": "esp_diag_monitor",
+        }
+        ready_key = self._first_print_wickler_ready_key(label_no=label_no, payload=payload)
+        result: dict[str, Any] = {
+            "ok": False,
+            "key": key,
+            "ready_key": ready_key,
+            "label_no": label_no,
+            "target_abs_mm": target_abs,
+            "target_error_mm": target_error,
+            "ts": float(ts),
+        }
+        production_info["esp_first_wickler_ready_fallback"] = dict(result, status="started")
+        self._remember_first_print_wickler_ready_attempt(
+            ready_key,
+            label_no=label_no,
+            payload=payload,
+            status="started_diag_fallback",
+        )
+
+        wickler_takt = self._prepare_next_production_wickler_takt(
+            label_no=label_no,
+            reason="esp_diag_first_print_wait_fallback",
+        )
+        esp_ready: dict[str, Any] = {"ok": False, "skipped": "wickler_takt_not_ready"}
+        if bool(wickler_takt.get("ok")):
+            try:
+                response = self._production_esp_retry(
+                    f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
+                    read_timeout_s=8.0,
+                    attempts=4,
+                    settle_s=0.15,
+                    priority=True,
+                )
+                esp_ready = {"ok": True, "response": response}
+                self._remember_first_print_wickler_ready_sent(
+                    ready_key,
+                    label_no=label_no,
+                    payload=payload,
+                    wickler_takt=wickler_takt,
+                    esp_ready=esp_ready,
+                )
+            except Exception as exc:
+                esp_ready = {"ok": False, "error": repr(exc)}
+                self.logs.log(
+                    "esp-plc",
+                    "warning",
+                    f"ESP-Diag-Fallback: Wickler-Ready fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
+                )
+
+        result.update(
+            {
+                "ok": bool(wickler_takt.get("ok")) and bool(esp_ready.get("ok")),
+                "status": "finished",
+                "wickler_takt": wickler_takt,
+                "esp_ready": esp_ready,
+                "wickler_takt_ok": bool(wickler_takt.get("ok")),
+                "esp_ready_ok": bool(esp_ready.get("ok")),
+            }
+        )
+        production_info["esp_first_wickler_ready_fallback"] = dict(result)
+        production_info["first_print_wickler_ready_attempt"] = {
+            "key": ready_key,
+            "label_no": label_no,
+            "target_abs_mm": target_abs,
+            "target_error_mm": target_error,
+            "status": "finished_diag_fallback",
+            "ts": now_ts(),
+            "wickler_takt_ok": bool(wickler_takt.get("ok")),
+            "esp_ready_ok": bool(esp_ready.get("ok")),
+        }
+        if bool(result["ok"]):
+            production_info["first_print_wickler_ready"] = {
+                "key": ready_key,
+                "label_no": label_no,
+                "target_abs_mm": target_abs,
+                "target_error_mm": target_error,
+                "ts": now_ts(),
+                "wickler_takt_ok": True,
+                "esp_ready_ok": True,
+                "source": "esp_diag_monitor",
+            }
+        self._remember_first_print_wickler_ready_attempt(
+            ready_key,
+            label_no=label_no,
+            payload=payload,
+            status="finished_diag_fallback",
+            wickler_takt=wickler_takt,
+            esp_ready=esp_ready,
+        )
+        severity = "info" if result["ok"] else "warning"
+        message = (
+            f"ESP-Diag-Fallback Wickler-Ready Label {label_no}: "
+            f"Wickler ok={int(bool(wickler_takt.get('ok')))}, ESP ok={int(bool(esp_ready.get('ok')))}"
+        )
+        self._record_event("production_first_print_ready_fallback", severity, message, result)
+        return result
 
     def _monitor_active_production_wicklers(self, production_info: dict[str, Any], ts: float) -> Optional[dict[str, Any]]:
         last_ts = _safe_float(production_info.get("last_wickler_monitor_ts"), 0.0)
