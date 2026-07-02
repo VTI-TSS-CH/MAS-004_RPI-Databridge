@@ -154,6 +154,8 @@ def _duplicate_position_actual(params: ParamStore, pkey: str, value: object) -> 
 
 
 def _duplicate_stored_value(params: ParamStore, pkey: str, value: object) -> bool:
+    if _truthy_value(value) and (pkey == "MAE0027" or pkey in BAND_BREAK_ERROR_KEYS):
+        return False
     return stored_value_equals(params, pkey, value)
 
 

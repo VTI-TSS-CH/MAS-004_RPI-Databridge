@@ -441,6 +441,21 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertEqual("0", router.params.get_effective_value("MAE0009"))
             self.assertEqual(0, router.outbox.count())
 
+    def test_duplicate_active_device_band_break_is_still_cleared_in_stop_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0001", "MAS", "0001", "9", "R", "W", "uint8")
+            _insert_param(router.params.db, "MAE0009", "MAE", "0009", "0", "R", "W", "bool")
+            router.params.apply_device_value("MAS0001", "9", promote_default=True)
+            router.params.apply_device_value("MAE0009", "1", promote_default=True)
+
+            resp = router.handle_device_line("MAE0009=1", source="esp-plc", correlation=None)
+
+            self.assertEqual("ACK_MAE0009=0", resp)
+            self.assertEqual("0", router.params.get_effective_value("MAE0009"))
+            self.assertEqual(0, router.outbox.count())
+
     def test_duplicate_inactive_device_fault_clear_is_not_forwarded_to_microtom(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
