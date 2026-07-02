@@ -1656,6 +1656,7 @@ class MachineRuntime:
                 "info",
                 f"Druckposition erreicht: Label {label_no}, Einlaufgeschwindigkeit {infeed_speed:.3f}mm/s",
                 dict(payload or {}),
+                dedupe_window_s=600.0,
             )
             next_wickler_takt = (
                 self._prepare_next_production_wickler_takt(
@@ -2529,7 +2530,15 @@ class MachineRuntime:
         if event_type == "production_first_print_position_reached":
             return "|".join([event_type, str(label_no)])
         if event_type == "production_print_position_reached":
-            return "|".join([event_type, str(label_no)])
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    str(_safe_int(payload.get("run_ms"), 0)),
+                    _event_float_key(payload.get("target_abs_mm") or payload.get("position_command_mm"), 3),
+                    str(_safe_int(payload.get("print_target_count"), 0)),
+                ]
+            )
         if event_type == "production_wickler_indexed_ready":
             return "|".join([event_type, str(label_no)])
         if event_type == "production_wickler_runline_released":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue as queue_module
 import socket
 import threading
 from typing import Callable
@@ -37,6 +38,55 @@ RPI_AUTHORITATIVE_MA_KEYS = {
 }
 
 ESP_PUSH_CONNECTION_LOG = False
+
+
+class _MachineEventDispatcher:
+    def __init__(self, maxsize: int = 512):
+        self._queue: queue_module.Queue[tuple[Settings, dict, str]] = queue_module.Queue(maxsize=maxsize)
+        self._thread = threading.Thread(target=self._run, daemon=True, name="esp-machine-event-dispatcher")
+        self._thread.start()
+
+    def submit(self, cfg: Settings, event: dict, raw_line: str) -> bool:
+        try:
+            self._queue.put_nowait((cfg, dict(event or {}), str(raw_line or "")))
+            return True
+        except queue_module.Full:
+            return False
+
+    def wait_idle(self, timeout_s: float = 5.0) -> bool:
+        done = threading.Event()
+
+        def waiter():
+            self._queue.join()
+            done.set()
+
+        threading.Thread(target=waiter, daemon=True).start()
+        return done.wait(max(0.0, float(timeout_s)))
+
+    def _run(self):
+        while True:
+            cfg, machine_event, raw_line = self._queue.get()
+            try:
+                db = DB(cfg.db_path)
+                params = ParamStore(db)
+                outbox = Outbox(db)
+                logs = LogStore(db)
+                logs.log("esp-plc", "in", f"esp->raspi: {raw_line}")
+                logs.log("raspi", "in", f"esp-plc push: {raw_line}")
+                runtime = MachineRuntime(cfg, db, params, IoStore(db), logs, outbox)
+                result = runtime.handle_event(machine_event)
+                resp = "ACK_EVT" if result.get("ok") else "NAK_EVT_ASYNC"
+                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+            except Exception as exc:
+                try:
+                    LogStore(DB(cfg.db_path)).log("esp-plc", "error", f"async event dispatch failed: {repr(exc)}")
+                except Exception:
+                    pass
+            finally:
+                self._queue.task_done()
+
+
+_EVENT_DISPATCHER = _MachineEventDispatcher()
 
 
 def _is_ipv4(s: str) -> bool:
@@ -176,6 +226,12 @@ class EspPushListener:
                 self.log(f"[ESP-PUSH] close {peer}")
 
     def _process_line(self, line: str) -> str:
+        machine_event = parse_machine_event_line(line)
+        if machine_event is not None:
+            if _EVENT_DISPATCHER.submit(self.cfg, machine_event, line):
+                return "ACK_EVT"
+            return "NAK_EVT_QUEUE_FULL"
+
         db = DB(self.cfg.db_path)
         params = ParamStore(db)
         outbox = Outbox(db)
@@ -185,14 +241,6 @@ class EspPushListener:
 
         logs.log("esp-plc", "in", f"esp->raspi: {line}")
         logs.log("raspi", "in", f"esp-plc push: {line}")
-
-        machine_event = parse_machine_event_line(line)
-        if machine_event is not None:
-            runtime = MachineRuntime(self.cfg, db, params, IoStore(db), logs, outbox)
-            result = runtime.handle_event(machine_event)
-            resp = "ACK_EVT" if result.get("ok") else "NAK_EVT"
-            logs.log("esp-plc", "out", f"raspi->esp: {resp}")
-            return resp
 
         parsed = parse_operation_line(line)
         if not parsed:

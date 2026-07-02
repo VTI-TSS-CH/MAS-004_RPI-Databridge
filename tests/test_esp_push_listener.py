@@ -1,14 +1,19 @@
 import tempfile
 import unittest
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.device_bridge import DeviceBridge
-from mas004_rpi_databridge.esp_push_listener import EspPushListener
-from mas004_rpi_databridge.machine_runtime import PRODUCTION_START_BLOCK_CODE, mark_external_purge_clear
+from mas004_rpi_databridge.esp_push_listener import EspPushListener, _EVENT_DISPATCHER
+from mas004_rpi_databridge.machine_runtime import (
+    PRODUCTION_START_BLOCK_CODE,
+    MachineRuntime,
+    mark_external_purge_clear,
+)
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 
@@ -43,6 +48,29 @@ def _insert_param(db: DB, pkey: str, ptype: str, pid: str, default_v: str, rw: s
 
 
 class EspPushListenerTests(unittest.TestCase):
+    def test_machine_event_push_is_acked_before_runtime_processing_finishes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            DB(str(db_path))
+            cfg = Settings(db_path=str(db_path), peer_base_url="", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            def slow_handle_event(_runtime, _payload):
+                time.sleep(0.4)
+                return {"ok": True}
+
+            with patch.object(MachineRuntime, "handle_event", autospec=True, side_effect=slow_handle_event) as mocked:
+                started = time.monotonic()
+                resp = listener._process_line(
+                    'EVT {"type":"production_print_position_reached","label_no":8}'
+                )
+                elapsed = time.monotonic() - started
+
+                self.assertEqual("ACK_EVT", resp)
+                self.assertLess(elapsed, 0.2)
+                self.assertTrue(_EVENT_DISPATCHER.wait_idle(2.0))
+                self.assertEqual(1, mocked.call_count)
+
     def test_esp_start_is_blocked_before_param_write_while_production_runtime_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "db.sqlite3"
