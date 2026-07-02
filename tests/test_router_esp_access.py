@@ -292,6 +292,39 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertTrue(ok, detail)
             self.assertEqual([("SYNC MAP0001=550", router.cfg.esp_command_timeout_s)], lines)
 
+    def test_mirror_to_esp_skips_unchanged_value_after_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAP0001", "MAP", "0001", "500", "W", "R", "uint16")
+            lines = []
+
+            def _fake_exchange(line, read_timeout_s=0):
+                lines.append((line, read_timeout_s))
+                return "ACK_MAP0001=550"
+
+            router.device_bridge._esp.exchange_line = _fake_exchange
+
+            self.assertEqual((True, "ACK_MAP0001=550"), router.device_bridge.mirror_to_esp("MAP0001", "550"))
+            self.assertEqual((False, "unchanged"), router.device_bridge.mirror_to_esp("MAP0001", "550"))
+            self.assertEqual([("SYNC MAP0001=550", router.cfg.esp_command_timeout_s)], lines)
+
+    def test_duplicate_device_status_value_is_acked_without_log_or_forward(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0027", "MAS", "0027", "1", "R", "W", "uint8")
+            router.params.apply_device_value("MAS0027", "1", promote_default=True)
+
+            resp = router.handle_device_line("MAS0027=1", source="smartwickler", correlation=None)
+
+            self.assertEqual("ACK_MAS0027=1", resp)
+            self.assertEqual("1", router.params.get_effective_value("MAS0027"))
+            self.assertEqual(0, router.outbox.count())
+            with router.params.db._conn() as c:
+                log_count = int(c.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
+            self.assertEqual(0, log_count)
+
     def test_smartwickler_status_push_updates_readonly_value_without_nak(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

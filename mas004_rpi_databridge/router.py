@@ -23,6 +23,7 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore, stored_value_equals
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
@@ -152,6 +153,10 @@ def _duplicate_position_actual(params: ParamStore, pkey: str, value: object) -> 
         return False
 
 
+def _duplicate_stored_value(params: ParamStore, pkey: str, value: object) -> bool:
+    return stored_value_equals(params, pkey, value)
+
+
 def _latched_wickler_dancer_fault_clear(params: ParamStore, pkey: str, value: object) -> bool:
     if _truthy_value(value) or pkey not in WICKLER_DANCER_ERROR_KEYS:
         return False
@@ -189,11 +194,19 @@ class Router:
         origin: Optional[str] = None,
         dedupe_key: Optional[str] = None,
         replace_existing: bool = False,
-    ):
+        suppress_unchanged: bool = False,
+    ) -> bool:
         targets = peer_urls(self.cfg, "/api/inbox")
         if not targets:
             self.logs.log("raspi", "error", "no peer_base_url configured; cannot enqueue message to microtom")
-            return
+            return False
+
+        if suppress_unchanged:
+            parsed = parse_param_line(line)
+            if parsed and not parsed.is_ack and parsed.ptype and parsed.pid and parsed.value is not None:
+                pkey = f"{parsed.ptype}{parsed.pid}"
+                if not ValueDedupeStore(self.params.db).should_send("microtom", pkey, parsed.value):
+                    return False
 
         headers = {}
         if correlation:
@@ -215,6 +228,7 @@ class Router:
                 drop_if_duplicate=bool(dedupe_key),
                 replace_existing=replace_existing,
             )
+        return True
 
     def handle_microtom_line(self, line: str, correlation: Optional[str]) -> Optional[str]:
         parsed = parse_operation_line(line)
@@ -295,8 +309,9 @@ class Router:
         pkey = f"{ptype}{pid}"
         device_source = (source or "device").strip() or "device"
 
-        if op == "write" and _duplicate_position_actual(self.params, pkey, value):
-            return f"ACK_{pkey}={value}"
+        if op == "write":
+            if _duplicate_position_actual(self.params, pkey, value) or _duplicate_stored_value(self.params, pkey, value):
+                return f"ACK_{pkey}={value}"
 
         self.logs.log(device_source, "out", f"{device_source}->raspi: {line}")
 
@@ -362,18 +377,20 @@ class Router:
         response_line: Optional[str] = None
         if self.params.can_actor_read(pkey, actor="microtom"):
             response_line = f"{pkey}={value}"
-            self.logs.log("raspi", "out", f"to microtom: {response_line}")
             state_signal = ptype in {"MAS", "MAE", "MAW"}
             dedupe, replace_existing = (
                 microtom_state_queue_options(pkey, value) if state_signal else (None, False)
             )
-            self._enqueue_to_microtom(
+            forwarded = self._enqueue_to_microtom(
                 response_line,
                 correlation=correlation,
                 origin=device_source,
                 dedupe_key=dedupe,
                 replace_existing=replace_existing,
+                suppress_unchanged=True,
             )
+            if forwarded:
+                self.logs.log("raspi", "out", f"to microtom: {response_line}")
         else:
             self.logs.log("raspi", "info", f"skip microtom forward for {pkey}: microtom access=N")
 
@@ -384,8 +401,10 @@ class Router:
                 mirror_ok, mirror_detail = False, repr(exc)
             if mirror_ok:
                 self.logs.log("raspi", "out", f"forward device value to esp-plc: {pkey}={value}")
-            else:
+            elif mirror_detail != "unchanged":
                 self.logs.log("raspi", "info", f"skip esp mirror for device value {pkey}: {mirror_detail}")
+            else:
+                pass
 
         return response_line
 
@@ -400,8 +419,10 @@ class Router:
         ok, detail = self.device_bridge.mirror_to_esp(pkey, parsed.value)
         if ok:
             self.logs.log("raspi", "out", f"forward to esp-plc: {pkey}={parsed.value}")
-        else:
+        elif detail != "unchanged":
             self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
+        else:
+            pass
 
     def _refresh_vj6530_state_after_success(self, device: str, op: str, pkey: str):
         if device != "vj6530" or op != "write":

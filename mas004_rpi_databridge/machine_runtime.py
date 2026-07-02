@@ -45,6 +45,7 @@ from mas004_rpi_databridge.production_logs import (
 )
 from mas004_rpi_databridge.setup_wickler_orchestrator import SetupWicklerOrchestrator
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
 
 
 def _truthy(raw: Any) -> bool:
@@ -5977,8 +5978,9 @@ class MachineRuntime:
                 continue
             cleared.append(pkey)
         for pkey in cleared:
+            was_active = _truthy(self.params.get_effective_value(pkey))
             self.params.apply_device_value(pkey, "0", promote_default=True)
-            if pkey != "MAS0028":
+            if pkey != "MAS0028" and was_active:
                 self._notify_microtom(pkey, "0", dedupe_key=f"machine:{pkey}")
         self.logs.log("machine", "info", "resettable safety errors cleared: " + ",".join(cleared))
         if kept:
@@ -6534,6 +6536,8 @@ class MachineRuntime:
             microtom_state_queue_options(pkey, value) if dedupe_key else (None, False)
         )
         line = f"{pkey}={value}"
+        if targets and not ValueDedupeStore(self.params.db).should_send("microtom", pkey, value):
+            return
         for url in targets:
             self.outbox.enqueue(
                 "POST",

@@ -220,6 +220,23 @@ class EspPushListenerTests(unittest.TestCase):
                 log_count = int(c.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
             self.assertEqual(0, log_count)
 
+    def test_duplicate_esp_status_value_is_acked_without_log_or_forward(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0027", "MAS", "0027", "1", "R", "W")
+            params = ParamStore(db)
+            params.apply_device_value("MAS0027", "1", promote_default=True)
+            cfg = Settings(db_path=str(db_path), peer_base_url="https://peer-a:9090", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            self.assertEqual("ACK_MAS0027=1", listener._process_line("MAS0027=1"))
+            self.assertEqual("1", params.get_effective_value("MAS0027"))
+            self.assertEqual(0, Outbox(db).count())
+            with db._conn() as c:
+                log_count = int(c.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
+            self.assertEqual(0, log_count)
+
     def test_small_esp_position_actual_delta_is_acked_without_log_or_forward(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "db.sqlite3"

@@ -26,6 +26,7 @@ from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.production_logs import ProductionLogManager
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore, stored_value_equals
 from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
@@ -169,6 +170,10 @@ def _duplicate_position_actual(params: ParamStore, pkey: str, value: object) -> 
         return False
 
 
+def _duplicate_stored_value(params: ParamStore, pkey: str, value: object) -> bool:
+    return stored_value_equals(params, pkey, value)
+
+
 class EspPushListener:
     def __init__(self, cfg: Settings, log: Callable[[str], None]):
         self.cfg = cfg
@@ -276,8 +281,9 @@ class EspPushListener:
 
         ptype, pid, op, value = parsed
         pkey = f"{ptype}{pid}"
-        if op == "write" and _duplicate_position_actual(params, pkey, value):
-            return f"ACK_{pkey}={value}"
+        if op == "write":
+            if _duplicate_position_actual(params, pkey, value) or _duplicate_stored_value(params, pkey, value):
+                return f"ACK_{pkey}={value}"
 
         logs.log("esp-plc", "in", f"esp->raspi: {line}")
         logs.log("raspi", "in", f"esp-plc push: {line}")
@@ -390,6 +396,8 @@ class EspPushListener:
         targets = peer_urls(self.cfg, "/api/inbox")
         if not targets:
             logs.log("raspi", "error", f"no peer_base_url configured; cannot forward ESP push {line}")
+        elif not ValueDedupeStore(db).should_send("microtom", pkey, value):
+            pass
         else:
             dedupe_key = None
             replace_existing = False

@@ -9,6 +9,7 @@ from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
 from mas004_rpi_databridge.timeutil import format_local_timestamp, local_now
 
 DEFAULT_PRODUCTION_LOG_DIR = "/var/lib/mas004_rpi_databridge/production_logs"
@@ -246,6 +247,8 @@ class ProductionLogManager:
         if self.cfg is None or self.outbox is None:
             return
         targets = peer_urls(self.cfg, "/api/inbox")
+        if targets and not ValueDedupeStore(self.db).should_send("microtom", "MAS0030", value):
+            return
         for url in targets:
             self.outbox.enqueue(
                 "POST",

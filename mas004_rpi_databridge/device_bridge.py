@@ -11,6 +11,7 @@ from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
 from mas004_rpi_databridge.device_clients import DeviceWatchdog, EspPlcClient, UltimateClient, ZipherClient
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
 from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 READONLY_TYPES = {"TTE", "TTW", "LSE", "LSW", "MAE", "MAW"}  # push-only from device perspective
@@ -392,6 +393,9 @@ class DeviceBridge:
             return False, "esp-endpoint-missing"
         if not self.params.can_actor_read(pkey, actor="esp32"):
             return False, "esp-no-access"
+        dedupe = ValueDedupeStore(self.params.db)
+        if dedupe.is_duplicate("esp-plc", pkey, value):
+            return False, "unchanged"
         mapping = self.params.get_device_map(pkey)
         esp_key = (mapping.get("esp_key") or pkey).strip()
         esp_access = self.params.actor_access(pkey, actor="esp32")
@@ -404,6 +408,7 @@ class DeviceBridge:
         self.logs.log("esp-plc", "in", f"esp-plc->raspi: {response}")
         if response and "NAK" in response.upper():
             return False, response
+        dedupe.remember("esp-plc", pkey, value)
         return True, response
 
 

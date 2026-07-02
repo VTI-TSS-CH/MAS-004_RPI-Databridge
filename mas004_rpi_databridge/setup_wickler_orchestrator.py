@@ -16,6 +16,7 @@ from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
 
 
 MOTOR3_STOP_TOLERANCE_MM = 0.05
@@ -762,6 +763,8 @@ class SetupWicklerOrchestrator:
         if previous_active == next_active:
             return ok, msg
         line = f"{pkey}={value}"
+        if not ValueDedupeStore(self.params.db).should_send("microtom", pkey, value):
+            return ok, msg
         self.logs.log("raspi", "out", f"to microtom: {line}")
         if next_active:
             self.logs.log("machine", "warning", f"Stoerung gesetzt: {line}")

@@ -123,7 +123,7 @@ class Vj6530Poller:
                 ok, detail = device_bridge.mirror_to_esp(pkey, new_text)
                 if ok:
                     self.logs.log("raspi", "out", f"forward to esp-plc: {line}")
-                else:
+                elif detail != "unchanged":
                     self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
 
             changed += 1

@@ -326,7 +326,8 @@ class Vj6530AsyncListener:
                 if ok:
                     self.logs.log("raspi", "out", f"forward to esp-plc: {line}")
                     break
-                self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
+                if detail != "unchanged":
+                    self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
                 if not retry_until_success or _esp_mirror_is_permanent_failure(detail):
                     break
                 attempt += 1
@@ -392,7 +393,7 @@ def _esp_mirror_is_permanent_failure(detail: str) -> bool:
     text = str(detail or "").strip().lower()
     if not text:
         return False
-    if text in {"esp-simulation", "esp-endpoint-missing", "esp-no-access"}:
+    if text in {"unchanged", "esp-simulation", "esp-endpoint-missing", "esp-no-access"}:
         return True
     return "nak" in text
 
