@@ -269,8 +269,8 @@ STOP_MODE_AXIS_TARGETS_MM = {
 STOP_MODE_POSITION_TOLERANCE_TENTHS = 5
 STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
-STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 30.0
-STOP_MODE_POSITION_VERIFY_POLL_S = 0.5
+STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 8.0
+STOP_MODE_POSITION_VERIFY_POLL_S = 0.1
 STOP_MODE_POSITION_LOGIC_VERSION = 10
 STOP_MODE_POSITION_LIMIT_MARGIN_TENTHS = 1
 SETUP_AXIS_POSITION_TOLERANCE_TENTHS = 1
@@ -1316,6 +1316,21 @@ class MachineRuntime:
             )
             self.logs.log("machine", "info", f"state {snapshot['current_state']} -> {new_state} ({state_source})")
 
+        pending_hmi_command = info.get("pending_hmi_command")
+        if isinstance(pending_hmi_command, dict):
+            pending_target = _safe_int(pending_hmi_command.get("target_state"), 0)
+            pending_age_s = float(ts) - _safe_float(pending_hmi_command.get("queued_ts"), float(ts))
+            pending_transition = next(
+                (transition for transition, final_state in TRANSITION_FINALS.items() if int(final_state) == pending_target),
+                None,
+            )
+            if (
+                int(new_state or 0) == pending_target
+                or (pending_transition is not None and int(new_state or 0) != int(pending_transition))
+                or pending_age_s > 20.0
+            ):
+                info.pop("pending_hmi_command", None)
+
         if int(new_state or 0) == 7 and bool(setup_info.get("pause_pending")):
             setup_info["pause_pending"] = False
             setup_info["pause_completed_ts"] = ts
@@ -1907,7 +1922,21 @@ class MachineRuntime:
         info = dict(state.get("info") or {})
         production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
         production_active = bool(production_info.get("active"))
-        if production_active and current_state == 5:
+        pending_start = production_info.get("pending_start") if isinstance(production_info.get("pending_start"), dict) else {}
+        last_start = production_info.get("last_start") if isinstance(production_info.get("last_start"), dict) else {}
+        last_start_age_s = now_ts() - _safe_float(last_start.get("started_ts"), 0.0)
+        start_in_transition = (
+            current_state == 4
+            and requested_state == 5
+            and (
+                bool(pending_start)
+                or production_active
+                or (bool(last_start.get("ok")) and 0.0 <= last_start_age_s <= 30.0)
+            )
+        )
+        if production_active and current_state in (4, 5):
+            return None
+        if start_in_transition:
             return None
         if current_state == 5 and event_type in {
             "production_fault",
@@ -2304,6 +2333,27 @@ class MachineRuntime:
             f"Virtuelle Taste {request['button']} ausgeloest -> {state_label(request['target_state'])}",
             payload,
         )
+        queued_snapshot = self._state_row()
+        queued_info = dict(queued_snapshot.get("info") or {})
+        queued_info["pending_hmi_command"] = {
+            "button": request["button"],
+            "action": request["action"],
+            "command": int(request["command"]),
+            "from_state": int(request["from_state"]),
+            "target_state": int(request["target_state"]),
+            "queued_ts": now_ts(),
+            "actor": actor,
+        }
+        self._write_state(
+            current_state=int(queued_snapshot.get("current_state") or request["from_state"]),
+            requested_state=int(request["target_state"]),
+            state_source=str(queued_snapshot.get("state_source") or "runtime"),
+            warning_active=bool(queued_snapshot.get("warning_active")),
+            purge_active=bool(queued_snapshot.get("purge_active")),
+            production_label=str(queued_snapshot.get("production_label") or ""),
+            last_label_no=int(queued_snapshot.get("last_label_no") or 0),
+            info=queued_info,
+        )
         # The virtual HMI button must behave like the physical panel: it only
         # queues MAS0002.  The central service loop owns the runtime transition
         # and motion start, avoiding competing refreshes from web/API workers.
@@ -2519,6 +2569,16 @@ class MachineRuntime:
                 "INSERT INTO machine_events(ts,event_type,severity,message,payload_json) VALUES(?,?,?,?,?)",
                 (now_ts(), event_type, severity, message, json.dumps(payload or {}, ensure_ascii=False)),
             )
+
+    def _finalize_production_logging_stop(self, reason: str) -> Optional[dict[str, Any]]:
+        event = self.production_logs.handle_param_change("MAS0002", "2")
+        if event and event.get("event") == "stop":
+            self.logs.log(
+                "raspi",
+                "info",
+                f"production logging ready: {event.get('production_label')} ({reason})",
+            )
+        return event
 
     def _record_production_event_once(
         self,
@@ -3005,7 +3065,14 @@ class MachineRuntime:
             "wickler_standby_percent": PRODUCTION_WICKLER_STANDBY_PERCENT,
         }
 
-    def _production_esp(self, line: str, *, read_timeout_s: float | None = None, priority: bool = False) -> str:
+    def _production_esp(
+        self,
+        line: str,
+        *,
+        read_timeout_s: float | None = None,
+        read_limit: int = 8192,
+        priority: bool = False,
+    ) -> str:
         command = str(line or "").strip()
         if bool(getattr(self.cfg, "esp_simulation", False)):
             response = f"SIM_{command}"
@@ -3019,6 +3086,7 @@ class MachineRuntime:
         response = client.exchange_line(
             command,
             read_timeout_s=read_timeout_s or self.cfg.get_float("esp_command_timeout_s", 8.0),
+            read_limit=max(512, int(read_limit or 8192)),
             priority=priority,
         )
         self.logs.log("esp-plc", "info", f"production motion: {command} -> {response}")
@@ -3033,13 +3101,19 @@ class MachineRuntime:
         read_timeout_s: float | None = None,
         attempts: int = 2,
         settle_s: float = 0.2,
+        read_limit: int = 8192,
         priority: bool = False,
     ) -> str:
         command = str(line or "").strip()
         errors: list[str] = []
         for attempt in range(1, max(1, int(attempts)) + 1):
             try:
-                return self._production_esp(command, read_timeout_s=read_timeout_s, priority=priority)
+                return self._production_esp(
+                    command,
+                    read_timeout_s=read_timeout_s,
+                    read_limit=read_limit,
+                    priority=priority,
+                )
             except Exception as exc:
                 errors.append(repr(exc))
                 if attempt >= max(1, int(attempts)):
@@ -3842,6 +3916,67 @@ class MachineRuntime:
             )
         )
 
+    @staticmethod
+    def _normalize_production_monitor_diag(diag: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(diag or {})
+        if "label_no" not in normalized and "current_label_no" in normalized:
+            normalized["label_no"] = normalized.get("current_label_no")
+        if "position_commanded" not in normalized and "position_issued" in normalized:
+            normalized["position_commanded"] = normalized.get("position_issued")
+        if "error_mm" not in normalized and "target_error_mm" in normalized:
+            normalized["error_mm"] = normalized.get("target_error_mm")
+        if "abs_error_mm" not in normalized and "error_mm" in normalized:
+            normalized["abs_error_mm"] = abs(_safe_float(normalized.get("error_mm"), 0.0))
+        if "active" not in normalized:
+            normalized["active"] = True
+        if "reason" not in normalized:
+            phase = _safe_int(normalized.get("phase"), -1)
+            if phase == 5:
+                normalized["reason"] = "first_print_position_reached_wait_wickler"
+            elif phase == 3:
+                normalized["reason"] = "registering"
+            elif phase == 2:
+                normalized["reason"] = "next_label_print_position"
+            elif phase == 4:
+                normalized["reason"] = "initial_positioning"
+            elif phase == 1:
+                normalized["reason"] = "feed"
+            elif phase == 9:
+                normalized["reason"] = "error"
+            else:
+                normalized["reason"] = "production_status"
+        return normalized
+
+    def _read_production_monitor_diag(self) -> dict[str, Any]:
+        try:
+            response = self._production_esp_retry(
+                "PROCESS PRODUCTION MONITOR?",
+                read_timeout_s=0.8,
+                read_limit=4096,
+                attempts=1,
+                settle_s=0.05,
+                priority=True,
+            )
+            return self._normalize_production_monitor_diag(self._parse_esp_json_reply(response))
+        except Exception as primary_exc:
+            primary_repr = repr(primary_exc)
+            primary_upper = primary_repr.upper()
+            if (
+                "NAK_SYNTAX" not in primary_upper
+                and "NAK_UNKNOWN" not in primary_upper
+                and "JSONDECODEERROR" not in primary_upper
+            ):
+                raise
+            response = self._production_esp_retry(
+                "PROCESS PRODUCTION STATUS?",
+                read_timeout_s=0.8,
+                read_limit=4096,
+                attempts=1,
+                settle_s=0.05,
+                priority=True,
+            )
+            return self._normalize_production_monitor_diag(self._parse_esp_json_reply(response))
+
     def _monitor_active_production_esp(self, production_info: dict[str, Any], ts: float) -> Optional[dict[str, Any]]:
         if bool(getattr(self.cfg, "esp_simulation", False)):
             return None
@@ -3850,14 +3985,7 @@ class MachineRuntime:
             return None
         production_info["last_esp_monitor_ts"] = float(ts)
         try:
-            response = self._production_esp_retry(
-                "PROCESS PRODUCTION DIAG?",
-                read_timeout_s=1.2,
-                attempts=1,
-                settle_s=0.15,
-                priority=True,
-            )
-            diag = self._parse_esp_json_reply(response)
+            diag = self._read_production_monitor_diag()
         except Exception as exc:
             return self._handle_production_esp_monitor_comm_error(production_info, ts, exc)
 
@@ -3870,9 +3998,10 @@ class MachineRuntime:
         production_info.pop("esp_monitor_pending_fault", None)
 
         last_error = str(diag.get("last_error") or "").strip()
+        last_error_benign = last_error.lower() in {"", "reset", "stopped", "completed"}
         active = bool(diag.get("active"))
         running = bool(diag.get("running"))
-        if active and not running and last_error:
+        if active and not running and last_error and not last_error_benign:
             monitor["ok"] = False
             monitor["fault"] = last_error
             stop_result = self._stop_production_motion(
@@ -3880,6 +4009,9 @@ class MachineRuntime:
                 target_state=21,
             )
             monitor["stop"] = stop_result
+            log_event = self._finalize_production_logging_stop("production_esp_runner_fault")
+            if log_event:
+                monitor["production_log"] = log_event
             self.params.apply_device_value("MAS0028", "1", promote_default=True)
             self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
             self._record_event(
@@ -3935,6 +4067,9 @@ class MachineRuntime:
 
         stop_result = self._stop_production_motion(reason="production_esp_monitor_comm_failed", target_state=21)
         monitor["stop"] = stop_result
+        log_event = self._finalize_production_logging_stop("production_esp_monitor_comm_failed")
+        if log_event:
+            monitor["production_log"] = log_event
         self.params.apply_device_value("MAS0028", "1", promote_default=True)
         self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
         self._record_event(
@@ -3952,7 +4087,7 @@ class MachineRuntime:
         ts: float,
     ) -> dict[str, Any]:
         label_no = _safe_int(diag.get("label_no"), 0)
-        target_abs = _safe_float(diag.get("position_command_mm"), _safe_float(diag.get("target_mm"), 0.0))
+        target_abs = _safe_float(diag.get("target_mm"), _safe_float(diag.get("position_command_mm"), 0.0))
         target_error = _safe_float(diag.get("error_mm"), 0.0)
         key = "|".join(
             (
@@ -4121,6 +4256,9 @@ class MachineRuntime:
         monitor["latched_mae"] = self._latch_wickler_monitor_faults(monitor)
         stop_result = self._stop_production_motion(reason="production_wickler_monitor_failed", target_state=21)
         monitor["stop"] = stop_result
+        log_event = self._finalize_production_logging_stop("production_wickler_monitor_failed")
+        if log_event:
+            monitor["production_log"] = log_event
         self.params.apply_device_value("MAS0028", "1", promote_default=True)
         self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
         self._record_event(
@@ -4150,7 +4288,7 @@ class MachineRuntime:
             item: dict[str, Any] = {"role": role}
             errors: list[str] = []
             try:
-                item["indexed_disable"] = client.post_master({"indexedModeEnabled": "0"}, timeout_s=2.0)
+                item["indexed_disable"] = client.post_master({"indexedModeEnabled": "0"}, timeout_s=1.0)
                 if not item["indexed_disable"].get("ok", True):
                     errors.append(f"indexed_disable rejected: {item['indexed_disable']}")
             except Exception as exc:
@@ -4159,7 +4297,7 @@ class MachineRuntime:
             if keep_ready and recover_after_safety:
                 for mode in ("resetAlarm", "etoRecovery"):
                     try:
-                        reply = client.post_mode(mode, timeout_s=3.0)
+                        reply = client.post_mode(mode, timeout_s=1.5)
                         item[mode] = reply
                         if not reply.get("ok", True):
                             errors.append(f"{mode} rejected: {reply}")
@@ -4168,9 +4306,9 @@ class MachineRuntime:
                         errors.append(f"{mode}_error={repr(exc)}")
             try:
                 item["mode"] = (
-                    client.release_for_continuous_motion(timeout_s=2.0)
+                    client.release_for_continuous_motion(timeout_s=1.0)
                     if keep_ready
-                    else client.post_mode("stop", timeout_s=2.0)
+                    else client.post_mode("stop", timeout_s=1.0)
                 )
                 if not item["mode"].get("ok", True):
                     errors.append(f"mode rejected: {item['mode']}")
@@ -4181,9 +4319,9 @@ class MachineRuntime:
                 try:
                     verify: dict[str, Any] = {"ok": False, "errors": ["not_checked"]}
                     state: dict[str, Any] = {}
-                    for attempt in range(1, 9):
+                    for attempt in range(1, 5):
                         try:
-                            state = client.fetch_state(timeout_s=2.0)
+                            state = client.fetch_state(timeout_s=0.6)
                             verify = self._verify_wickler_production_state(role, state)
                         except Exception as exc:
                             verify = {
@@ -4206,7 +4344,7 @@ class MachineRuntime:
                             pass
                         elif not all(error in transient_errors for error in errors_now):
                             break
-                        time.sleep(0.25)
+                        time.sleep(0.1)
                     errors_now = [str(error) for error in verify.get("errors") or []]
                     if errors_now == ["continuousModeReady=false"]:
                         telemetry = dict((state or {}).get("telemetry") or {})
@@ -4243,7 +4381,7 @@ class MachineRuntime:
             self._sync_esp_machine_state(5, required=True)
             # Let the ESP consume the MAS0001 transition reset before the real
             # production start, otherwise pollStateTransitions can clear it again.
-            time.sleep(0.25)
+            time.sleep(0.05)
             sync_info = self._sync_production_params_to_esp(
                 param_map,
                 previous_values=previous_sync_values,
@@ -4270,12 +4408,12 @@ class MachineRuntime:
             # immediately touches the AZD bus. Give the freshly prepared Wickler
             # HTTP writes and the ESP parameter sync a short quiet window, then
             # verify the command channel once before the critical START.
-            time.sleep(0.25)
+            time.sleep(0.05)
             self._production_esp_retry(
                 "PROCESS PRODUCTION STATUS?",
-                read_timeout_s=5.0,
+                read_timeout_s=1.2,
                 attempts=3,
-                settle_s=0.35,
+                settle_s=0.1,
                 priority=True,
             )
             setup_info = dict(state_info.get("setup") or {})
@@ -4432,27 +4570,51 @@ class MachineRuntime:
     def _stop_production_motion(self, *, reason: str, target_state: int) -> dict[str, Any]:
         started_ts = now_ts()
         commands: list[dict[str, Any]] = []
-        for command, timeout_s in (
-            ("PROCESS PRODUCTION STOP", 2.0),
-            ("MOTOR 3 MOVE_VEL_MM_S=0", 1.0),
-            ("PROCESS WICKLER CANCEL", 2.0),
-            ("PROCESS INDEXED STOP", 2.0),
-            ("PROCESS PROFILE STOP", 2.0),
-        ):
+        critical_commands = (
+            ("PROCESS PRODUCTION STOP", 1.2),
+            ("MOTOR 3 MOVE_VEL_MM_S=0", 0.8),
+        )
+        cleanup_commands = (
+            ("PROCESS WICKLER CANCEL", 1.0),
+            ("PROCESS INDEXED STOP", 1.0),
+            ("PROCESS PROFILE STOP", 1.0),
+        )
+        for command, timeout_s in critical_commands:
             try:
-                commands.append({"command": command, "ok": True, "response": self._production_esp(command, read_timeout_s=timeout_s)})
+                commands.append(
+                    {
+                        "command": command,
+                        "ok": True,
+                        "critical": True,
+                        "response": self._production_esp(command, read_timeout_s=timeout_s, priority=True),
+                    }
+                )
             except Exception as exc:
-                commands.append({"command": command, "ok": False, "error": repr(exc)})
+                commands.append({"command": command, "ok": False, "critical": True, "error": repr(exc)})
         motor3_stop = self._verify_motor3_stopped_after_production_stop(commands)
+        for command, timeout_s in cleanup_commands:
+            try:
+                commands.append(
+                    {
+                        "command": command,
+                        "ok": True,
+                        "critical": False,
+                        "response": self._production_esp(command, read_timeout_s=timeout_s),
+                    }
+                )
+            except Exception as exc:
+                commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
         wicklers = self._set_production_wicklers_idle(target_state=target_state)
         self._sync_esp_machine_state(int(target_state or 0), required=False)
+        critical_commands_ok = all(item.get("ok") for item in commands if item.get("critical"))
         result = {
-            "ok": all(item.get("ok") for item in commands) and bool(motor3_stop.get("ok")) and all(item.get("ok") for item in wicklers),
+            "ok": critical_commands_ok and bool(motor3_stop.get("ok")) and all(item.get("ok") for item in wicklers),
             "reason": reason,
             "target_state": int(target_state or 0),
             "started_ts": started_ts,
             "finished_ts": now_ts(),
             "commands": commands,
+            "critical_commands_ok": critical_commands_ok,
             "motor3_stop": motor3_stop,
             "wicklers": wicklers,
         }
@@ -4470,9 +4632,28 @@ class MachineRuntime:
 
     def _verify_motor3_stopped_after_production_stop(self, commands: list[dict[str, Any]]) -> dict[str, Any]:
         snapshots: list[dict[str, Any]] = []
-        for attempt in range(1, 6):
+        if not bool(getattr(self.cfg, "esp_simulation", False)):
             try:
-                response = self._production_esp("MOTOR 3 REFRESH", read_timeout_s=5.0)
+                diag = self._read_production_monitor_diag()
+                monitor_snapshot = {
+                    "attempt": 0,
+                    "ok": True,
+                    "source": "production_monitor",
+                    "active": bool(diag.get("active")),
+                    "running": bool(diag.get("running")),
+                    "phase": diag.get("phase"),
+                    "reason": diag.get("reason"),
+                    "last_error": diag.get("last_error"),
+                }
+                snapshots.append(monitor_snapshot)
+                if not bool(diag.get("active")) and not bool(diag.get("running")):
+                    return {"ok": True, "source": "production_monitor", "snapshots": snapshots}
+            except Exception as exc:
+                snapshots.append({"attempt": 0, "ok": False, "source": "production_monitor", "error": repr(exc)})
+
+        for attempt in range(1, 4):
+            try:
+                response = self._production_esp("MOTOR 3 REFRESH", read_timeout_s=1.0, priority=True)
                 payload = json.loads(str(response or "").removeprefix("JSON ").strip())
                 state = dict(((payload.get("motor") or {}).get("state") or {}))
                 velocity_mode = bool(state.get("velocity_mode"))
@@ -4505,12 +4686,12 @@ class MachineRuntime:
                         {
                             "command": f"verify:{command}",
                             "ok": True,
-                            "response": self._production_esp(command, read_timeout_s=timeout_s),
+                            "response": self._production_esp(command, read_timeout_s=timeout_s, priority=True),
                         }
                     )
                 except Exception as exc:
                     commands.append({"command": f"verify:{command}", "ok": False, "error": repr(exc)})
-            time.sleep(0.25)
+            time.sleep(0.1)
         return {"ok": False, "snapshots": snapshots}
 
     def _motor_feedback_io_snapshot(self, motor_ids: Any) -> dict[int, dict[str, dict[str, Any]]]:

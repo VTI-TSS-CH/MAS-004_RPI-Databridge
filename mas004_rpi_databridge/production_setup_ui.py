@@ -234,7 +234,7 @@ async function init(){{
   catch(err){{ document.getElementById("send_status").textContent = err.message; }}
 }}
 init();
-setInterval(()=>{{ if(!document.hidden) refreshProductionStatus().catch(()=>{{}}); }}, 5000);
+setInterval(()=>{{ if(!document.hidden) refreshProductionStatus().catch(()=>{{}}); }}, 1500);
 </script>
 </body>
 </html>

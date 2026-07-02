@@ -481,7 +481,7 @@ def machine_runtime_loop(cfg_path: str):
     reload_due = 0.0
     tick_s = 0.50
     next_tick = time.monotonic()
-    fast_states = {2, 3, 4, 5, 6, 10, 11, 12, 13, 16, 17}
+    fast_states = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17}
     while True:
         try:
             now_m = time.monotonic()
@@ -501,7 +501,7 @@ def machine_runtime_loop(cfg_path: str):
             elif current_state in {20, 21}:
                 tick_s = 0.75
             else:
-                tick_s = 1.00
+                tick_s = 0.75
         except Exception as e:
             runtime = None
             print(f"[MACHINE] loop error: {repr(e)}", flush=True)

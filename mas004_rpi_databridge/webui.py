@@ -4262,7 +4262,7 @@ async function loadAll(){
   }
 }
 loadAll();
-setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
+setInterval(()=>{ if(!document.hidden) loadAll(); }, 1000);
 </script>
 </body>
 </html>

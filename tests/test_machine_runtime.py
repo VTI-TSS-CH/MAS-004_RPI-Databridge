@@ -3411,7 +3411,7 @@ class MachineRuntimeTests(unittest.TestCase):
         runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
 
         def fake_esp(command, **_kwargs):
-            if command == "PROCESS PRODUCTION DIAG?":
+            if command == "PROCESS PRODUCTION MONITOR?":
                 return (
                     'JSON {"active":true,"running":true,"phase":9,'
                     '"reason":"first_print_position_reached_wait_wickler",'
@@ -3437,7 +3437,7 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         commands = [call.args[0] for call in runtime._production_esp.call_args_list]
         self.assertEqual(
-            ["PROCESS PRODUCTION DIAG?", "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1"],
+            ["PROCESS PRODUCTION MONITOR?", "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1"],
             commands,
         )
         with self.db._conn() as c:
@@ -3453,6 +3453,8 @@ class MachineRuntimeTests(unittest.TestCase):
         self.cfg.esp_simulation = False
         runtime = self.build_runtime()
         self.mark_production_active(runtime)
+        started = runtime.production_logs.handle_param_change("MAS0002", "1")
+        self.assertEqual("start", started["event"])
         production_info = {"active": True}
         runtime._production_esp = Mock(
             return_value=(
@@ -3473,6 +3475,9 @@ class MachineRuntimeTests(unittest.TestCase):
             reason="production_esp_runner_fault:wickler_indexed_ready_timeout",
             target_state=21,
         )
+        manifest = runtime.production_logs.ready_manifest()
+        self.assertFalse(manifest["active"])
+        self.assertTrue(manifest["ready"])
         self.assertEqual("1", self.params.get_effective_value("MAS0028"))
         runtime._notify_microtom.assert_called_with("MAS0028", "1", dedupe_key="machine:MAS0028")
         with self.db._conn() as c:
@@ -3483,6 +3488,43 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual("error", row[0])
         self.assertIn("wickler_indexed_ready_timeout", row[2])
+
+    def test_production_esp_monitor_falls_back_to_status_for_old_firmware(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True}
+
+        def fake_esp(command, **_kwargs):
+            if command == "PROCESS PRODUCTION MONITOR?":
+                raise RuntimeError("ESP rejected 'PROCESS PRODUCTION MONITOR?': NAK_Syntax")
+            if command == "PROCESS PRODUCTION STATUS?":
+                return (
+                    'JSON {"running":true,"completed":false,"phase":5,'
+                    '"current_label_no":1,"wickler_ready_accepted":false,'
+                    '"last_error":"","position_issued":true,'
+                    '"target_error_mm":-0.047}'
+                )
+            if command == "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1":
+                return "ACK_PROCESS_PRODUCTION_WICKLER_READY"
+            raise AssertionError(command)
+
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp = Mock(side_effect=fake_esp)
+
+        result = runtime._monitor_active_production_esp(production_info, 100.0)
+
+        self.assertIsNone(result)
+        self.assertTrue(production_info["first_print_wickler_ready"]["esp_ready_ok"])
+        commands = [call.args[0] for call in runtime._production_esp.call_args_list]
+        self.assertEqual(
+            [
+                "PROCESS PRODUCTION MONITOR?",
+                "PROCESS PRODUCTION STATUS?",
+                "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1",
+            ],
+            commands,
+        )
 
     def test_position_axis_preflight_alarm_latches_axis_mae(self):
         runtime = self.build_runtime()

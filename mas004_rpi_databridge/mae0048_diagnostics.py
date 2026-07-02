@@ -210,8 +210,9 @@ def _derive_findings(params: dict[str, str], registration: dict[str, Any], motor
     if registration.get("position_mode"):
         commanded = "kommandiert" if registration.get("position_commanded") is True else "noch nicht kommandiert"
         findings.append(
-            "Druckpositionierung laeuft als AZD-Zielweg "
-            f"({commanded}, Zielweg {_safe_float(registration.get('position_command_mm'), 0.0):.3f} mm)."
+            "Druckpositionierung laeuft mit AZD-Absolutbefehl "
+            f"({commanded}, Befehl {_safe_float(registration.get('position_command_mm'), 0.0):.3f} mm, "
+            f"Druckziel {_safe_float(registration.get('target_mm'), 0.0):.3f} mm)."
         )
     error = _safe_float(registration.get("abs_error_mm"), 0.0)
     tolerance = max(0.0, _safe_float(registration.get("tolerance_mm"), 0.05))

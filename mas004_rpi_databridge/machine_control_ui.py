@@ -209,6 +209,10 @@ const bypassCards = [
   }}
 ];
 let refreshTimer = null;
+const transitionStates = new Set([2,4,6,8,10,12,14,16,18]);
+const AUTO_REFRESH_MS = 500;
+const FAST_REFRESH_MS = 180;
+const FAST_REFRESH_WINDOW_MS = 5000;
 function token(){{ try{{return localStorage.getItem(TOKEN_KEY)||"";}}catch(e){{return"";}} }}
 function loadAuditPrefs(){{
   try{{return JSON.parse(localStorage.getItem(AUDIT_PREF_KEY) || "{{}}") || {{}};}}catch(e){{return {{}};}}
@@ -299,15 +303,37 @@ function renderButtons(machine){{
   const resetContext = state === 20 || state === 21 || !!machine.purge_active || !!safety.latched;
   const allowed = info.allowed_actions || {{}};
   const mask = info.button_mask || {{}};
+  const pending = info.pending_hmi_command || null;
+  const pendingTarget = Number(pending?.target_state || 0);
+  const commandBusy = !!pending && pendingTarget > 0 && pendingTarget !== state;
   document.getElementById("button_row").innerHTML = buttons.map(([key]) => {{
     const action = actionForButton(key, state, resetContext);
     const enabled = resetContext
-      ? (key === "start_pause")
-      : (!!allowed[action] && !!mask[action]);
-    const label = buttonLabel(key, state, resetContext);
+      ? (key === "start_pause" && !commandBusy)
+      : (!commandBusy && !!allowed[action] && !!mask[action]);
+    const baseLabel = buttonLabel(key, state, resetContext);
+    const label = commandBusy && pending?.button === key ? `${{baseLabel}}...` : baseLabel;
     const cls = key === "stop" ? " stop" : (resetContext && key === "start_pause" ? " reset" : "");
     return `<button class="control${{enabled?" enabled":""}}${{cls}}" onclick="pressButton('${{key}}')" ${{enabled?"":"disabled"}}>${{esc(label)}}</button>`;
   }}).join("");
+}}
+function waitMs(ms){{ return new Promise(resolve => setTimeout(resolve, ms)); }}
+function transitionSettled(machine, targetState){{
+  const state = Number(machine?.current_state || 0);
+  const requested = Number(machine?.requested_state || state);
+  const target = Number(targetState || 0);
+  if(transitionStates.has(state)) return false;
+  if(target > 0 && state !== target) return false;
+  return state === requested;
+}}
+async function fastRefreshAfterCommand(targetState){{
+  const deadline = Date.now() + FAST_REFRESH_WINDOW_MS;
+  let last = await loadAll({{audit:false}});
+  while(Date.now() < deadline && !transitionSettled(last, targetState)){{
+    await waitMs(FAST_REFRESH_MS);
+    last = await loadAll({{audit:false}});
+  }}
+  await loadAll();
 }}
 async function pressButton(button){{
   const el = document.getElementById("button_msg");
@@ -319,7 +345,7 @@ async function pressButton(button){{
       body:JSON.stringify({{button}})
     }});
     el.textContent = `OK: ${{j.button}} -> MAS0002=${{j.command}}`;
-    await loadAll();
+    await fastRefreshAfterCommand(j.target_state);
   }}catch(err){{
     el.textContent = `Fehler: ${{err.message}}`;
   }}
@@ -401,9 +427,14 @@ function renderMachine(machine){{
   document.getElementById("health_pill").textContent = machine.purge_active
     ? "Purge"
     : (safetyLatched ? "Safety/Reset" : (machine.warning_active ? "Warnung" : "bereit"));
+  const pending = info.pending_hmi_command || null;
+  const pendingText = pending
+    ? `${{esc(pending.button || "-")}} -> ${{esc(pending.target_state || "-")}}`
+    : "-";
   kv("state_kv", [
     ["Ist", `<span class="pill">${{esc(machine.current_state)}} - ${{esc(machine.current_state_label)}}</span>`],
     ["Soll", `<span class="pill">${{esc(machine.requested_state)}} - ${{esc(machine.requested_state_label)}}</span>`],
+    ["Befehl", `<span class="pill">${{pendingText}}</span>`],
     ["Produktion", esc(machine.production_label || "-")],
     ["Letztes Label", esc(machine.last_label_no ?? "-")],
     ["Statusleuchte", `<span class="pill">${{esc(lamp.color || "-")}} ${{lamp.blink ? "blinkend" : ""}}</span>`]
@@ -554,16 +585,18 @@ async function loadAudit(){{
   renderAudit(j.entries || []);
   document.getElementById("audit_status").textContent = `Fenster: ${{hours}} h, Limit: ${{limit}}, Aufbewahrung: ${{j.keep_hours}} h`;
 }}
-async function loadAll(){{
+async function loadAll(opts={{}}){{
   try{{
     const machine = await api("/api/machine/overview");
     renderMachine(machine);
     if(!window.bypassLoaded) await loadBypass();
-    await loadAudit();
+    if(opts.audit !== false) await loadAudit();
+    return machine;
   }}catch(err){{
     document.getElementById("health_pill").className = "pill bad";
     document.getElementById("health_pill").textContent = err.message;
     document.getElementById("audit_status").textContent = err.message;
+    throw err;
   }}
 }}
 async function saveRetention(){{
@@ -586,7 +619,7 @@ function downloadAudit(){{
 }}
 function schedule(){{
   if(refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }}, 1000);
+  refreshTimer = setInterval(()=>{{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll().catch(()=>{{}}); }}, AUTO_REFRESH_MS);
 }}
 document.getElementById("auto_refresh").addEventListener("change", schedule);
 document.getElementById("keep_hours").addEventListener("change", saveAuditPrefs);
@@ -596,7 +629,7 @@ document.querySelectorAll(".audit-filter").forEach(el => el.addEventListener("ch
 document.getElementById("audit_search").addEventListener("input", renderFilteredAudit);
 applyAuditPrefs();
 schedule();
-loadAll();
+loadAll().catch(()=>{{}});
 </script>
 </body>
 </html>
