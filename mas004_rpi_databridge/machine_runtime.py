@@ -3377,6 +3377,7 @@ class MachineRuntime:
                 "trim_delta_mm": _safe_float(telemetry.get("indexedTrimDeltaMm"), 0.0),
                 "role_error_percent": _safe_float(telemetry.get("indexedRoleErrorPercent"), 0.0),
                 "trim_mm_per_percent": _safe_float(telemetry.get("indexedTrimMmPerPercent"), 0.0),
+                "prepare_frozen": _truthy(telemetry.get("indexedPrepareFrozen")),
                 "wipe_percent": _safe_float(telemetry.get("wipePercent"), 0.0),
                 "standby_percent": _safe_float(
                     telemetry.get("indexedStandbyPercent"),
@@ -3409,6 +3410,7 @@ class MachineRuntime:
                     f"Regler {indexed_plan['trim_state_mm']:.3f}mm, "
                     f"Delta {indexed_plan['trim_delta_mm']:.3f}mm), "
                     f"effektiv {indexed_plan['prepared_travel_mm']:.3f}mm, "
+                    f"Freeze {1 if indexed_plan['prepare_frozen'] else 0}, "
                     f"Seq {indexed_plan['command_seq']}"
                 ),
             )
