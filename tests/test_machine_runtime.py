@@ -310,6 +310,68 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(all(item["ok"] for item in result), result)
         self.assertTrue(all(item["verify"]["ok"] for item in result), result)
 
+    def test_pause_idle_after_safety_recovers_wicklers_before_ready(self):
+        runtime = self.build_runtime()
+        calls: list[tuple[str, str, object]] = []
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s=None):
+                calls.append((self.role, "master", dict(payload)))
+                return {"ok": True}
+
+            def post_mode(self, mode, timeout_s=None):
+                calls.append((self.role, "mode", mode))
+                return {"ok": True}
+
+            def release_for_continuous_motion(self, timeout_s=None):
+                calls.append((self.role, "ready", bool(timeout_s)))
+                return {"ok": True, "readyMotion": True}
+
+            def fetch_state(self, timeout_s=None):
+                return {
+                    "master": {"indexedModeEnabled": False},
+                    "telemetry": {
+                        "modeLabel": "Bereit",
+                        "modeCss": "ready",
+                        "externalStopActive": False,
+                        "indexedModeEnabled": False,
+                        "wipePercent": 50.0,
+                    },
+                    "drive": {
+                        "online": True,
+                        "ready": True,
+                        "move": False,
+                        "alarm": False,
+                        "continuousModeReady": True,
+                        "lastCommandOk": True,
+                    },
+                    "values": {},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient):
+            result = runtime._set_production_wicklers_idle(target_state=7, recover_after_safety=True)
+
+        self.assertTrue(all(item["ok"] for item in result), result)
+        self.assertEqual(
+            [
+                ("unwinder", "master", {"indexedModeEnabled": "0"}),
+                ("unwinder", "mode", "resetAlarm"),
+                ("unwinder", "mode", "etoRecovery"),
+                ("unwinder", "ready", True),
+                ("rewinder", "master", {"indexedModeEnabled": "0"}),
+                ("rewinder", "mode", "resetAlarm"),
+                ("rewinder", "mode", "etoRecovery"),
+                ("rewinder", "ready", True),
+            ],
+            calls,
+        )
+
     def test_pause_idle_retries_transient_wickler_offline_after_release(self):
         runtime = self.build_runtime()
 
@@ -2417,6 +2479,7 @@ class MachineRuntimeTests(unittest.TestCase):
             patch.object(runtime, "_perform_safety_reset", return_value={"ok": True, "steps": []}) as full_reset,
             patch.object(runtime, "_stop_production_motion", return_value={"ok": True}) as stop_motion,
             patch.object(runtime, "_apply_stop_mode_axis_targets", return_value=None) as stop_axes,
+            patch.object(runtime, "_start_light_curtain_wickler_recovery_background") as wickler_recovery,
         ):
             snapshot = runtime.refresh()
 
@@ -2424,6 +2487,7 @@ class MachineRuntimeTests(unittest.TestCase):
         full_reset.assert_not_called()
         stop_motion.assert_not_called()
         stop_axes.assert_called_once()
+        wickler_recovery.assert_not_called()
         self.assertEqual(7, stop_axes.call_args.args[0])
         self.assertEqual(7, snapshot["current_state"])
         self.assertEqual(7, snapshot["requested_state"])
@@ -2440,6 +2504,92 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(snapshot["info"]["safety"]["last_auto_reset"]["ok"])
         self.assertFalse(snapshot["info"]["safety"]["last_auto_reset"]["state_changed"])
         self.assertFalse(snapshot["info"]["safety"]["last_auto_reset"]["purge_changed"])
+
+    def test_light_curtain_release_in_pause_recovers_wicklers_to_ready(self):
+        runtime = self.build_runtime()
+        auto_reset_ts = now_ts() - 1.0
+        self.params.apply_device_value("MAS0001", "7", promote_default=True)
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "safety": {
+                    "latched": False,
+                    "phase": "ready",
+                    "last_auto_reset": {
+                        "source": "light_curtain_auto_reset",
+                        "reason": "lichtgitter",
+                        "ts": auto_reset_ts,
+                        "ok": True,
+                    },
+                },
+                "production_runtime": {"active": False},
+            },
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_8", "1", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_7", "1", "live", "test")
+
+        with patch.object(
+            runtime,
+            "_start_light_curtain_wickler_recovery_background",
+            return_value={
+                "ok": True,
+                "queued": True,
+                "in_progress": True,
+                "auto_reset_ts": auto_reset_ts,
+            },
+        ) as wickler_recovery:
+            snapshot = runtime.refresh()
+
+        wickler_recovery.assert_called_once()
+        self.assertAlmostEqual(auto_reset_ts, wickler_recovery.call_args.args[0], places=3)
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(7, snapshot["requested_state"])
+        self.assertFalse(snapshot["purge_active"])
+        safety = snapshot["info"]["safety"]
+        self.assertTrue(safety["light_curtain_wickler_recovery_running"])
+        self.assertTrue(safety["last_light_curtain_wickler_recovery_start"]["queued"])
+        self.assertEqual(auto_reset_ts, safety["last_light_curtain_wickler_recovery_start"]["auto_reset_ts"])
+
+    def test_light_curtain_release_in_pause_does_not_repeat_completed_wickler_recovery(self):
+        runtime = self.build_runtime()
+        auto_reset_ts = now_ts() - 1.0
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "safety": {
+                    "latched": False,
+                    "phase": "ready",
+                    "last_auto_reset": {
+                        "source": "light_curtain_auto_reset",
+                        "reason": "lichtgitter",
+                        "ts": auto_reset_ts,
+                        "ok": True,
+                    },
+                    "light_curtain_wickler_recovery_last_auto_reset_ts": auto_reset_ts,
+                }
+            },
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_8", "1", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_7", "1", "live", "test")
+
+        with patch.object(runtime, "_start_light_curtain_wickler_recovery_background") as wickler_recovery:
+            snapshot = runtime.refresh()
+
+        wickler_recovery.assert_not_called()
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
 
     def test_light_curtain_in_production_pauses_without_purge(self):
         runtime = self.build_runtime()

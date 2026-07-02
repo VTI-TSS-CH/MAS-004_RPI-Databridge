@@ -154,9 +154,12 @@ SAFETY_PHASE_FAILED = "failed"
 ESP_RESET_PULSE_HIGH_S = 0.2
 ESP_RESET_PULSE_GAP_S = 1.0
 LIGHT_CURTAIN_AUTO_RESET_INTERVAL_S = 5.0
+LIGHT_CURTAIN_WICKLER_RECOVERY_RETRY_INTERVAL_S = 5.0
+LIGHT_CURTAIN_WICKLER_RECOVERY_WINDOW_S = 120.0
 PURGE_EXTERNAL_CLEAR_GRACE_S = 3.0
 _SAFETY_RESET_LOCK = threading.Lock()
 _RESET_MOTION_RECOVERY_LOCK = threading.Lock()
+_LIGHT_CURTAIN_WICKLER_RECOVERY_LOCK = threading.Lock()
 _SETUP_WICKLER_LOCK = threading.Lock()
 _PRODUCTION_MOTION_LOCK = threading.Lock()
 _MACHINE_REFRESH_LOCK = threading.RLock()
@@ -1246,6 +1249,25 @@ class MachineRuntime:
                 last_auto_reset["state_changed"] = bool(state_source == "light_curtain_pause" and state_changed)
                 last_auto_reset["purge_changed"] = False
                 safety_info["last_auto_reset"] = last_auto_reset
+        if self._light_curtain_wickler_recovery_due(
+            current_state=int(new_state or 0),
+            requested_state=int(requested_state or 0),
+            safety_status=safety_status,
+            critical_reasons=critical_reasons,
+            safety_info=safety_info,
+            info=info,
+            mas0028_active=bool(purge_active or _truthy(param_map.get("MAS0028", "0"))),
+            ts=ts,
+        ):
+            last_auto_reset = dict(safety_info.get("last_auto_reset") or {})
+            auto_reset_ts = _safe_float(last_auto_reset.get("ts"), 0.0)
+            recovery_start = self._start_light_curtain_wickler_recovery_background(auto_reset_ts)
+            safety_info = dict(safety_info)
+            safety_info["light_curtain_wickler_recovery_running"] = bool(
+                recovery_start.get("queued") or recovery_start.get("in_progress")
+            )
+            safety_info["light_curtain_wickler_recovery_last_attempt_ts"] = ts
+            safety_info["last_light_curtain_wickler_recovery_start"] = recovery_start
         if state_changed or mas0001_value_changed:
             self.params.apply_device_value("MAS0001", str(new_state), promote_default=True)
             self._notify_microtom("MAS0001", str(new_state), dedupe_key="machine:MAS0001")
@@ -3794,7 +3816,12 @@ class MachineRuntime:
         )
         return monitor
 
-    def _set_production_wicklers_idle(self, *, target_state: int) -> list[dict[str, Any]]:
+    def _set_production_wicklers_idle(
+        self,
+        *,
+        target_state: int,
+        recover_after_safety: bool = False,
+    ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         keep_ready = int(target_state or 0) in (6, 7)
         for role in ("unwinder", "rewinder"):
@@ -3814,6 +3841,16 @@ class MachineRuntime:
             except Exception as exc:
                 item["indexed_disable_error"] = repr(exc)
                 errors.append(f"indexed_disable_error={repr(exc)}")
+            if keep_ready and recover_after_safety:
+                for mode in ("resetAlarm", "etoRecovery"):
+                    try:
+                        reply = client.post_mode(mode, timeout_s=3.0)
+                        item[mode] = reply
+                        if not reply.get("ok", True):
+                            errors.append(f"{mode} rejected: {reply}")
+                    except Exception as exc:
+                        item[f"{mode}_error"] = repr(exc)
+                        errors.append(f"{mode}_error={repr(exc)}")
             try:
                 item["mode"] = (
                     client.release_for_continuous_motion(timeout_s=2.0)
@@ -5114,6 +5151,130 @@ class MachineRuntime:
             "ts": float(ts),
             "ok": bool(reset_result.get("ok")),
             "error": reset_result.get("error"),
+        }
+
+    def _light_curtain_wickler_recovery_due(
+        self,
+        *,
+        current_state: int,
+        requested_state: int,
+        safety_status: dict[str, Any],
+        critical_reasons: list[str],
+        safety_info: dict[str, Any],
+        info: dict[str, Any],
+        mas0028_active: bool,
+        ts: float,
+    ) -> bool:
+        if external_purge_active(info):
+            return False
+        if mas0028_active:
+            return False
+        if critical_reasons:
+            return False
+        if self._blocking_safety_active(safety_status):
+            return False
+        if bool(safety_status.get("light_curtain_active")):
+            return False
+        if int(current_state or 0) != 7 or int(requested_state or 0) != 7:
+            return False
+        if bool(safety_info.get("light_curtain_wickler_recovery_running")):
+            return False
+
+        last_auto_reset = safety_info.get("last_auto_reset")
+        if not isinstance(last_auto_reset, dict):
+            return False
+        if str(last_auto_reset.get("reason") or "") != "lichtgitter":
+            return False
+        if not bool(last_auto_reset.get("ok")):
+            return False
+        auto_reset_ts = _safe_float(last_auto_reset.get("ts"), 0.0)
+        if auto_reset_ts <= 0.0:
+            return False
+        if (float(ts) - auto_reset_ts) > LIGHT_CURTAIN_WICKLER_RECOVERY_WINDOW_S:
+            return False
+        recovered_ts = _safe_float(safety_info.get("light_curtain_wickler_recovery_last_auto_reset_ts"), 0.0)
+        if recovered_ts >= auto_reset_ts:
+            return False
+        last_attempt_ts = _safe_float(safety_info.get("light_curtain_wickler_recovery_last_attempt_ts"), 0.0)
+        if last_attempt_ts > 0.0 and (float(ts) - last_attempt_ts) < LIGHT_CURTAIN_WICKLER_RECOVERY_RETRY_INTERVAL_S:
+            return False
+        return True
+
+    def _start_light_curtain_wickler_recovery_background(self, auto_reset_ts: float) -> dict[str, Any]:
+        auto_reset_ts = float(auto_reset_ts or 0.0)
+        if not _LIGHT_CURTAIN_WICKLER_RECOVERY_LOCK.acquire(blocking=False):
+            return {
+                "ok": True,
+                "queued": False,
+                "in_progress": True,
+                "auto_reset_ts": auto_reset_ts,
+            }
+
+        def worker():
+            payload: dict[str, Any] = {
+                "ok": False,
+                "source": "light_curtain_wickler_recovery",
+                "auto_reset_ts": auto_reset_ts,
+                "started_ts": now_ts(),
+            }
+            try:
+                try:
+                    wicklers = self._set_production_wicklers_idle(
+                        target_state=7,
+                        recover_after_safety=True,
+                    )
+                    payload["wicklers"] = wicklers
+                    payload["ok"] = all(bool(item.get("ok")) for item in wicklers)
+                    if not bool(payload["ok"]):
+                        payload["error"] = "wicklers did not return to ready"
+                except Exception as exc:
+                    payload["error"] = str(exc)
+                payload["finished_ts"] = now_ts()
+                payload["duration_s"] = round(
+                    max(0.0, float(payload["finished_ts"]) - float(payload["started_ts"])),
+                    3,
+                )
+                ok = bool(payload.get("ok"))
+                severity = "info" if ok else "warning"
+                message = (
+                    "Lichtgitter-Pause: Wickler wieder freigegeben"
+                    if ok
+                    else "Lichtgitter-Pause: Wicklerfreigabe noch nicht stabil"
+                )
+                self.logs.log("machine", severity, f"{message}: {payload.get('error') or 'ok'}")
+                self._record_event("light_curtain_wickler_recovery", severity, message, payload)
+                try:
+                    snapshot = self._state_row()
+                    info = dict(snapshot.get("info") or {})
+                    safety_info = dict(info.get("safety") or {})
+                    safety_info["light_curtain_wickler_recovery_running"] = False
+                    safety_info["light_curtain_wickler_recovery_last_attempt_ts"] = float(payload["finished_ts"])
+                    safety_info["last_light_curtain_wickler_recovery"] = payload
+                    if ok:
+                        safety_info["light_curtain_wickler_recovery_last_auto_reset_ts"] = auto_reset_ts
+                    info["safety"] = safety_info
+                    self._write_state(
+                        current_state=int(snapshot.get("current_state") or 1),
+                        requested_state=int(snapshot.get("requested_state") or snapshot.get("current_state") or 1),
+                        state_source=str(snapshot.get("state_source") or "runtime"),
+                        warning_active=bool(snapshot.get("warning_active")),
+                        purge_active=bool(snapshot.get("purge_active")),
+                        production_label=str(snapshot.get("production_label") or ""),
+                        last_label_no=int(snapshot.get("last_label_no") or 0),
+                        info=info,
+                    )
+                except Exception as exc:
+                    self.logs.log("machine", "info", f"light curtain Wickler recovery state update skipped: {exc}")
+            finally:
+                _LIGHT_CURTAIN_WICKLER_RECOVERY_LOCK.release()
+
+        thread = threading.Thread(target=worker, name="mas004-light-curtain-wickler-recovery", daemon=True)
+        thread.start()
+        return {
+            "ok": True,
+            "queued": True,
+            "in_progress": True,
+            "auto_reset_ts": auto_reset_ts,
         }
 
     def _safety_status(self, io_map: dict[tuple[str, str], str]) -> dict[str, Any]:
