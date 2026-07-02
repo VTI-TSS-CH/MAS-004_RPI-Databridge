@@ -1386,6 +1386,20 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
 </div>
 """
 
+    def nav_button_html(key: str, href: str, label: str, active: str) -> str:
+        is_active = key == active
+        cls = "navbtn active" if is_active else "navbtn"
+        base_style = (
+            "display:inline-flex; align-items:center; justify-content:center; "
+            "min-height:34px; padding:8px 12px; border:1px solid #cbd7e5; "
+            "border-radius:8px; background:#ffffff; color:#1f2933; "
+            "font-weight:700; font-size:14px; line-height:1.1; "
+            "text-decoration:none; white-space:nowrap; box-sizing:border-box;"
+        )
+        active_style = " background:#005eb8; color:#ffffff; border-color:#005eb8;" if is_active else ""
+        current = ' aria-current="page"' if is_active else ""
+        return f'<a class="{cls}" href="{href}" style="{base_style}{active_style}"{current}>{label}</a>'
+
     def nav_html(active: str) -> str:
         items = [
             ("home", "/", "Home"),
@@ -1397,13 +1411,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         ]
         links = []
         for key, href, label in items:
-            cls = "navbtn active" if key == active else "navbtn"
-            links.append(f'<a class="{cls}" href="{href}">{label}</a>')
+            links.append(nav_button_html(key, href, label, active))
         return (
             '<div style="position:sticky; top:0; z-index:60; background:#f4f6f9; '
             'padding:8px 0 10px 0; margin-bottom:8px;">'
             + logo_html()
-            + '<nav class="topnav">'
+            + '<nav class="topnav" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0 0 2px 0;">'
             + "".join(links)
             + "</nav></div>"
         )
@@ -1424,15 +1437,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         ]
         links = []
         for key, href, label in items:
-            cls = "navbtn active" if key == active else "navbtn"
-            links.append(f'<a class="{cls}" href="{href}">{label}</a>')
-        links.append('<a class="navbtn" href="/ui/machine-setup/logout">Logout</a>')
+            links.append(nav_button_html(key, href, label, active))
+        links.append(nav_button_html("logout", "/ui/machine-setup/logout", "Logout", active))
         return (
             '<div style="margin:-2px 0 14px 0;">'
-            '<div style="font-size:12px; font-weight:700; color:#5f6b7a; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px;">'
+            '<div style="font-size:12px; font-weight:700; color:#5f6b7a; text-transform:uppercase; letter-spacing:0; margin-bottom:8px;">'
             'Machine-Setup'
             '</div>'
-            '<nav class="topnav">'
+            '<nav class="topnav" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:0;">'
             + "".join(links)
             + "</nav></div>"
         )
