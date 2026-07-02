@@ -125,7 +125,7 @@ def build_production_visualization_ui_html(nav_html: str) -> str:
     </section>
     <section class="surface">
       <div class="title"><h2>Abgeschlossene Labels</h2><span id="history_count" class="pill">0</span></div>
-      <div class="table-wrap"><table><thead><tr><th>Label</th><th>Laenge</th><th>Ergebnis</th><th>Payload</th></tr></thead><tbody id="history_rows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Label</th><th>Laenge</th><th>Ergebnis</th><th>Register</th></tr></thead><tbody id="history_rows"></tbody></table></div>
     </section>
   </div>
 </div>
@@ -284,7 +284,7 @@ function renderRows(payload){
       <td><b>#${esc(item.label_no)}</b><br/><span class="muted small">${esc(item.production_label||"")}</span></td>
       <td>${fmt(p.measured_length_mm,1)} mm<br/><span class="muted small">Start ${fmt(p.zero_mm,1)} / Exit ${fmt(p.exit_mm,1)}</span></td>
       <td><span class="pill ${ok?"ok":"bad"}">${ok?"OK":"NOK"}</span><br/>Material ${Number(item.material_ok)} / Print ${Number(item.print_ok)} / Verify ${Number(item.verify_ok)} / Removed ${Number(item.removed)}</td>
-      <td><code class="small">${esc(JSON.stringify(p))}</code></td>
+      <td>${flags(p)}<br/><span class="muted small">Printfehler ${fmt(p.print_error_mm,3)} mm / Korr. ${esc(p.registration_attempts ?? 0)}</span></td>
     </tr>`;
   }).join("") : '<tr><td colspan="4" class="muted">Noch keine abgeschlossenen Labels in der Datenbank.</td></tr>';
 }

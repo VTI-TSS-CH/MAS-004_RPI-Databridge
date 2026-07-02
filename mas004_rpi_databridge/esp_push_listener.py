@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import queue as queue_module
 import socket
 import threading
@@ -58,16 +59,47 @@ ESP_PUSH_CONNECTION_LOG = False
 
 class _MachineEventDispatcher:
     def __init__(self, maxsize: int = 512):
-        self._queue: queue_module.Queue[tuple[Settings, dict, str]] = queue_module.Queue(maxsize=maxsize)
+        self._seq = itertools.count()
+        self._queue: queue_module.PriorityQueue[tuple[int, int, Settings, dict, str]] = (
+            queue_module.PriorityQueue(maxsize=maxsize)
+        )
         self._thread = threading.Thread(target=self._run, daemon=True, name="esp-machine-event-dispatcher")
         self._thread.start()
 
+    @staticmethod
+    def _priority(event: dict) -> int:
+        event_type = str((event or {}).get("type") or "").strip().lower()
+        if event_type in {
+            "label_complete",
+            "production_fault",
+            "production_registration_fault",
+            "production_registration_late",
+            "production_first_print_position_reached",
+            "production_print_position_commanded",
+            "production_print_position_reached",
+            "production_wickler_indexed_ready",
+        }:
+            return 0
+        if event_type in {
+            "production_registration_correction",
+            "production_registration_correction_effect",
+            "production_velocity_stop_for_print",
+            "production_print_trigger",
+            "production_print_resolved",
+        }:
+            return 20
+        return 10
+
     def submit(self, cfg: Settings, event: dict, raw_line: str) -> bool:
+        event_copy = dict(event or {})
+        priority = self._priority(event_copy)
         try:
-            self._queue.put_nowait((cfg, dict(event or {}), str(raw_line or "")))
+            self._queue.put_nowait(
+                (priority, next(self._seq), cfg, event_copy, str(raw_line or ""))
+            )
             return True
         except queue_module.Full:
-            return False
+            return priority >= 20
 
     def wait_idle(self, timeout_s: float = 5.0) -> bool:
         done = threading.Event()
@@ -81,7 +113,7 @@ class _MachineEventDispatcher:
 
     def _run(self):
         while True:
-            cfg, machine_event, raw_line = self._queue.get()
+            _priority, _seq, cfg, machine_event, raw_line = self._queue.get()
             try:
                 db = DB(cfg.db_path)
                 params = ParamStore(db)

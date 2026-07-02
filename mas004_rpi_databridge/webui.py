@@ -1828,10 +1828,10 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             raise RuntimeError(f"{command}: {stripped}")
         return parse_esp_json_reply(reply, command=command)
 
-    def read_compact_esp_visualization(client: EspPlcClient) -> tuple[dict[str, Any], list[str]]:
+    def read_compact_esp_visualization(client: EspPlcClient, *, allow_fallback: bool = True) -> tuple[dict[str, Any], list[str]]:
         visualization_error = ""
         try:
-            snapshot = read_esp_json(client, "PROCESS VISUALIZATION?", read_timeout_s=2.0, read_limit=32768)
+            snapshot = read_esp_json(client, "PROCESS VISUALIZATION?", read_timeout_s=2.0, read_limit=65536)
             if isinstance(snapshot, dict) and snapshot:
                 return snapshot, []
         except Exception as exc:
@@ -1842,6 +1842,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "labels": [],
         }
         errors: list[str] = []
+        if not allow_fallback:
+            if visualization_error:
+                snapshot["ok"] = False
+                snapshot["fallback_reason"] = visualization_error
+                errors.append(visualization_error)
+            return snapshot, errors
         success_count = 0
         for key, command in (
             ("production", "PROCESS PRODUCTION STATUS?"),
@@ -1950,18 +1956,17 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         machine_info = dict((machine or {}).get("info") or {})
         production_info = dict(machine_info.get("production_runtime") or {})
         machine_state = int((machine or {}).get("current_state") or 0)
-        critical_motion_window = machine_state in (2, 3, 4, 5, 6) or bool(
-            production_info.get("pending_start")
-        )
+        production_window = machine_state == 5
+        critical_motion_window = machine_state in (2, 3, 4, 6) or bool(production_info.get("pending_start"))
         if critical_motion_window:
-            esp_errors.append("ESP-Liveabfrage waehrend Einrichten/Produktion zur Kanalentlastung pausiert")
+            esp_errors.append("ESP-Liveabfrage waehrend Einrichten/Uebergang zur Kanalentlastung pausiert")
         elif bool(getattr(cfg2, "esp_simulation", False)) or not str(getattr(cfg2, "esp_host", "") or "").strip():
             esp_errors.append("ESP-Simulation aktiv" if bool(getattr(cfg2, "esp_simulation", False)) else "ESP-Endpunkt fehlt")
         else:
             try:
                 timeout_s = float(getattr(cfg2, "http_timeout_s", 1.5) or 1.5)
                 client = EspPlcClient(cfg2.esp_host, int(cfg2.esp_port), timeout_s=timeout_s)
-                esp_snapshot, esp_errors = read_compact_esp_visualization(client)
+                esp_snapshot, esp_errors = read_compact_esp_visualization(client, allow_fallback=not production_window)
             except Exception as exc:
                 esp_errors.append(repr(exc))
         active_labels = list(esp_snapshot.get("labels") or [])

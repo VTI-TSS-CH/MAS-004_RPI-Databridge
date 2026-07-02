@@ -2415,6 +2415,23 @@ class MachineRuntime:
         production_ok = bool(int(payload.get("production_ok", 1 if (material_ok and print_ok and verify_ok and not removed) else 0)))
         zero_mm = float(payload.get("zero_mm", 0.0) or 0.0)
         exit_mm = float(payload.get("exit_mm", 0.0) or 0.0)
+        compact_payload = {
+            "type": "label_complete",
+            "label_no": label_no,
+            "zero_mm": zero_mm,
+            "exit_mm": exit_mm,
+            "measured_length_mm": _safe_float(payload.get("measured_length_mm"), 0.0),
+            "material_ok": material_ok,
+            "print_ok": print_ok,
+            "verify_ok": verify_ok,
+            "removed": removed,
+            "production_ok": production_ok,
+            "length_too_short": bool(payload.get("length_too_short")),
+            "length_too_long": bool(payload.get("length_too_long")),
+            "registration_late": bool(payload.get("registration_late")),
+            "registration_attempts": _safe_int(payload.get("registration_attempts"), 0),
+            "print_error_mm": _safe_float(payload.get("print_error_mm"), 0.0),
+        }
         packed = pack_label_status_word(
             label_no=label_no,
             material_ok=material_ok,
@@ -2452,12 +2469,12 @@ class MachineRuntime:
                     int(removed),
                     int(production_ok),
                     0,
-                    json.dumps(payload, ensure_ascii=False),
+                    json.dumps(compact_payload, ensure_ascii=False),
                 ),
             )
             c.execute(
                 "INSERT INTO label_events(ts,production_label,label_no,event_type,payload_json) VALUES(?,?,?,?,?)",
-                (now_ts(), label, label_no, "label_complete", json.dumps(payload, ensure_ascii=False)),
+                (now_ts(), label, label_no, "label_complete", json.dumps(compact_payload, ensure_ascii=False)),
             )
 
         self.params.apply_device_value("MAS0003", str(packed), promote_default=True)
@@ -2473,7 +2490,7 @@ class MachineRuntime:
         )
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
-        info["last_label_payload"] = dict(payload)
+        info["last_label_payload"] = dict(compact_payload)
         self._write_state(
             current_state=snapshot["current_state"],
             requested_state=snapshot["requested_state"],
