@@ -169,10 +169,12 @@ _SETUP_PAUSE_RECOVERY_WINDOW_S = 2 * 60 * 60
 MACHINE_STATE_HEARTBEAT_WRITE_INTERVAL_S = 5.0
 PRODUCTION_RUNTIME_INFO_KEY = "production_runtime"
 PRODUCTION_RUNTIME_EVENT_TYPES = {
+    "label_complete",
     "production_fault",
     "production_registration_late",
     "production_registration_fault",
     "production_registration_correction",
+    "production_registration_correction_effect",
     "production_velocity_stop_for_print",
     "production_first_print_position_commanded",
     "production_first_print_position_reached",
@@ -1574,6 +1576,27 @@ class MachineRuntime:
                 dict(payload or {}),
             )
             return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_registration_correction_effect":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            command_seq = _safe_int(payload.get("command_seq"), 0)
+            accepted = bool(payload.get("accepted"))
+            expected_encoder = _safe_int(payload.get("expected_encoder_counts"), 0)
+            actual_encoder = _safe_int(payload.get("actual_encoder_delta_counts"), 0)
+            expected_motor = _safe_int(payload.get("expected_motor_steps"), 0)
+            actual_motor = _safe_int(payload.get("actual_motor_feedback_delta_steps"), 0)
+            reason = str(payload.get("reason") or ("accepted" if accepted else "rejected"))
+            severity = "info" if accepted else "warning"
+            event_result = self._record_production_event_once(
+                event_type,
+                severity,
+                "ID3-Korrekturwirkung: "
+                f"Label {label_no}, Seq {command_seq}, {reason}, "
+                f"Encoder {actual_encoder}/{expected_encoder} counts, "
+                f"Motor {actual_motor}/{expected_motor} steps",
+                dict(payload or {}),
+                dedupe_window_s=30.0,
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
         if event_type == "production_velocity_stop_for_print":
             label_no = _safe_int(payload.get("label_no"), 0)
             remaining = _safe_float(payload.get("remaining_mm"), 0.0)
@@ -1924,6 +1947,16 @@ class MachineRuntime:
         production_active = bool(production_info.get("active"))
         pending_start = production_info.get("pending_start") if isinstance(production_info.get("pending_start"), dict) else {}
         last_start = production_info.get("last_start") if isinstance(production_info.get("last_start"), dict) else {}
+        last_stop = production_info.get("last_stop") if isinstance(production_info.get("last_stop"), dict) else {}
+        has_runtime_context = bool(
+            production_active
+            or pending_start
+            or last_start
+            or last_stop
+            or production_info.get("active_since_ts")
+        )
+        if event_type == "label_complete" and not has_runtime_context:
+            return None
         last_start_age_s = now_ts() - _safe_float(last_start.get("started_ts"), 0.0)
         start_in_transition = (
             current_state == 4
@@ -1956,8 +1989,8 @@ class MachineRuntime:
         }
         event_result = self._record_production_event_once(
             "production_stale_event_ignored",
-            "warning",
-            f"Veraltetes Produktionsevent ignoriert: {event_type} in {state_label(current_state)}",
+            "info",
+            f"Veraltete Produktionsevents ignoriert: {event_type} in {state_label(current_state)}",
             stale_payload,
             dedupe_window_s=600.0,
         )
@@ -2621,7 +2654,6 @@ class MachineRuntime:
                 [
                     event_type,
                     str(payload.get("stale_event_type") or ""),
-                    str(label_no),
                     str(_safe_int(payload.get("machine_state"), 0)),
                 ]
             )
@@ -2668,6 +2700,20 @@ class MachineRuntime:
                     str(_safe_int(payload.get("attempt"), 0)),
                     _event_float_key(payload.get("error_mm"), 4),
                     _event_float_key(payload.get("command_mm"), 4),
+                ]
+            )
+        if event_type == "production_registration_correction_effect":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    str(_safe_int(payload.get("command_seq"), 0)),
+                    str(int(bool(payload.get("accepted")))),
+                    str(payload.get("reason") or ""),
+                    str(_safe_int(payload.get("expected_encoder_counts"), 0)),
+                    str(_safe_int(payload.get("actual_encoder_delta_counts"), 0)),
+                    str(_safe_int(payload.get("expected_motor_steps"), 0)),
+                    str(_safe_int(payload.get("actual_motor_feedback_delta_steps"), 0)),
                 ]
             )
         if event_type == "production_print_trigger":

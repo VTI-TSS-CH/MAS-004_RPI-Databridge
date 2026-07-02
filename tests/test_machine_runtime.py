@@ -3228,6 +3228,40 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(snapshot["labels"]))
         self.assertEqual(12, snapshot["labels"][0]["label_no"])
 
+    def test_stale_label_complete_after_production_stop_is_not_forwarded(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=12,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"reason": "test_stop", "finished_ts": now_ts() - 1.0},
+                }
+            },
+        )
+        before = self.params.get_effective_value("MAS0003")
+
+        result = runtime.handle_event({"type": "label_complete", "label_no": 13})
+        duplicate = runtime.handle_event({"type": "label_complete", "label_no": 14})
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["accepted"])
+        self.assertEqual("stale_production_event", result["ignored"])
+        self.assertTrue(duplicate["deduped"])
+        self.assertEqual(before, self.params.get_effective_value("MAS0003"))
+        with self.db._conn() as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM machine_events WHERE event_type='production_stale_event_ignored'"
+            ).fetchone()[0]
+        self.assertEqual(1, count)
+
     def test_production_print_position_reached_dedupes_same_label(self):
         runtime = self.build_runtime()
         self.mark_production_active(runtime)

@@ -87,12 +87,13 @@ class _MachineEventDispatcher:
                 params = ParamStore(db)
                 outbox = Outbox(db)
                 logs = LogStore(db)
-                logs.log("esp-plc", "in", f"esp->raspi: {raw_line}")
-                logs.log("raspi", "in", f"esp-plc push: {raw_line}")
                 runtime = MachineRuntime(cfg, db, params, IoStore(db), logs, outbox)
                 result = runtime.handle_event(machine_event)
                 resp = "ACK_EVT" if result.get("ok") else "NAK_EVT_ASYNC"
-                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+                if result.get("ignored") != "stale_production_event":
+                    logs.log("esp-plc", "in", f"esp->raspi: {raw_line}")
+                    logs.log("raspi", "in", f"esp-plc push: {raw_line}")
+                    logs.log("esp-plc", "out", f"raspi->esp: {resp}")
             except Exception as exc:
                 try:
                     LogStore(DB(cfg.db_path)).log("esp-plc", "error", f"async event dispatch failed: {repr(exc)}")
