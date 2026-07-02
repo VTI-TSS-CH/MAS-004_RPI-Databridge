@@ -40,34 +40,34 @@ def build_production_visualization_ui_html(nav_html: str) -> str:
     .track-card{margin-top:12px;overflow:hidden}
     .track-head{display:grid;grid-template-columns:190px 1fr 100px;gap:10px;align-items:center;margin-bottom:8px}
     .track-note{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-    .track-shell{position:relative;border:1px solid var(--line);border-radius:8px;background:#f8fbff;overflow:auto;min-height:430px;max-height:700px}
-    .track{position:relative;min-width:1180px;background:linear-gradient(180deg,#fbfdff 0,#fbfdff 118px,#f3f7fc 118px,#f3f7fc 100%)}
-    .track-ruler{position:absolute;left:0;right:0;top:30px;height:28px;border-top:1px solid #cfd9e6;border-bottom:1px solid #e2e9f2;background:#fff}
-    .tick{position:absolute;top:0;width:1px;height:28px;background:#cbd6e4}
+    .track-shell{position:relative;border:1px solid var(--line);border-radius:8px;background:#f8fbff;overflow:auto;min-height:520px;max-height:780px}
+    .track{position:relative;min-width:1180px;background:linear-gradient(180deg,#fbfdff 0,#fbfdff 196px,#f3f7fc 196px,#f3f7fc 100%)}
+    .track-ruler{position:absolute;left:0;right:0;top:28px;height:28px;border-top:1px solid #cfd9e6;border-bottom:1px solid #e2e9f2;background:#fff}
+    .tick{position:absolute;top:28px;width:1px;height:28px;background:#cbd6e4}
     .tick.major{background:#8fa2b8}
-    .tick-label{position:absolute;top:31px;transform:translateX(-50%);font-size:11px;color:#50637a;white-space:nowrap}
-    .rail{position:absolute;left:0;right:0;top:124px;height:18px;border-radius:999px;background:#d8e2ef;border:1px solid #c6d4e4}
+    .tick-label{position:absolute;top:60px;transform:translateX(-50%);font-size:11px;color:#50637a;white-space:nowrap}
+    .rail{position:absolute;left:0;right:0;top:164px;height:18px;border-radius:999px;background:#d8e2ef;border:1px solid #c6d4e4}
     .rail:after{content:"";position:absolute;right:10px;top:4px;width:8px;height:8px;border-top:2px solid #63758b;border-right:2px solid #63758b;transform:rotate(45deg)}
-    .component-line{position:absolute;top:58px;width:2px;background:#9cadc4;opacity:.78}
-    .component-pin{position:absolute;top:112px;transform:translateX(-50%);width:10px;height:10px;border-radius:999px;background:#fff;border:2px solid currentColor;z-index:4}
-    .component-tag{position:absolute;transform:translateX(-50%);min-width:58px;max-width:132px;text-align:center;background:#fff;border:1px solid var(--line);border-radius:7px;padding:4px 7px;font-size:11px;font-weight:800;color:#334155;line-height:1.15;box-shadow:0 1px 2px rgba(15,23,42,.08);z-index:5}
-    .component-mm{display:block;margin-top:2px;font-size:10px;font-weight:600;color:var(--muted)}
+    .component-line{position:absolute;top:92px;width:2px;background:#9cadc4;opacity:.72}
+    .component-pin{position:absolute;top:156px;transform:translateX(-50%);width:10px;height:10px;border-radius:999px;background:#fff;border:2px solid currentColor;z-index:4}
+    .component-tag{position:absolute;text-align:center;background:#fff;border:1px solid var(--line);border-radius:7px;padding:4px 7px;font-size:11px;font-weight:800;color:#334155;line-height:1.15;box-shadow:0 1px 2px rgba(15,23,42,.08);z-index:5;white-space:normal;overflow:hidden}
+    .component-mm{display:block;margin-top:2px;font-size:10px;font-weight:600;color:var(--muted);white-space:nowrap}
     .component-detect{color:#475569}.component-material{color:var(--cyan)}.component-print{color:var(--blue)}.component-verify{color:var(--violet)}.component-control{color:var(--orange)}.component-exit{color:var(--red)}
     .lane{position:absolute;left:0;right:0;height:44px;border-top:1px solid #e2e9f2;background:rgba(255,255,255,.46)}
     .lane.alt{background:rgba(232,241,251,.35)}
     .lane-no{position:absolute;left:8px;font-size:11px;font-weight:800;color:#51647b;background:#fff;border:1px solid #d7e0eb;border-radius:999px;padding:2px 7px;z-index:2}
-    .label-bar{position:absolute;height:31px;border-radius:6px;border:1px solid rgba(15,23,42,.24);background:#cbd5e1;box-shadow:0 1px 3px rgba(15,23,42,.13);display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:7px;padding:0 8px;font-size:12px;font-weight:800;overflow:hidden;white-space:nowrap;z-index:3}
+    .label-bar{position:absolute;height:31px;border-radius:6px;border:1px solid rgba(15,23,42,.24);background:#cbd5e1;box-shadow:0 1px 3px rgba(15,23,42,.13);display:grid;grid-template-columns:auto 1fr;align-items:center;gap:7px;padding:0 8px;font-size:12px;font-weight:800;overflow:hidden;white-space:nowrap;z-index:3}
     .label-bar:before,.label-bar:after{content:"";position:absolute;top:4px;bottom:4px;width:2px;border-radius:2px;background:rgba(15,23,42,.42)}
     .label-bar:before{left:3px}.label-bar:after{right:3px}
     .label-id{font-family:Consolas,Menlo,monospace;font-size:12px}
     .label-stage{overflow:hidden;text-overflow:ellipsis}
-    .label-mm{font-size:11px;font-weight:700;opacity:.82}
+    .label-mm{display:none}
     .label-bar.ok{background:#bdeec9;color:#14542d;border-color:#78c48e}
     .label-bar.warn{background:#fff0b8;color:#6d4800;border-color:#e3c66c}
     .label-bar.bad{background:#ffc9c5;color:#8a1c15;border-color:#efaaa4}
     .label-bar.open{background:#dbeafe;color:#08345f;border-color:#8dbce8}
     .label-bar.clipped-left{border-left-style:dashed}.label-bar.clipped-right{border-right-style:dashed}
-    .track-empty{position:absolute;left:18px;right:18px;top:170px;border:1px dashed #cbd6e4;border-radius:8px;padding:16px;color:var(--muted);background:#fff}
+    .track-empty{position:absolute;left:18px;right:18px;top:220px;border:1px dashed #cbd6e4;border-radius:8px;padding:16px;color:var(--muted);background:#fff}
     .legend-dot{width:9px;height:9px;border-radius:999px;background:currentColor;display:inline-block}
     .panel{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin-top:12px}
     .table-wrap{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fbfdff}
@@ -183,7 +183,7 @@ function renderTrack(payload){
     const tailValue = Number(l.tail_mm);
     const tail = Number.isFinite(tailValue) ? tailValue : lead - width;
     return {...l, _lead:lead, _tail:tail, _width:Math.max(8, Math.abs(lead - tail), width)};
-  }).sort((a,b)=>Number(b._lead||0)-Number(a._lead||0));
+  }).sort((a,b)=>Math.min(a._tail,a._lead)-Math.min(b._tail,b._lead));
   const allMm = [0, Number(t.length_mm || 0), ...components.map(c=>Number(c.mm||0)), ...labels.flatMap(l=>[Number(l._lead||0), Number(l._tail||0)])].filter(Number.isFinite);
   const rawMin = Math.min(...allMm, 0);
   const rawMax = Math.max(...allMm, 1000);
@@ -191,14 +191,32 @@ function renderTrack(payload){
   const minMm = Math.floor(Math.min(0, rawMin - step * 0.5) / step) * step;
   const maxMm = Math.ceil(Math.max(rawMax + step * 0.6, Number(t.length_mm || 0), 1000) / step) * step;
   const range = Math.max(1, maxMm - minMm);
-  const pxPerMm = range <= 1200 ? 1.05 : range <= 2200 ? 0.82 : 0.62;
+  const pxPerMm = range <= 1200 ? 1.08 : range <= 2200 ? 0.90 : 0.68;
   const widthPx = Math.max(1180, Math.round(range * pxPerMm));
-  const laneCount = Math.max(3, labels.length || 1);
-  const laneTop = 168;
+  const toPx = mm => (Number(mm) - minMm) * pxPerMm;
+  const clampPx = (px, min=0, max=widthPx) => Math.max(min, Math.min(max, px));
+  const labelRects = labels.map(l => {
+    const rawLeft = toPx(Math.min(l._tail, l._lead));
+    const rawRight = toPx(Math.max(l._tail, l._lead));
+    const naturalWidth = Math.max(92, rawRight - rawLeft);
+    const width = Math.min(Math.max(naturalWidth, 96), Math.max(96, widthPx - 16));
+    const left = clampPx(rawLeft, 4, Math.max(4, widthPx - width - 4));
+    return {...l, _leftPx:left, _rightPx:left + width, _barWidthPx:width, _clippedLeft:rawLeft < 0, _clippedRight:rawRight > widthPx};
+  });
+  const laneEnds = [];
+  labelRects.forEach(l => {
+    let lane = laneEnds.findIndex(end => l._leftPx > end + 10);
+    if(lane < 0){
+      lane = laneEnds.length;
+      laneEnds.push(0);
+    }
+    l._lane = lane;
+    laneEnds[lane] = l._rightPx;
+  });
+  const laneCount = Math.max(2, laneEnds.length || 1);
+  const laneTop = 216;
   const laneHeight = 46;
   const heightPx = Math.max(430, laneTop + laneCount * laneHeight + 34);
-  const posPct = mm => ((Number(mm) - minMm) / range) * 100;
-  const clampPct = pct => Math.max(0, Math.min(100, pct));
   track.style.height = `${heightPx}px`;
   track.style.width = `${widthPx}px`;
   document.getElementById("track_scale").textContent = `${fmt(minMm,0)} bis ${fmt(maxMm,0)} mm`;
@@ -208,18 +226,25 @@ function renderTrack(payload){
     <span class="pill">${components.length} Komponenten</span>`;
   let html = `<div class="track-ruler"></div><div class="rail"></div>`;
   for(let mm = minMm; mm <= maxMm + 0.001; mm += step){
-    const left = clampPct(posPct(mm));
+    const left = clampPx(toPx(mm));
     const major = Math.abs(mm % (step*2)) < 0.001;
-    html += `<div class="tick ${major?"major":""}" style="left:${left}%"></div><div class="tick-label" style="left:${left}%">${fmt(mm,0)} mm</div>`;
+    html += `<div class="tick ${major?"major":""}" style="left:${left}px"></div><div class="tick-label" style="left:${left}px">${fmt(mm,0)} mm</div>`;
   }
-  components.forEach((c, idx) => {
+  const componentRows = [];
+  components.forEach(c => {
     const kind = componentKind(c.kind);
-    const left = clampPct(posPct(c.mm || 0));
-    const tagTop = 64 + (idx % 3) * 24;
+    const x = clampPx(toPx(c.mm || 0));
+    const label = String(c.label || "");
+    const tagWidth = Math.min(148, Math.max(82, label.length * 7 + 34));
+    const tagLeft = clampPx(x - tagWidth / 2, 4, Math.max(4, widthPx - tagWidth - 4));
+    const row = componentRows.findIndex(end => tagLeft > end + 8);
+    const useRow = row >= 0 ? row : componentRows.length;
+    componentRows[useRow] = tagLeft + tagWidth;
+    const tagTop = 88 + useRow * 26;
     html += `
-      <div class="component-line component-${kind}" style="left:${left}%;height:${heightPx-64}px"></div>
-      <div class="component-pin component-${kind}" style="left:${left}%"></div>
-      <div class="component-tag component-${kind}" style="left:${left}%;top:${tagTop}px">${esc(c.label)}<span class="component-mm">${fmt(c.mm,1)} mm</span></div>`;
+      <div class="component-line component-${kind}" style="left:${x}px;height:${heightPx-92}px"></div>
+      <div class="component-pin component-${kind}" style="left:${x}px"></div>
+      <div class="component-tag component-${kind}" style="left:${tagLeft}px;top:${tagTop}px;width:${tagWidth}px">${esc(c.label)}<span class="component-mm">${fmt(c.mm,1)} mm</span></div>`;
   });
   for(let r=0;r<laneCount;r++){
     const top = laneTop + r*laneHeight;
@@ -228,18 +253,11 @@ function renderTrack(payload){
   if(labels.length === 0){
     html += `<div class="track-empty">Keine aktiven Labels im ESP-Schieberegister.</div>`;
   }
-  labels.forEach((l, idx) => {
-    const leftRaw = posPct(Math.min(l._tail, l._lead));
-    const rightRaw = posPct(Math.max(l._tail, l._lead));
-    const clippedLeft = leftRaw < 0;
-    const clippedRight = rightRaw > 100;
-    const left = clampPct(leftRaw);
-    const right = clampPct(rightRaw);
-    const width = Math.max(1.2, right - left);
-    const top = laneTop + idx*laneHeight + 7;
+  labelRects.forEach(l => {
+    const top = laneTop + l._lane*laneHeight + 7;
     const err = Number(l.print_error_mm);
     const errText = Number.isFinite(err) ? ` / ${fmt(err,3)} mm` : "";
-    html += `<div class="label-bar ${labelClass(l)} ${clippedLeft?"clipped-left":""} ${clippedRight?"clipped-right":""}" style="left:${left}%;width:${width}%;top:${top}px">
+    html += `<div class="label-bar ${labelClass(l)} ${l._clippedLeft?"clipped-left":""} ${l._clippedRight?"clipped-right":""}" title="#${esc(l.no)} ${fmt(l._tail,1)}..${fmt(l._lead,1)} mm${esc(errText)}" style="left:${l._leftPx}px;width:${l._barWidthPx}px;top:${top}px">
       <span class="label-id">#${esc(l.no)}</span>
       <span class="label-stage">${esc(stageText(l))}${esc(errText)}</span>
       <span class="label-mm">${fmt(l._tail,1)}..${fmt(l._lead,1)} mm</span>
