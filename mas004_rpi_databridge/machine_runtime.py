@@ -576,13 +576,21 @@ class MachineRuntime:
         warning_active = self._warning_active(param_map)
         pause_active, pause_reasons = self._pause_state(param_map)
         band_break_bypass = quick_setup_band_break_bypass_active(info)
+        format_plan = build_format_plan(param_map)
+        safety_status = self._safety_status(io_map)
+        pause_light_curtain_safety_drop = self._pause_light_curtain_safety_drop(
+            snapshot=snapshot,
+            safety_status=safety_status,
+            info=info,
+        )
+        if pause_light_curtain_safety_drop:
+            safety_status = self._mask_estop_for_pause_light_curtain(safety_status)
         critical_active, critical_reasons = self._critical_state(
             io_map,
             param_map,
             band_break_bypass=band_break_bypass,
+            ignore_estop=pause_light_curtain_safety_drop,
         )
-        format_plan = build_format_plan(param_map)
-        safety_status = self._safety_status(io_map)
         if recent_external_purge_clear(self.db) and not _truthy(param_map.get("MAS0028", "0")) and critical_active:
             cleared_after_external_purge = self._clear_resettable_fault_latches_after_external_purge_clear(
                 io_map=io_map,
@@ -597,6 +605,7 @@ class MachineRuntime:
                     io_map,
                     param_map,
                     band_break_bypass=band_break_bypass,
+                    ignore_estop=pause_light_curtain_safety_drop,
                 )
         button_inputs = self._button_inputs(io_map)
         previous_button_inputs = info.get("button_inputs") or {}
@@ -5134,17 +5143,57 @@ class MachineRuntime:
             "reasons": reasons,
         }
 
+    def _pause_light_curtain_safety_drop(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        safety_status: dict[str, Any],
+        info: dict[str, Any],
+    ) -> bool:
+        current_state = _safe_int((snapshot or {}).get("current_state"), 0)
+        requested_state = _safe_int((snapshot or {}).get("requested_state"), current_state)
+        if current_state not in (6, 7):
+            return False
+        if requested_state not in (7, current_state):
+            return False
+        if bool((snapshot or {}).get("purge_active")):
+            return False
+        safety_info = dict((info or {}).get("safety") or {})
+        if bool(safety_info.get("latched")) or str(safety_info.get("phase") or "") in {
+            SAFETY_PHASE_LATCHED,
+            SAFETY_PHASE_RESETTING,
+            SAFETY_PHASE_FAILED,
+        }:
+            return False
+        return bool(safety_status.get("light_curtain_active")) and bool(safety_status.get("estop_active"))
+
+    def _mask_estop_for_pause_light_curtain(self, safety_status: dict[str, Any]) -> dict[str, Any]:
+        masked = dict(safety_status or {})
+        reasons = [str(reason) for reason in (masked.get("reasons") or []) if str(reason) != "notaus"]
+        if "lichtgitter" not in reasons:
+            reasons.append("lichtgitter")
+        masked["raw_estop_active"] = bool(masked.get("estop_active"))
+        masked["estop_masked_by_pause_light_curtain"] = True
+        masked["estop_active"] = False
+        masked["estop_ok"] = True
+        masked["blocking_active"] = False
+        masked["blocking_reasons"] = []
+        masked["reasons"] = reasons
+        masked["active"] = bool(reasons)
+        return masked
+
     def _critical_state(
         self,
         io_map: dict[tuple[str, str], str],
         param_map: dict[str, str],
         *,
         band_break_bypass: bool = False,
+        ignore_estop: bool = False,
     ) -> tuple[bool, list[str]]:
         reasons: list[str] = []
         machine_state = _safe_int(param_map.get("MAS0001"), 1)
         monitor_band_break = band_break_monitoring_active(machine_state) and not bool(band_break_bypass)
-        if not self._bool_io(io_map, "esp32_plc58", "I0.7", default=False):
+        if not bool(ignore_estop) and not self._bool_io(io_map, "esp32_plc58", "I0.7", default=False):
             reasons.append("notaus")
         if not self._bool_io(io_map, "raspi_plc21", "I0.6", default=True):
             reasons.append("usv_not_ok")

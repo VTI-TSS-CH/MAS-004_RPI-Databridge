@@ -2396,6 +2396,51 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertFalse(snapshot["info"]["safety"]["last_auto_reset"]["state_changed"])
         self.assertFalse(snapshot["info"]["safety"]["last_auto_reset"]["purge_changed"])
 
+    def test_light_curtain_in_pause_keeps_pause_when_safety_ok_input_drops(self):
+        runtime = self.build_runtime()
+        self.params.apply_device_value("MAS0001", "7", promote_default=True)
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": False, "phase": "ready"}, "production_runtime": {"active": False}},
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_8", "0", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_7", "0", "live", "test")
+
+        with (
+            patch.object(runtime, "_pulse_esp_reset_output", return_value=None) as pulse,
+            patch.object(runtime, "_perform_safety_reset", return_value={"ok": True, "steps": []}) as full_reset,
+            patch.object(runtime, "_stop_production_motion", return_value={"ok": True}) as stop_motion,
+            patch.object(runtime, "_apply_stop_mode_axis_targets", return_value=None) as stop_axes,
+        ):
+            snapshot = runtime.refresh()
+
+        pulse.assert_called_once()
+        full_reset.assert_not_called()
+        stop_motion.assert_not_called()
+        stop_axes.assert_called_once()
+        self.assertEqual(7, stop_axes.call_args.args[0])
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(7, snapshot["requested_state"])
+        self.assertEqual("requested", runtime._state_row()["state_source"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        self.assertEqual([], snapshot["info"]["critical_reasons"])
+        safety_status = snapshot["info"]["safety_status"]
+        self.assertEqual(["lichtgitter"], safety_status["reasons"])
+        self.assertTrue(safety_status["raw_estop_active"])
+        self.assertTrue(safety_status["estop_masked_by_pause_light_curtain"])
+        self.assertFalse(safety_status["estop_active"])
+        self.assertFalse(safety_status["blocking_active"])
+        self.assertTrue(snapshot["info"]["safety"]["last_auto_reset"]["ok"])
+        self.assertFalse(snapshot["info"]["safety"]["last_auto_reset"]["state_changed"])
+        self.assertFalse(snapshot["info"]["safety"]["last_auto_reset"]["purge_changed"])
+
     def test_light_curtain_in_production_pauses_without_purge(self):
         runtime = self.build_runtime()
         self.params.apply_device_value("MAS0001", "5", promote_default=True)
