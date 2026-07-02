@@ -3337,6 +3337,8 @@ class MachineRuntime:
                 "prepared_travel_mm": _safe_float(telemetry.get("indexedTravelMm"), planned_travel_mm),
                 "prepared_trim_mm": _safe_float(telemetry.get("indexedTrimMm"), 0.0),
                 "next_trim_mm": _safe_float(telemetry.get("indexedNextTrimMm"), 0.0),
+                "trim_state_mm": _safe_float(telemetry.get("indexedTrimStateMm"), 0.0),
+                "trim_delta_mm": _safe_float(telemetry.get("indexedTrimDeltaMm"), 0.0),
                 "role_error_percent": _safe_float(telemetry.get("indexedRoleErrorPercent"), 0.0),
                 "trim_mm_per_percent": _safe_float(telemetry.get("indexedTrimMmPerPercent"), 0.0),
                 "wipe_percent": _safe_float(telemetry.get("wipePercent"), 0.0),
@@ -3367,7 +3369,9 @@ class MachineRuntime:
                     f"Quelle {travel_source}, "
                     f"Wippe {indexed_plan['wipe_percent']:.1f}%, "
                     f"Korrektur {indexed_plan['prepared_trim_mm']:.3f}mm "
-                    f"(naechste {indexed_plan['next_trim_mm']:.3f}mm), "
+                    f"(naechste {indexed_plan['next_trim_mm']:.3f}mm, "
+                    f"Regler {indexed_plan['trim_state_mm']:.3f}mm, "
+                    f"Delta {indexed_plan['trim_delta_mm']:.3f}mm), "
                     f"effektiv {indexed_plan['prepared_travel_mm']:.3f}mm, "
                     f"Seq {indexed_plan['command_seq']}"
                 ),
