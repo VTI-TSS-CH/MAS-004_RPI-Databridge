@@ -5,7 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_clients import EspPlcClient
@@ -1725,9 +1725,10 @@ class SetupWicklerOrchestrator:
         diameter_learning = self._finish_and_apply_diameter_learning(travel_mm)
         return measurement, diameter_learning
 
-    def run(self) -> dict[str, Any]:
+    def run(self, wait_for_format_axes: Callable[[], Any] | None = None) -> dict[str, Any]:
         speed = self.defaults.learn_speed_mm_s
         ramp = self.defaults.learn_ramp_mm_s2
+        format_axes_ok: bool | None = None
         try:
             self._abort_if_not_setup_active()
             self._sync_setup_params_to_esp()
@@ -1738,6 +1739,12 @@ class SetupWicklerOrchestrator:
                 self._run_wickler_commands_parallel(action, timeout_s=5.0)
             self._calibrate_wicklers_for_setup(timeout_s=5.0)
             self._abort_motor3_if_wickler_faulted()
+            if wait_for_format_axes is not None:
+                axis_result = wait_for_format_axes()
+                if isinstance(axis_result, dict):
+                    format_axes_ok = bool(axis_result.get("ok", True))
+                else:
+                    format_axes_ok = True
             self._prepare_motor3_for_measurement()
             self._abort_motor3_if_wickler_faulted()
             measurement, diameter_learning = self._run_sensor_referenced_measurement_with_diameter_learning(speed)
@@ -1764,6 +1771,8 @@ class SetupWicklerOrchestrator:
                 "speed_mm_s": speed,
                 "ramp_mm_s2": ramp,
                 "teach_ms": self._sensor_teach_ms(speed),
+                "format_axes_waited": wait_for_format_axes is not None,
+                "format_axes_ok": format_axes_ok,
             }
         except Exception:
             self.stop_all_motion()

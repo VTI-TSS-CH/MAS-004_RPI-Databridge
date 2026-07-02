@@ -4,6 +4,7 @@ import json
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
@@ -2896,16 +2897,32 @@ class MachineRuntime:
         try:
             param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
             format_plan = build_format_plan(param_map)
-            self.logs.log("machine", "info", "Einrichten: Formatachsen positionieren, Wickler einmessen und Messfahrt starten")
+            self.logs.log(
+                "machine",
+                "info",
+                "Einrichten: Formatachsen starten, Wickler parallel einmessen und Messfahrt vorbereiten",
+            )
             self._record_event(
                 "setup_wickler_calibration",
                 "info",
-                "Einrichten gestartet: Formatachsen positionieren, beide Wickler einmessen, Messfahrt ausfuehren und Durchmesser uebernehmen",
+                "Einrichten gestartet: Formatachsen positionieren parallel zur Wickler-Einmessung, "
+                "danach Messfahrt ausfuehren und Durchmesser uebernehmen",
                 {},
             )
-            axis_result = self._position_setup_format_axes(format_plan)
-            controller = SetupWicklerOrchestrator(self.cfg, self.params, self.logs)
-            workflow = controller.run()
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="setup-format-axes") as executor:
+                axis_future = executor.submit(self._position_setup_format_axes, format_plan)
+
+                def wait_for_format_axes() -> dict[str, Any]:
+                    self.logs.log(
+                        "machine",
+                        "info",
+                        "Einrichten: Wickler-Einmessung erreicht ID3-Messfahrt; warte auf Formatachsen",
+                    )
+                    return axis_future.result()
+
+                controller = SetupWicklerOrchestrator(self.cfg, self.params, self.logs)
+                workflow = controller.run(wait_for_format_axes=wait_for_format_axes)
+                axis_result = axis_future.result()
             ok = bool(workflow.get("ok"))
             result = {
                 "ok": ok,

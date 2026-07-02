@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import json
+import threading
 
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -217,7 +218,8 @@ class MachineRuntimeTests(unittest.TestCase):
             controller = controller_cls.return_value
             controller.run.return_value = {"ok": True, "applied": ["unwinder:200.0mm", "rewinder:200.0mm"]}
             first = runtime.refresh()
-            controller.run.assert_called_once_with()
+            controller.run.assert_called_once()
+            self.assertTrue(callable(controller.run.call_args.kwargs.get("wait_for_format_axes")))
         self.assertEqual(6, first["current_state"])
         self.assertEqual(7, first["requested_state"])
         self.assertEqual(0, first["info"]["requested_command"])
@@ -229,6 +231,38 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(7, second["current_state"])
         self.assertEqual(7, second["requested_state"])
         self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
+
+    def test_setup_starts_wickler_before_format_axes_finish(self):
+        runtime = self.build_runtime()
+        axis_started = threading.Event()
+        allow_axis_finish = threading.Event()
+        workflow_started_before_axis_done = threading.Event()
+        wait_hook_called = threading.Event()
+
+        def slow_axis_positioning(_format_plan):
+            axis_started.set()
+            self.assertTrue(allow_axis_finish.wait(timeout=2.0))
+            return {"ok": True, "finished": True}
+
+        def workflow_run(*, wait_for_format_axes):
+            self.assertTrue(axis_started.wait(timeout=2.0))
+            if not allow_axis_finish.is_set():
+                workflow_started_before_axis_done.set()
+            allow_axis_finish.set()
+            axis_result = wait_for_format_axes()
+            wait_hook_called.set()
+            return {"ok": True, "axis_result": axis_result}
+
+        with (
+            patch.object(runtime, "_position_setup_format_axes", side_effect=slow_axis_positioning),
+            patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls,
+        ):
+            controller_cls.return_value.run.side_effect = workflow_run
+            result = runtime._perform_setup_wickler_calibration()
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(workflow_started_before_axis_done.is_set())
+        self.assertTrue(wait_hook_called.is_set())
 
     def test_recent_setup_complete_recovers_stuck_setup_state_to_pause(self):
         runtime = self.build_runtime()
@@ -1340,7 +1374,8 @@ class MachineRuntimeTests(unittest.TestCase):
             controller.run.return_value = {"ok": True, "applied": ["unwinder:200.0mm", "rewinder:200.0mm"]}
             snapshot = runtime.refresh()
 
-        controller.run.assert_called_once_with()
+        controller.run.assert_called_once()
+        self.assertTrue(callable(controller.run.call_args.kwargs.get("wait_for_format_axes")))
         self.assertEqual(True, snapshot["info"]["setup"]["last_result"]["format_axes"]["ok"])
         self.assertEqual(["format_axes_parallel"], [
             phase["phase"] for phase in snapshot["info"]["setup"]["last_result"]["format_axes"]["phases"]
