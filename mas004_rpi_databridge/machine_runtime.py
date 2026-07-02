@@ -1692,7 +1692,19 @@ class MachineRuntime:
                 remaining_mm=remaining,
                 payload=payload,
             )
-            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+            wickler_reprepare: dict[str, Any] = {"ok": True, "skipped": "duplicate_or_invalid_commanded_position"}
+            if bool(event_result.get("recorded")) and 10.0 <= remaining <= PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
+                wickler_reprepare = self._prepare_next_production_wickler_takt(
+                    label_no=label_no,
+                    reason="print_position_commanded_remaining_mm",
+                )
+            return {
+                "ok": True,
+                "accepted": True,
+                "event": event_type,
+                "wickler_reprepare": wickler_reprepare,
+                **event_result,
+            }
         if event_type == "production_print_position_reached":
             label_no = _safe_int(payload.get("label_no"), 0)
             infeed_speed = _safe_float(payload.get("infeed_speed_mm_s"), 0.0)

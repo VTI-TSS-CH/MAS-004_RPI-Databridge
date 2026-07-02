@@ -1000,6 +1000,35 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(104.782, after_mm)
         self.assertEqual("last_esp_remaining_label_2", after_source)
 
+    def test_print_position_commanded_reprepares_wicklers_with_esp_remaining(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+
+        payload = {
+            "type": "production_print_position_commanded",
+            "label_no": 2,
+            "target_abs_mm": 723.710,
+            "remaining_mm": 104.070,
+            "speed_mm_s": 100.0,
+            "ramp_mm_s2": 300.0,
+        }
+
+        first = runtime.handle_event(dict(payload))
+        duplicate = runtime.handle_event(dict(payload))
+        base_mm, base_source = runtime._production_wickler_base_travel({"travel_mm": 100.8})
+
+        self.assertTrue(first["recorded"])
+        self.assertTrue(first["wickler_reprepare"]["ok"])
+        self.assertTrue(duplicate["deduped"])
+        self.assertEqual("duplicate_or_invalid_commanded_position", duplicate["wickler_reprepare"]["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once_with(
+            label_no=2,
+            reason="print_position_commanded_remaining_mm",
+        )
+        self.assertAlmostEqual(104.070, base_mm)
+        self.assertEqual("last_esp_remaining_label_2", base_source)
+
     def test_production_start_fails_if_post_start_wickler_leaves_ready(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
