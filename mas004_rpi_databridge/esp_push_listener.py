@@ -50,6 +50,7 @@ POSITION_ACTUAL_STATUS_KEYS = frozenset(
         "MAS0032",
     }
 )
+POSITION_ACTUAL_RELEVANT_DELTA_TENTHS_MM = 10
 
 ESP_PUSH_CONNECTION_LOG = False
 
@@ -159,7 +160,11 @@ def _duplicate_position_actual(params: ParamStore, pkey: str, value: object) -> 
     if pkey not in POSITION_ACTUAL_STATUS_KEYS:
         return False
     try:
-        return str(params.get_effective_value(pkey)).strip() == str(value).strip()
+        current = str(params.get_effective_value(pkey)).strip()
+        incoming = str(value).strip()
+        if current == incoming:
+            return True
+        return abs(int(float(current)) - int(float(incoming))) < POSITION_ACTUAL_RELEVANT_DELTA_TENTHS_MM
     except Exception:
         return False
 

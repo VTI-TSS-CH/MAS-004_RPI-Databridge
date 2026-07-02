@@ -220,6 +220,23 @@ class EspPushListenerTests(unittest.TestCase):
                 log_count = int(c.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
             self.assertEqual(0, log_count)
 
+    def test_small_esp_position_actual_delta_is_acked_without_log_or_forward(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0017", "MAS", "0017", "100", "R", "W")
+            params = ParamStore(db)
+            params.apply_device_value("MAS0017", "100", promote_default=True)
+            cfg = Settings(db_path=str(db_path), peer_base_url="https://peer-a:9090", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            self.assertEqual("ACK_MAS0017=105", listener._process_line("MAS0017=105"))
+            self.assertEqual("100", params.get_effective_value("MAS0017"))
+            self.assertEqual(0, Outbox(db).count())
+            with db._conn() as c:
+                log_count = int(c.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
+            self.assertEqual(0, log_count)
+
     def test_active_esp_fault_clear_is_forwarded_once_to_microtom(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "db.sqlite3"
