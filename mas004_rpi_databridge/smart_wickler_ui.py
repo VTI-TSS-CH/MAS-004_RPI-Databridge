@@ -24,7 +24,7 @@ def build_winder_ui_html(role: str, label: str, nav_html: str) -> str:
     .hero-main{{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px}}
     .kpi{{background:#f8fafc; border:1px solid var(--border); border-radius:14px; padding:14px}}
     .kpi .label{{font-size:12px; color:var(--muted); font-weight:700; text-transform:uppercase; letter-spacing:.04em}}
-    .kpi .value{{font-size:2rem; font-weight:800; margin-top:6px}}
+    .kpi .value{{font-size:1.75rem; font-weight:800; margin-top:6px}}
     .muted{{color:var(--muted)}}
     .btn{{min-height:38px; padding:8px 12px; border:1px solid #aec4db; border-radius:10px; background:#e8f0f8; color:#17324b; font-weight:600; cursor:pointer; text-decoration:none}}
     .btn.primary{{background:#005eb8; color:#fff; border-color:#005eb8}}
@@ -39,7 +39,7 @@ def build_winder_ui_html(role: str, label: str, nav_html: str) -> str:
     .dial{{width:240px; height:240px; border-radius:50%; background:conic-gradient(#005eb8 0deg, #dce8f5 0deg 360deg); display:flex; align-items:center; justify-content:center; position:relative; box-shadow:inset 0 0 0 14px #fff}}
     .dial::after{{content:""; position:absolute; width:154px; height:154px; border-radius:50%; background:#fff; border:1px solid var(--border)}}
     .dial-center{{position:relative; z-index:2; text-align:center}}
-    .dial-center strong{{display:block; font-size:2rem}}
+    .dial-center strong{{display:block; font-size:1.35rem; line-height:1.15}}
     .stack{{display:grid; gap:12px}}
     @media(max-width:980px){{ .hero{{grid-template-columns:1fr}} .hero-main{{grid-template-columns:1fr 1fr}} }}
     @media(max-width:700px){{ .hero-main{{grid-template-columns:1fr}} }}
@@ -64,7 +64,7 @@ def build_winder_ui_html(role: str, label: str, nav_html: str) -> str:
         </div>
         <div class="hero-main">
           <div class="kpi"><div class="label">Wippe</div><div id="wipeValue" class="value">0 %</div></div>
-          <div class="kpi"><div class="label">Fuellstand</div><div id="fillValue" class="value">0 %</div></div>
+          <div class="kpi"><div class="label">Fuellstand / Rolle</div><div id="fillValue" class="value">0 % / 0 mm</div></div>
           <div class="kpi"><div class="label">Bandgeschwindigkeit</div><div id="speedValue" class="value">0 mm/s</div></div>
           <div class="kpi"><div class="label">Motor</div><div id="motorValue" class="value">0 Hz</div></div>
         </div>
@@ -73,7 +73,7 @@ def build_winder_ui_html(role: str, label: str, nav_html: str) -> str:
         <div id="fillDial" class="dial">
           <div class="dial-center">
             <div class="muted">Rolle</div>
-            <strong id="dialFill">0 %</strong>
+            <strong id="dialFill">0 % / 0 mm</strong>
             <div id="roleText" class="muted">{label}</div>
           </div>
         </div>
@@ -153,10 +153,11 @@ function modeClass(modeCss){{
 
 function setText(id, value){{ const el = document.getElementById(id); if(el) el.textContent = value ?? ""; }}
 
-function updateDial(fillPercent){{
+function updateDial(fillPercent, diameterMm){{
   const p = Math.max(0, Math.min(100, Number(fillPercent || 0)));
+  const d = Math.max(0, Number(diameterMm || 0));
   document.getElementById("fillDial").style.background = `conic-gradient(#005eb8 ${{p * 3.6}}deg, #dce8f5 ${{p * 3.6}}deg 360deg)`;
-  setText("dialFill", `${{p.toFixed(1)}} %`);
+  setText("dialFill", `${{p.toFixed(1)}} % / ${{d.toFixed(1)}} mm`);
 }}
 
 function openDeviceUi(){{
@@ -173,7 +174,7 @@ async function reload(){{
   setText("headline", data.device?.simulation ? "Simulation aktiv" : (data.device?.reachable ? "Endpoint online" : "Endpoint offline"));
   setText("roleText", data.config?.roleLabel || "{label}");
   setText("wipeValue", `${{Number(data.telemetry?.wipePercent || 0).toFixed(1)}} %`);
-  setText("fillValue", `${{Number(data.telemetry?.fillPercent || 0).toFixed(1)}} %`);
+  setText("fillValue", `${{Number(data.telemetry?.fillPercent || 0).toFixed(1)}} % / ${{Number(data.telemetry?.estimatedDiameterMm || 0).toFixed(1)}} mm`);
   setText("speedValue", `${{Number(data.telemetry?.rollerSpeedMmS || 0).toFixed(1)}} mm/s`);
   setText("motorValue", `${{Number(data.telemetry?.motorSpeedHz || 0).toFixed(0)}} Hz`);
   setText("endpointText", currentDeviceUrl || "-");
@@ -199,7 +200,7 @@ async function reload(){{
   const badge = document.getElementById("modeBadge");
   badge.className = modeClass(String(data.telemetry?.modeCss || ""));
   badge.textContent = data.telemetry?.modeLabel || "Stop";
-  updateDial(data.telemetry?.fillPercent || 0);
+  updateDial(data.telemetry?.fillPercent || 0, data.telemetry?.estimatedDiameterMm || 0);
 }}
 
 reload().catch(err => {{ document.getElementById("headline").textContent = err.message; }});
