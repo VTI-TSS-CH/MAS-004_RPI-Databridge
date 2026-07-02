@@ -168,6 +168,7 @@ PRODUCTION_RUNTIME_EVENT_TYPES = {
     "production_fault",
     "production_registration_late",
     "production_registration_fault",
+    "production_registration_correction",
     "production_velocity_stop_for_print",
     "production_first_print_position_commanded",
     "production_first_print_position_reached",
@@ -1497,6 +1498,22 @@ class MachineRuntime:
         if event_type in ("production_registration_late", "production_registration_fault"):
             result = self._handle_registration_diagnostic_event(event_type, payload)
             return {"ok": True, "accepted": True, "event": event_type, "result": result}
+        if event_type == "production_registration_correction":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            attempt = _safe_int(payload.get("attempt"), 0)
+            error_mm = _safe_float(payload.get("error_mm"), 0.0)
+            command_mm = _safe_float(payload.get("command_mm"), 0.0)
+            bias_delta_mm = _safe_float(payload.get("bias_delta_mm"), 0.0)
+            print_bias_mm = _safe_float(payload.get("print_bias_mm"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"ID3-Registrierkorrektur: Label {label_no}, Versuch {attempt}, "
+                f"Fehler {error_mm:.4f}mm, Befehl {command_mm:.4f}mm, "
+                f"Bias-Delta {bias_delta_mm:.4f}mm, Bias {print_bias_mm:.4f}mm",
+                dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
         if event_type == "production_velocity_stop_for_print":
             label_no = _safe_int(payload.get("label_no"), 0)
             remaining = _safe_float(payload.get("remaining_mm"), 0.0)
@@ -2517,6 +2534,16 @@ class MachineRuntime:
             return "|".join([event_type, str(label_no)])
         if event_type == "production_wickler_runline_released":
             return "|".join([event_type, str(label_no)])
+        if event_type == "production_registration_correction":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    str(_safe_int(payload.get("attempt"), 0)),
+                    _event_float_key(payload.get("error_mm"), 4),
+                    _event_float_key(payload.get("command_mm"), 4),
+                ]
+            )
         if event_type == "production_print_trigger":
             return "|".join(
                 [
