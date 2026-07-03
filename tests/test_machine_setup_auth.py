@@ -382,6 +382,50 @@ class MachineSetupAuthTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(("5970", "5970"), tuple(row))
 
+    def test_visualization_marker_edit_syncs_led_start_to_esp(self):
+        client = self.build_client(
+            config_overrides={
+                "esp_simulation": False,
+                "esp_host": "192.168.2.101",
+                "esp_port": 3010,
+            }
+        )
+        login = client.post(
+            "/ui/machine-setup/login",
+            json={
+                "username": "Admin",
+                "password": "VideojetMAS004!",
+                "next": "/ui/machine-setup/visualization",
+            },
+        )
+        self.assertEqual(200, login.status_code)
+        self.insert_map_param("MAP0066", "9600", min_v=0, max_v=20000)
+        calls: list[tuple[str, bool]] = []
+
+        class FakeEspPlcClient:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def exchange_line(self, line, read_timeout_s=None, *, priority=False, **_kwargs):
+                calls.append((line, bool(priority)))
+                if line == "SYNC MAP0066=9600":
+                    return "ACK_MAP0066=9600"
+                if line == "MAP0066=?":
+                    return "MAP0066=9600"
+                return "NAK_Syntax"
+
+        with patch("mas004_rpi_databridge.webui.EspPlcClient", FakeEspPlcClient):
+            api = client.post("/api/machine/production-visualization/component", json={"key": "led_start", "mm": 960.0})
+
+        self.assertEqual(200, api.status_code)
+        saved = api.json()["saved"]
+        self.assertEqual("MAP0066", saved["pkey"])
+        self.assertEqual("9600", saved["value"])
+        self.assertIn(("SYNC MAP0066=9600", True), calls)
+        self.assertIn(("MAP0066=?", True), calls)
+        self.assertTrue(saved["esp_sync"]["ok"])
+        self.assertEqual("9600", saved["esp_sync"]["actual"])
+
     def test_settings_ui_and_config_api_expose_light_curtain_auto_reset(self):
         client = self.build_client(config_overrides={"light_curtain_auto_reset_enabled": False})
 

@@ -56,7 +56,7 @@
   - no new or removed parameter IDs in this sync
   - 56 existing MAP rows changed, mostly `ESP32 R/W` and `KI-Anweisungen:`
   - `MAP0001..MAP0012`, `MAP0014..MAP0024`, `MAP0026..MAP0046`, `MAP0048..MAP0055` and `MAP0066` now reflect ESP read/mirror semantics where applicable
-  - `MAP0066` default is now `8000` (800.0 mm to first LED)
+  - `MAP0066` default is now `9600` (960.0 mm to first LED)
   - operator notes that were written before `KI:` in the workbook were evaluated and folded into new `KI:` texts
   - reusable sync helper: `scripts/sync_master_workbooks.py`
 - Raspi/ESP parameter sync contract after the 2026-04-21 workbook refresh:

@@ -1870,6 +1870,66 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     pass
         return updated
 
+    def normalize_esp_scalar(value: Any) -> str:
+        text = str(value if value is not None else "").strip()
+        if re.fullmatch(r"[+-]?\d+", text):
+            return str(int(text, 10))
+        if re.fullmatch(r"[+-]?\d+\.0+", text):
+            return str(int(float(text)))
+        return text
+
+    def sync_visualization_param_to_esp(cfg2: Settings, pkey: str, value: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": True,
+            "pkey": pkey,
+            "value": str(value),
+        }
+        if bool(getattr(cfg2, "esp_simulation", False)):
+            result["skipped"] = "esp_simulation"
+            return result
+        if not str(getattr(cfg2, "esp_host", "") or "").strip() or int(getattr(cfg2, "esp_port", 0) or 0) <= 0:
+            result["skipped"] = "esp_endpoint_missing"
+            return result
+        if not params.can_actor_read(pkey, actor="esp32"):
+            result["skipped"] = "esp_no_access"
+            return result
+        mapping = params.get_device_map(pkey)
+        esp_key = str((mapping or {}).get("esp_key") or pkey).strip()
+        esp_access = params.actor_access(pkey, actor="esp32")
+        write_line = f"SYNC {esp_key}={value}" if esp_access == "R" else f"{esp_key}={value}"
+        read_line = f"{esp_key}=?"
+        try:
+            client = EspPlcClient(
+                cfg2.esp_host,
+                int(cfg2.esp_port),
+                timeout_s=float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5),
+            )
+            write_reply = client.exchange_line(write_line, read_timeout_s=5.0, priority=True)
+            read_reply = client.exchange_line(read_line, read_timeout_s=5.0, priority=True)
+            actual = str(read_reply).split("=", 1)[1].strip() if "=" in str(read_reply) else str(read_reply).strip()
+            expected = normalize_esp_scalar(value)
+            result.update(
+                {
+                    "write_line": write_line,
+                    "write_reply": write_reply,
+                    "read_line": read_line,
+                    "read_reply": read_reply,
+                    "actual": actual,
+                    "expected": expected,
+                    "ok": normalize_esp_scalar(actual) == expected,
+                }
+            )
+            if not result["ok"]:
+                result["error"] = f"{esp_key} expected {expected} got {actual}"
+        except Exception as exc:
+            result.update({"ok": False, "error": repr(exc), "write_line": write_line, "read_line": read_line})
+        try:
+            level = "INFO" if result.get("ok") else "WARN"
+            logs.log("machine", level, f"Visualisierung ESP-Sync {pkey}={value}: {result}")
+        except Exception:
+            pass
+        return result
+
     def set_visualization_component_position(cfg2: Settings, body: ProductionVisualizationComponentReq) -> dict[str, Any]:
         key = str(body.key or "").strip().lower()
         try:
@@ -1914,6 +1974,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         ok, msg = params.set_value(param_key, str(value_tenths), actor="machine-setup-ui")
         if not ok:
             raise HTTPException(status_code=400, detail=msg)
+        esp_sync = sync_visualization_param_to_esp(cfg2, param_key, str(value_tenths))
         workbook_paths = update_param_workbook_defaults(cfg2, param_key, str(value_tenths))
         try:
             logs.log(
@@ -1933,6 +1994,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "mm": mm,
             "pkey": param_key,
             "value": str(value_tenths),
+            "esp_sync": esp_sync,
             "workbooks": workbook_paths,
         }
         return payload
@@ -2061,7 +2123,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         verify_mm = (safe_param_float(values, "MAP0020", 12700.0) + safe_param_float(values, "MAP0012", 0.0)) / 10.0
         control_mm = safe_param_float(values, "MAP0021", 19300.0) / 10.0
         exit_mm = control_mm + 50.0
-        led_offset_mm = safe_param_float(values, "MAP0066", 8000.0) / 10.0
+        led_offset_mm = safe_param_float(values, "MAP0066", 9600.0) / 10.0
         led_length_mm = max(1.0, min(520.0, safe_param_float(values, "MAP0071", 5200.0) / 10.0))
         components = [
             {"key": "detect", "kind": "detect", "label": "Erfassung", "mm": 0.0, "editable": False},
@@ -2106,7 +2168,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 esp_errors.append(repr(exc))
         active_labels = list(esp_snapshot.get("labels") or [])
         esp_error = "; ".join(str(item) for item in esp_errors if str(item).strip())
-        led_offset_mm = safe_param_float(values, "MAP0066", 8000.0) / 10.0
+        led_offset_mm = safe_param_float(values, "MAP0066", 9600.0) / 10.0
         led_length_mm = max(1.0, min(520.0, safe_param_float(values, "MAP0071", 5200.0) / 10.0))
         led_pitch_mm = 6.95
         led_count = max(1, min(75, int(math.ceil(led_length_mm / led_pitch_mm))))
@@ -2155,7 +2217,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "offset_mm": led_offset_mm,
                 "length_mm": led_length_mm,
                 "physical_length_mm": led_physical_length_mm,
-                "first_led_distance_tenths_mm": safe_param_int(values, "MAP0066", 8000),
+                "first_led_distance_tenths_mm": safe_param_int(values, "MAP0066", 9600),
                 "strip_length_tenths_mm": safe_param_int(values, "MAP0071", 5200),
             },
         }

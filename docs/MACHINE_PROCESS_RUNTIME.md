@@ -126,7 +126,7 @@
   - the 2026-04-21 workbook sync refreshed 56 MAP rows
   - `MAP0066`
     - distance from label-detection zero point to the first LED of the external label-status stripe
-    - default is now `8000` = `800.0 mm`
+    - default is now `9600` = `960.0 mm`
   - `MAP0071..MAP0075`
     - active LED strip length, UDP enable, target last octet, UDP port and frame interval for the external Olimex ESP32-POE-ISO-IND LED controller
     - current strip length is `520.0 mm`, rendered as `75` LEDs at `6.95 mm` pitch

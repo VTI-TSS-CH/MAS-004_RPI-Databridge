@@ -174,7 +174,7 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0038", "MAP", "0038", "0", "W", "R", "bool"),
             ("MAP0040", "MAP", "0040", "5", "W", "R", "uint8"),
             ("MAP0065", "MAP", "0065", "1111111", "W", "R", "uint8"),
-            ("MAP0066", "MAP", "0066", "8000", "W", "R", "uint16"),
+            ("MAP0066", "MAP", "0066", "9600", "W", "R", "uint16"),
             ("MAP0071", "MAP", "0071", "5200", "W", "R", "uint16"),
             ("MAP0075", "MAP", "0075", "100", "W", "R", "uint16"),
             ("MAP0079", "MAP", "0079", "0", "W", "R", "bool"),
@@ -276,7 +276,7 @@ class MachineRuntimeTests(unittest.TestCase):
         second = runtime.refresh()
         self.assertEqual(7, second["current_state"])
         self.assertEqual(7, second["requested_state"])
-        self.assertEqual(8000, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
+        self.assertEqual(9600, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
 
     def test_setup_starts_wickler_before_format_axes_finish(self):
         runtime = self.build_runtime()

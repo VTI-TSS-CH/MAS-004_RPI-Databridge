@@ -89,7 +89,7 @@ def build_format_plan(values: dict[str, Any]) -> dict[str, Any]:
             "transport_speed_mm_s": _safe_int(values, "MAP0014", 0),
             "rewind_speed_mm_s": _safe_int(values, "MAP0015", 0),
             "rewind_after_stop": _safe_bool(values, "MAP0039", False),
-            "led_strip_first_led_distance_tenths_mm": _safe_int(values, "MAP0066", 8000),
+            "led_strip_first_led_distance_tenths_mm": _safe_int(values, "MAP0066", 9600),
             "led_strip_length_tenths_mm": _safe_int(values, "MAP0071", 5200),
             "led_controller_enabled": _safe_bool(values, "MAP0072", True),
             "led_controller_target_last_octet": _safe_int(values, "MAP0073", 255),

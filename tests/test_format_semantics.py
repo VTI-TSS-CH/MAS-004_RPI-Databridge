@@ -31,7 +31,7 @@ class FormatSemanticsTests(unittest.TestCase):
                 "MAP0033": "-7",
                 "MAP0039": "1",
                 "MAP0040": "5",
-                "MAP0066": "8000",
+                "MAP0066": "9600",
                 "MAP0071": "5200",
                 "MAP0072": "1",
                 "MAP0073": "255",
@@ -56,7 +56,7 @@ class FormatSemanticsTests(unittest.TestCase):
         self.assertEqual(511, plan["axes"]["label_guide_infeed_target_tenths_mm"])
         self.assertEqual(512, plan["axes"]["label_guide_outfeed_target_tenths_mm"])
         self.assertTrue(plan["process"]["rewind_after_stop"])
-        self.assertEqual(8000, plan["process"]["led_strip_first_led_distance_tenths_mm"])
+        self.assertEqual(9600, plan["process"]["led_strip_first_led_distance_tenths_mm"])
         self.assertEqual(5200, plan["process"]["led_strip_length_tenths_mm"])
         self.assertTrue(plan["process"]["led_controller_enabled"])
         self.assertEqual(255, plan["process"]["led_controller_target_last_octet"])
