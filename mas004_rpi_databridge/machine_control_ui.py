@@ -306,15 +306,18 @@ function renderButtons(machine){{
   const pending = info.pending_hmi_command || null;
   const pendingTarget = Number(pending?.target_state || 0);
   const commandBusy = !!pending && pendingTarget > 0 && pendingTarget !== state;
+  const laserInterlock = info.laser_reset_interlock || {{}};
   document.getElementById("button_row").innerHTML = buttons.map(([key]) => {{
     const action = actionForButton(key, state, resetContext);
+    const laserResetBlocked = resetContext && key === "start_pause" && !!laserInterlock.blocked;
     const enabled = resetContext
-      ? (key === "start_pause" && !commandBusy)
+      ? (key === "start_pause" && !commandBusy && !laserResetBlocked)
       : (!commandBusy && !!allowed[action] && !!mask[action]);
     const baseLabel = buttonLabel(key, state, resetContext);
     const label = commandBusy && pending?.button === key ? `${{baseLabel}}...` : baseLabel;
     const cls = key === "stop" ? " stop" : (resetContext && key === "start_pause" ? " reset" : "");
-    return `<button class="control${{enabled?" enabled":""}}${{cls}}" onclick="pressButton('${{key}}')" ${{enabled?"":"disabled"}}>${{esc(label)}}</button>`;
+    const title = laserResetBlocked ? (laserInterlock.message || "Laser System Ready fehlt") : "";
+    return `<button class="control${{enabled?" enabled":""}}${{cls}}" onclick="pressButton('${{key}}')" title="${{esc(title)}}" ${{enabled?"":"disabled"}}>${{esc(label)}}</button>`;
   }}).join("");
 }}
 function waitMs(ms){{ return new Promise(resolve => setTimeout(resolve, ms)); }}

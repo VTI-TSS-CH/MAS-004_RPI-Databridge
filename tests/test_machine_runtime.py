@@ -198,9 +198,18 @@ class MachineRuntimeTests(unittest.TestCase):
             _insert_io_point(self.db, "raspi_plc21", "Raspberry PLC 21", pin, "input", value)
         for pin in ("Q0.0", "Q0.1", "Q0.2", "Q0.3", "Q0.4", "Q0.5", "Q0.6", "Q0.7"):
             _insert_io_point(self.db, "raspi_plc21", "Raspberry PLC 21", pin, "output", "0")
-        for pin, value in (("I0.4", "0"), ("I0.7", "1"), ("I0.8", "1"), ("I0.11", "0")):
+        for pin, value in (
+            ("I0.2", "0"),
+            ("I0.4", "0"),
+            ("I0.7", "1"),
+            ("I0.8", "1"),
+            ("I0.11", "0"),
+            ("I0.12", "0"),
+        ):
             _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", pin, "input", value)
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.2", "output", "0")
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.3", "output", "0")
+        _insert_io_point(self.db, "moxa_e1213_1", "Moxa ioLogik E1213 #1", "DIO3", "output", "0")
         for pin in ("DIO0", "DIO1", "DIO2"):
             _insert_io_point(self.db, "moxa_e1213_3", "Moxa ioLogik E1213 #3", pin, "output", "0")
 
@@ -3022,6 +3031,89 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(2, result["command"])
         self.assertEqual("2", self.params.get_effective_value("MAS0002"))
+
+    def test_virtual_reset_is_blocked_for_laser_until_system_ready_is_high(self):
+        runtime = self.build_runtime()
+        self.params.set_value("MAP0016", "1", actor="microtom")
+        self.io_store.upsert_value("esp32_plc58__I0_12", "0", "simulation", "test")
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Laser System Ready"):
+            runtime.press_virtual_button("start_pause")
+
+        self.assertNotEqual("2", self.params.get_effective_value("MAS0002"))
+
+    def test_direct_reset_command_is_blocked_for_laser_until_system_ready_is_high(self):
+        runtime = self.build_runtime()
+        self.params.set_value("MAP0016", "1", actor="microtom")
+        self.io_store.upsert_value("esp32_plc58__I0_12", "0", "simulation", "test")
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+        ok, msg = self.params.set_value("MAS0002", "2", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch.object(runtime, "_pulse_esp_reset_output", return_value=None) as pulse:
+            snapshot = runtime.refresh()
+
+        pulse.assert_not_called()
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertEqual("failed", snapshot["info"]["safety"]["phase"])
+        self.assertIn("Laser System Ready", snapshot["info"]["safety"]["last_reset"]["error"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0002"))
+
+    def test_laser_reset_sequence_pulses_separate_reset_waits_ready_then_starts_laser(self):
+        runtime = self.build_runtime()
+        self.params.set_value("MAP0016", "1", actor="microtom")
+        self.io_store.upsert_value("esp32_plc58__I0_12", "1", "simulation", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_2", "1", "simulation", "test")
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+
+        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
+            runtime,
+            "_start_reset_motion_recovery_background",
+            return_value={"ok": True, "queued": True, "in_progress": True},
+        ):
+            result = runtime.press_virtual_button("start_pause")
+            self.assertTrue(result["queued"])
+            snapshot = runtime.refresh()
+
+        self.assertEqual(9, snapshot["current_state"])
+        last_reset = snapshot["info"]["safety"]["last_reset"]
+        self.assertTrue(last_reset["ok"], last_reset)
+        step = next(item for item in last_reset["steps"] if item.get("step") == "laser_safety_reset_and_start")
+        self.assertTrue(step["ok"], step)
+        self.assertTrue(any(item.get("step") == "laser_safety_reset_pulse" for item in step["steps"]))
+        self.assertTrue(any(item.get("step") == "wait_laser_ready" and item.get("ok") for item in step["steps"]))
+        self.assertTrue(any(item.get("step") == "laser_start_pulse" for item in step["steps"]))
+        self.assertEqual("0", self.io_store.get_point("moxa_e1213_1__DIO3")["value"])
+        self.assertEqual("0", self.io_store.get_point("esp32_plc58__Q0_3")["value"])
 
     def test_virtual_stop_button_is_not_reset_in_safety_context(self):
         runtime = self.build_runtime()

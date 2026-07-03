@@ -156,6 +156,14 @@ SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
 ESP_RESET_PULSE_HIGH_S = 0.2
 ESP_RESET_PULSE_GAP_S = 1.0
+LASER_SYSTEM_READY_PIN = "I0.12"
+LASER_READY_PIN = "I0.2"
+LASER_START_PIN = "Q0.3"
+LASER_SAFETY_RESET_IO_KEY = "moxa_e1213_1__DIO3"
+LASER_SAFETY_RESET_PULSE_HIGH_S = 0.2
+LASER_START_PULSE_HIGH_S = 0.1
+LASER_READY_WAIT_TIMEOUT_S = 20.0
+LASER_READY_WAIT_POLL_S = 0.2
 LIGHT_CURTAIN_AUTO_RESET_INTERVAL_S = 5.0
 LIGHT_CURTAIN_WICKLER_RECOVERY_RETRY_INTERVAL_S = 5.0
 LIGHT_CURTAIN_WICKLER_RECOVERY_WINDOW_S = 120.0
@@ -600,6 +608,11 @@ class MachineRuntime:
         pause_active, pause_reasons = self._pause_state(param_map)
         band_break_bypass = quick_setup_band_break_bypass_active(info)
         format_plan = build_format_plan(param_map)
+        info["laser_reset_interlock"] = self._laser_reset_interlock_status(
+            param_map=param_map,
+            io_map=io_map,
+            refresh=False,
+        )
         safety_status = self._safety_status(io_map)
         pause_light_curtain_safety_drop = self._pause_light_curtain_safety_drop(
             snapshot=snapshot,
@@ -2365,6 +2378,8 @@ class MachineRuntime:
         if not reset_context and not allowed_actions.get(action_name, False):
             raise RuntimeError(f"button {button_name} is not allowed in state {current_state}")
         reset_button = button_name == "start_pause" and reset_context
+        if reset_button:
+            self._ensure_laser_reset_interlock_clear(source=f"button:{button_name}")
         if not reset_button and not button_mask.get(action_name, False):
             raise RuntimeError(f"button {button_name} blocked by MAP0065")
 
@@ -5906,6 +5921,80 @@ class MachineRuntime:
             return False
         return bool(safety_info.get("latched") or mas0028_active)
 
+    def _laser_printer_active(self, param_map: dict[str, str] | None = None) -> bool:
+        values = param_map if param_map is not None else self._param_values_by_prefix(("MAP",))
+        return _truthy((values or {}).get("MAP0016", "0"))
+
+    def _laser_reset_interlock_status(
+        self,
+        *,
+        param_map: dict[str, str] | None = None,
+        io_map: dict[tuple[str, str], str] | None = None,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        laser_active = self._laser_printer_active(param_map)
+        status: dict[str, Any] = {
+            "laser_active": laser_active,
+            "active_printer": "laser" if laser_active else "tto",
+            "blocked": False,
+        }
+        if not laser_active:
+            return status
+
+        refresh_result: dict[str, Any] | None = None
+        if refresh:
+            refresh_result = self._refresh_single_io_device("esp32_plc58", {LASER_SYSTEM_READY_PIN})
+        if io_map is None or ("esp32_plc58", LASER_SYSTEM_READY_PIN) not in io_map:
+            io_map = self._io_values_for_pins({("esp32_plc58", LASER_SYSTEM_READY_PIN)})
+
+        detail = self._io_point_detail(
+            io_map,
+            "esp32_plc58",
+            LASER_SYSTEM_READY_PIN,
+            default=False,
+        )
+        point_defined = bool(self.io_store.get_point(f"esp32_plc58__{LASER_SYSTEM_READY_PIN.replace('.', '_')}"))
+        refresh_ok = True if refresh_result is None else bool(refresh_result.get("ok", False))
+        system_ready = bool(detail.get("active")) and point_defined and refresh_ok
+        status.update(
+            {
+                "system_ready": system_ready,
+                "system_ready_input": detail,
+                "system_ready_defined": point_defined,
+            }
+        )
+        if refresh_result is not None:
+            status["refresh"] = refresh_result
+        if not refresh_ok:
+            status["blocked"] = True
+            status["reason"] = "laser_system_ready_refresh_failed"
+            status["message"] = (
+                f"Laser System Ready ESP32 PLC 58 {LASER_SYSTEM_READY_PIN} konnte nicht live gelesen werden; "
+                "Safety-Reset Laser gesperrt"
+            )
+        elif not system_ready:
+            status["blocked"] = True
+            status["reason"] = "laser_system_ready_low"
+            status["message"] = (
+                f"Laser System Ready ESP32 PLC 58 {LASER_SYSTEM_READY_PIN} ist LOW; "
+                "Safety-Reset Laser gesperrt"
+            )
+        return status
+
+    def _ensure_laser_reset_interlock_clear(self, *, source: str) -> dict[str, Any]:
+        interlock = self._laser_reset_interlock_status(refresh=True)
+        if bool(interlock.get("blocked")):
+            message = str(interlock.get("message") or "Laser System Ready fehlt")
+            self.logs.log("machine", "warning", f"{source}: {message}")
+            self._record_event(
+                "laser_safety_reset_blocked",
+                "warning",
+                message,
+                {"source": source, **interlock},
+            )
+            raise RuntimeError(message)
+        return interlock
+
     def _perform_light_curtain_auto_reset(self, ts: float) -> dict[str, Any]:
         result: dict[str, Any] = {
             "ok": False,
@@ -6229,6 +6318,15 @@ class MachineRuntime:
             "initial_reasons": list(safety_status.get("reasons") or []),
             "steps": [],
         }
+        try:
+            laser_interlock = self._ensure_laser_reset_interlock_clear(source="safety_reset")
+            result["laser_reset_interlock"] = laser_interlock
+        except Exception as exc:
+            result["steps"].append({"step": "verify_laser_system_ready", "ok": False, "error": str(exc)})
+            result["error"] = str(exc)
+            result["finished_ts"] = now_ts()
+            return result
+
         self.logs.log("machine", "info", "safety reset requested")
         self.params.apply_device_value("MAS0001", "8", promote_default=True)
         self._notify_microtom("MAS0001", "8", dedupe_key="machine:MAS0001")
@@ -6279,6 +6377,13 @@ class MachineRuntime:
             result["error"] = "ESP safety input still LOW/not OK after reset sequence: " + ",".join(refreshed_blocking_reasons)
             return result
         result["steps"].append({"step": "verify_safety_inputs_high_ok", "ok": True})
+
+        if bool((result.get("laser_reset_interlock") or {}).get("laser_active")):
+            laser_reset = self._perform_laser_safety_reset_and_start()
+            result["steps"].append({"step": "laser_safety_reset_and_start", **laser_reset})
+            if not laser_reset.get("ok"):
+                result["error"] = laser_reset.get("error") or "Laser safety reset/start sequence failed"
+                return result
 
         process_reset = self._reset_esp_process_runtime()
         result["steps"].append({"step": "esp_process_reset", **process_reset})
@@ -6498,6 +6603,126 @@ class MachineRuntime:
         io_runtime.write_output(point["io_key"], True, force=True, source="safety-reset")
         time.sleep(ESP_RESET_PULSE_HIGH_S)
         io_runtime.write_output(point["io_key"], False, force=True, source="safety-reset")
+
+    def _pulse_io_output(self, io_key: str, *, high_s: float, source: str) -> dict[str, Any]:
+        point = self.io_store.get_point(io_key)
+        if not point:
+            raise RuntimeError(f"IO output {io_key} is not defined in IO master")
+        io_runtime = IoRuntime(self.cfg, self.io_store)
+        high_done = False
+        try:
+            high = io_runtime.write_output(point["io_key"], True, force=True, source=source)
+            high_done = True
+            time.sleep(max(0.01, float(high_s or 0.0)))
+            low = io_runtime.write_output(point["io_key"], False, force=True, source=source)
+            return {
+                "ok": True,
+                "io_key": point["io_key"],
+                "device_code": point.get("device_code"),
+                "pin_label": point.get("pin_label"),
+                "high_s": float(high_s or 0.0),
+                "high": high,
+                "low": low,
+            }
+        finally:
+            if high_done:
+                try:
+                    io_runtime.write_output(point["io_key"], False, force=True, source=source)
+                except Exception as exc:
+                    self.logs.log("machine", "warning", f"{source}: failed to force {io_key} LOW after pulse: {exc}")
+
+    def _wait_for_esp_input_high(self, pin_label: str, *, timeout_s: float, poll_s: float) -> dict[str, Any]:
+        pin = str(pin_label or "").upper()
+        started = now_ts()
+        deadline = started + max(0.1, float(timeout_s or 0.0))
+        attempts: list[dict[str, Any]] = []
+        while True:
+            refresh = self._refresh_single_io_device("esp32_plc58", {pin})
+            io_map = self._io_values_for_pins({("esp32_plc58", pin)})
+            detail = self._io_point_detail(io_map, "esp32_plc58", pin, default=False)
+            attempt = {
+                "ts": now_ts(),
+                "ok": bool(detail.get("active")),
+                "value": detail.get("value"),
+                "quality": detail.get("quality"),
+                "refresh_ok": bool(refresh.get("ok", False)),
+            }
+            attempts.append(attempt)
+            if bool(detail.get("active")):
+                return {
+                    "ok": True,
+                    "pin_label": pin,
+                    "detail": detail,
+                    "attempts": attempts[-5:],
+                    "duration_s": round(max(0.0, now_ts() - started), 3),
+                }
+            if now_ts() >= deadline:
+                return {
+                    "ok": False,
+                    "pin_label": pin,
+                    "detail": detail,
+                    "attempts": attempts[-5:],
+                    "duration_s": round(max(0.0, now_ts() - started), 3),
+                    "error": f"ESP32 PLC 58 {pin} did not go HIGH within {float(timeout_s or 0.0):.1f}s",
+                }
+            time.sleep(max(0.02, float(poll_s or 0.0)))
+
+    def _perform_laser_safety_reset_and_start(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": False,
+            "started_ts": now_ts(),
+            "steps": [],
+        }
+        try:
+            interlock = self._ensure_laser_reset_interlock_clear(source="laser_safety_reset")
+            result["interlock"] = interlock
+        except Exception as exc:
+            result["steps"].append({"step": "verify_laser_system_ready", "ok": False, "error": str(exc)})
+            result["error"] = str(exc)
+            result["finished_ts"] = now_ts()
+            return result
+
+        try:
+            pulse = self._pulse_io_output(
+                LASER_SAFETY_RESET_IO_KEY,
+                high_s=LASER_SAFETY_RESET_PULSE_HIGH_S,
+                source="laser-safety-reset",
+            )
+            result["steps"].append({"step": "laser_safety_reset_pulse", **pulse})
+        except Exception as exc:
+            result["steps"].append({"step": "laser_safety_reset_pulse", "ok": False, "error": str(exc)})
+            result["error"] = f"Laser safety reset pulse failed: {exc}"
+            result["finished_ts"] = now_ts()
+            return result
+
+        ready = self._wait_for_esp_input_high(
+            LASER_READY_PIN,
+            timeout_s=LASER_READY_WAIT_TIMEOUT_S,
+            poll_s=LASER_READY_WAIT_POLL_S,
+        )
+        result["steps"].append({"step": "wait_laser_ready", **ready})
+        if not ready.get("ok"):
+            result["error"] = ready.get("error") or "Laser Ready did not become HIGH"
+            result["finished_ts"] = now_ts()
+            return result
+
+        try:
+            start = self._pulse_io_output(
+                f"esp32_plc58__{LASER_START_PIN.replace('.', '_')}",
+                high_s=LASER_START_PULSE_HIGH_S,
+                source="laser-start",
+            )
+            result["steps"].append({"step": "laser_start_pulse", **start})
+        except Exception as exc:
+            result["steps"].append({"step": "laser_start_pulse", "ok": False, "error": str(exc)})
+            result["error"] = f"Laser start pulse failed: {exc}"
+            result["finished_ts"] = now_ts()
+            return result
+
+        result["ok"] = True
+        result["finished_ts"] = now_ts()
+        result["duration_s"] = round(max(0.0, result["finished_ts"] - result["started_ts"]), 3)
+        return result
 
     def _refresh_single_io_device(self, device_code: str, pin_labels: set[str] | None = None) -> dict[str, Any]:
         wanted_pins = {str(pin or "").upper() for pin in (pin_labels or set())}
