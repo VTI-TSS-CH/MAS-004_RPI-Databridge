@@ -107,6 +107,9 @@ POSITION_AXIS_MAE_BY_MOTOR = {
     8: "MAE0009",
     9: "MAE0008",
 }
+POSITION_REFERENCE_VERIFY_MOTORS = tuple(
+    motor_id for motor_id in sorted(POSITION_AXIS_MAE_BY_MOTOR) if motor_id != 3
+)
 RESETTABLE_SAFETY_ERROR_KEYS = {
     "MAE0001",  # Not-Aus
     "MAE0024",  # Etikettenbandriss
@@ -6997,23 +7000,32 @@ class MachineRuntime:
                     continue
                 payload = client.refresh(motor_id)
                 motor = payload.get("motor") if isinstance(payload, dict) else {}
+                motor = motor if isinstance(motor, dict) else {}
                 state = (motor or {}).get("state") if isinstance(motor, dict) else {}
                 state = state if isinstance(state, dict) else {}
                 status_ok = bool(payload.get("ok", True)) if isinstance(payload, dict) else False
                 ready = self._esp_motor_reset_ready(motor_id, state, status_ok)
+                reference_check = self._position_axis_reference_limit_check(
+                    motor_id,
+                    motor,
+                    state,
+                    context="Safety-Reset Fehlerfreigabe",
+                    latch_fault=False,
+                )
                 detail = {
                     "motor_id": motor_id,
                     "pkey": pkey,
-                    "ok": ready,
+                    "ok": bool(ready and reference_check.get("ok", True)),
                     "status_ok": status_ok,
                     "link_ok": state.get("link_ok"),
                     "ready": state.get("ready"),
                     "alarm": state.get("alarm"),
                     "alarm_code": state.get("alarm_code"),
                     "feedback_tenths_mm": state.get("feedback_tenths_mm"),
+                    "position_reference": reference_check,
                 }
                 details.append(detail)
-                if ready:
+                if detail["ok"]:
                     cleared.append(pkey)
             except Exception as exc:
                 details.append({"motor_id": motor_id, "pkey": pkey, "ok": False, "error": str(exc)})
@@ -7417,6 +7429,73 @@ class MachineRuntime:
             return not bool(state.get("hwto"))
         return bool(state.get("ready"))
 
+    def _position_axis_reference_limit_check(
+        self,
+        motor_id: int,
+        motor: dict[str, Any],
+        state: dict[str, Any],
+        *,
+        context: str,
+        latch_fault: bool = False,
+    ) -> dict[str, Any]:
+        motor_id = int(motor_id)
+        if motor_id not in POSITION_REFERENCE_VERIFY_MOTORS:
+            return {"ok": True, "motor_id": motor_id, "skipped": True, "reason": "not_position_reference_axis"}
+        motor = motor if isinstance(motor, dict) else {}
+        state = state if isinstance(state, dict) else {}
+        motor_cfg = motor.get("config") if isinstance(motor.get("config"), dict) else {}
+        if not motor_cfg:
+            # Older tests/fallback clients may not include the config in REFRESH.
+            # Real ESP motor JSON does; without limits we cannot prove a bad
+            # reference, so leave readiness handling to the normal motor checks.
+            return {"ok": True, "motor_id": motor_id, "skipped": True, "reason": "missing_motor_config"}
+        try:
+            feedback_tenths = int(float(state.get("feedback_tenths_mm")))
+        except Exception:
+            return {
+                "ok": False,
+                "motor_id": motor_id,
+                "reason": "feedback_position_unreadable",
+                "context": str(context or ""),
+            }
+        min_enabled = bool(motor_cfg.get("min_enabled", True))
+        max_enabled = bool(motor_cfg.get("max_enabled", True))
+        min_tenths = _safe_int(motor_cfg.get("min_tenths_mm"), -2_147_483_648)
+        max_tenths = _safe_int(motor_cfg.get("max_tenths_mm"), 2_147_483_647)
+        below_min = bool(min_enabled and feedback_tenths < min_tenths)
+        above_max = bool(max_enabled and feedback_tenths > max_tenths)
+        result = {
+            "ok": not (below_min or above_max),
+            "motor_id": motor_id,
+            "context": str(context or ""),
+            "feedback_tenths_mm": feedback_tenths,
+            "min_enabled": min_enabled,
+            "max_enabled": max_enabled,
+            "min_tenths_mm": min_tenths,
+            "max_tenths_mm": max_tenths,
+            "below_min": below_min,
+            "above_max": above_max,
+            "reason": "inside_limits" if not (below_min or above_max) else "position_reference_outside_limits",
+        }
+        if result["ok"]:
+            return result
+
+        pkey = POSITION_AXIS_MAE_BY_MOTOR.get(motor_id)
+        if pkey:
+            result["pkey"] = pkey
+        message = (
+            f"{context}: Motor {motor_id} Istposition {feedback_tenths / 10.0:.1f}mm ausserhalb "
+            f"Limits {min_tenths / 10.0:.1f}..{max_tenths / 10.0:.1f}mm - "
+            "Positionsreferenz nach Recovery unsicher"
+        )
+        if latch_fault and pkey:
+            self.params.apply_device_value(pkey, "1", promote_default=True)
+            self._notify_microtom(pkey, "1", dedupe_key=f"machine:{pkey}")
+            result["latched_pkey"] = pkey
+        self.logs.log("machine", "warning", message)
+        self._record_event("motor_position_reference_suspect", "warning", message, result)
+        return result
+
     @staticmethod
     def _wickler_reset_safe_stop(state_ok: bool, drive: dict[str, Any], mode_label: str, safe_stop_fault: bool) -> bool:
         if not (bool(state_ok) and bool(drive.get("online")) and not bool(drive.get("alarm")) and safe_stop_fault):
@@ -7465,10 +7544,20 @@ class MachineRuntime:
                     try:
                         status = esp.refresh(motor_id)
                         motor = status.get("motor") if isinstance(status, dict) else {}
+                        motor = motor if isinstance(motor, dict) else {}
                         state = motor.get("state") if isinstance(motor, dict) else {}
                         state = state if isinstance(state, dict) else {}
                         status_ok = bool(status.get("ok"))
-                        verified = self._esp_motor_reset_ready(motor_id, state, status_ok)
+                        ready_verified = self._esp_motor_reset_ready(motor_id, state, status_ok)
+                        position_reference = self._position_axis_reference_limit_check(
+                            motor_id,
+                            motor,
+                            state,
+                            context="Safety-Reset Motion-Recovery",
+                            latch_fault=True,
+                        )
+                        position_reference_ok = bool(position_reference.get("ok", True))
+                        verified = bool(ready_verified and position_reference_ok)
                         verify = {
                             "step": "verify_ready",
                             "motor_id": motor_id,
@@ -7477,10 +7566,13 @@ class MachineRuntime:
                             "status_ok": status_ok,
                             "ready": bool(state.get("ready")),
                             "ready_required": int(motor_id) != 3,
-                            "operable": verified,
+                            "operable": ready_verified,
+                            "position_reference_ok": position_reference_ok,
+                            "position_reference": position_reference,
                             "link_ok": bool(state.get("link_ok")),
                             "alarm": bool(state.get("alarm")),
                             "alarm_code": state.get("alarm_code"),
+                            "feedback_tenths_mm": state.get("feedback_tenths_mm"),
                             "input_raw_hex": state.get("input_raw_hex"),
                             "output_raw_hex": state.get("output_raw_hex"),
                             "monitor0179_hex": state.get("monitor0179_hex"),
@@ -7492,6 +7584,8 @@ class MachineRuntime:
                         }
                         details["esp_motors"].append(verify)
                         if verify["ok"]:
+                            break
+                        if not position_reference_ok:
                             break
                         if verify["alarm"]:
                             reply = esp.reset_alarm(motor_id)
@@ -7522,6 +7616,8 @@ class MachineRuntime:
                         f"(link={bool((verify or {}).get('link_ok'))}, "
                         f"ready={bool((verify or {}).get('ready'))}, "
                         f"ready_required={bool((verify or {}).get('ready_required'))}, "
+                        f"position_reference_ok={bool((verify or {}).get('position_reference_ok'))}, "
+                        f"feedback_tenths_mm={(verify or {}).get('feedback_tenths_mm')}, "
                         f"alarm={bool((verify or {}).get('alarm'))}, "
                         f"alarm_code={(verify or {}).get('alarm_code')}, "
                         f"in={(verify or {}).get('input_raw_hex')}, "

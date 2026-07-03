@@ -178,6 +178,10 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0071", "MAP", "0071", "5200", "W", "R", "uint16"),
             ("MAP0075", "MAP", "0075", "100", "W", "R", "uint16"),
             ("MAP0079", "MAP", "0079", "0", "W", "R", "bool"),
+            ("MAE0004", "MAE", "0004", "0", "R", "W", "bool"),
+            ("MAE0005", "MAE", "0005", "0", "R", "W", "bool"),
+            ("MAE0006", "MAE", "0006", "0", "R", "W", "bool"),
+            ("MAE0007", "MAE", "0007", "0", "R", "W", "bool"),
             ("MAE0008", "MAE", "0008", "0", "R", "W", "bool"),
             ("MAE0009", "MAE", "0009", "0", "R", "W", "bool"),
             ("MAE0010", "MAE", "0010", "0", "R", "W", "bool"),
@@ -5040,6 +5044,81 @@ class MachineRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result["ok"], result)
         self.assertIn("Motor 2 not ready/operable", result["error"])
+
+    def test_motion_reset_rejects_position_axis_reference_outside_limits(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                pass
+
+            def available(self):
+                return True
+
+            def apply_eto_recovery(self):
+                return {"ok": True, "reply": "ACK_MOTOR_APPLY_ETO_RECOVERY"}
+
+            def recover_eto(self):
+                return {"ok": True, "reply": "ACK_MOTOR_RECOVER_ETO"}
+
+            def reset_alarm(self, motor_id):
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RESET_ALARM"}
+
+            def recover_eto_motor(self, motor_id):
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RECOVER_ETO"}
+
+            def refresh(self, motor_id):
+                motor_id = int(motor_id)
+                feedback = 3601 if motor_id == 2 else 0
+                max_tenths = 990 if motor_id == 2 else 1540
+                return {
+                    "ok": True,
+                    "motor": {
+                        "positional": motor_id != 3,
+                        "config": {
+                            "min_enabled": True,
+                            "max_enabled": True,
+                            "min_tenths_mm": 0,
+                            "max_tenths_mm": max_tenths,
+                        },
+                        "state": {
+                            "link_ok": True,
+                            "ready": motor_id != 3,
+                            "alarm": False,
+                            "alarm_code": 0,
+                            "hwto": False,
+                            "feedback_tenths_mm": feedback,
+                            "input_raw_hex": "4",
+                            "output_raw_hex": "40",
+                        },
+                    },
+                }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, _role):
+                pass
+
+            def available(self):
+                return False
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", FakeEspMotorClient), patch(
+            "mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient
+        ):
+            result = runtime._reset_motion_devices()
+
+        self.assertFalse(result["ok"], result)
+        self.assertIn("position_reference_ok=False", result["error"])
+        self.assertEqual("1", self.params.get_effective_value("MAE0005"))
+        id2_checks = [
+            item
+            for item in result["details"]["esp_motors"]
+            if item.get("step") == "verify_ready" and item.get("motor_id") == 2
+        ]
+        self.assertTrue(id2_checks, result)
+        self.assertFalse(id2_checks[-1]["ok"])
+        self.assertFalse(id2_checks[-1]["position_reference_ok"])
+        self.assertEqual("position_reference_outside_limits", id2_checks[-1]["position_reference"]["reason"])
 
 
 if __name__ == "__main__":
