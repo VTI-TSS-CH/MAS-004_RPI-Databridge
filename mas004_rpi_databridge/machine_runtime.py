@@ -47,7 +47,7 @@ from mas004_rpi_databridge.production_logs import (
 )
 from mas004_rpi_databridge.setup_wickler_orchestrator import SetupWicklerOrchestrator
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient
-from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore, values_effectively_equal
 
 
 def _truthy(raw: Any) -> bool:
@@ -2143,6 +2143,22 @@ class MachineRuntime:
             return None
 
         label_no = _safe_int((payload or {}).get("label_no"), 0)
+        removal_request = production_info.get("label_removal_request")
+        removal_pause_active = (
+            current_state == 7
+            and (
+                str(production_info.get("pause_reason") or "").startswith("label_removal_required:")
+                or isinstance(removal_request, dict)
+                or bool(production_info.get("label_removal_pending_labels"))
+            )
+        )
+        if removal_pause_active and event_type == "label_removal_required" and label_no > 0:
+            return self._record_label_removal_required_while_paused(
+                payload=dict(payload or {}),
+                snapshot=state,
+                info=info,
+                production_info=production_info,
+            )
         recorded_label: dict[str, Any] | None = None
         if event_type == "label_complete" and label_no > 0:
             try:
@@ -2154,6 +2170,24 @@ class MachineRuntime:
                 )
             except Exception as exc:
                 recorded_label = {"ok": False, "error": repr(exc)}
+        if removal_pause_active and event_type in {
+            "label_complete",
+            "production_print_position_commanded",
+            "production_print_position_reached",
+            "production_print_trigger",
+            "production_registration_correction",
+            "production_wickler_runline_released",
+        }:
+            return {
+                "ok": True,
+                "accepted": False,
+                "event": event_type,
+                "ignored": "stale_production_event",
+                "suppressed_machine_event": True,
+                "machine_state": current_state,
+                "production_active": production_active,
+                "recorded_label_only": recorded_label,
+            }
         stale_payload = {
             "type": "production_stale_event_ignored",
             "stale_event_type": event_type,
@@ -2613,14 +2647,11 @@ class MachineRuntime:
             "snapshot": snapshot,
         }
 
-    def _handle_label_removal_required(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _compact_label_removal_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
         if label_no <= 0:
             raise RuntimeError("label_no missing")
-        label = self._current_production_label()
-        if not label:
-            label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
-        compact_payload = {
+        return {
             "type": "label_removal_required",
             "label_no": label_no,
             "reason": str(payload.get("reason") or "quality_nok"),
@@ -2641,8 +2672,115 @@ class MachineRuntime:
             "verify_resolved": _truthy(payload.get("verify_resolved", 0)),
             "verify_bypass": _truthy(payload.get("verify_bypass", 0)),
             "control_seen": _truthy(payload.get("control_seen", 0)),
+            "expected_removed": _truthy(payload.get("expected_removed", 0)),
+            "removed_confirmed": _truthy(payload.get("removed_confirmed", 0)),
             "control_bypass": _truthy(payload.get("control_bypass", 0)),
         }
+
+    def _merge_label_removal_request(
+        self,
+        production_info: dict[str, Any],
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing_requests = production_info.get("label_removal_requests")
+        requests: list[dict[str, Any]] = []
+        if isinstance(existing_requests, list):
+            requests.extend(dict(item) for item in existing_requests if isinstance(item, dict))
+        existing_single = production_info.get("label_removal_request")
+        if isinstance(existing_single, dict):
+            single_label = _safe_int(existing_single.get("label_no"), 0)
+            if single_label > 0 and all(_safe_int(item.get("label_no"), 0) != single_label for item in requests):
+                requests.append(dict(existing_single))
+
+        label_no = _safe_int(request.get("label_no"), 0)
+        if label_no > 0:
+            requests = [item for item in requests if _safe_int(item.get("label_no"), 0) != label_no]
+            requests.append(dict(request))
+        requests.sort(key=lambda item: _safe_int(item.get("label_no"), 0))
+        labels = [_safe_int(item.get("label_no"), 0) for item in requests]
+        labels = [label for label in labels if label > 0]
+        label_text = ", ".join(str(label) for label in labels)
+
+        primary = dict(requests[0] if requests else request)
+        primary["label_nos"] = labels
+        primary["requests"] = [dict(item) for item in requests]
+        primary["operator_message"] = (
+            f"Labels {label_text} entnehmen" if len(labels) > 1 else f"Label {labels[0] if labels else label_no} entnehmen"
+        )
+        production_info["label_removal_requests"] = [dict(item) for item in requests]
+        production_info["label_removal_pending_labels"] = labels
+        production_info["label_removal_request"] = primary
+        production_info["pause_reason"] = "label_removal_required:" + ",".join(str(label) for label in labels)
+        return primary
+
+    def _record_label_removal_required_while_paused(
+        self,
+        *,
+        payload: dict[str, Any],
+        snapshot: dict[str, Any],
+        info: dict[str, Any],
+        production_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        label_no = _safe_int(payload.get("label_no"), 0)
+        compact_payload = self._compact_label_removal_payload(payload)
+        production_label = self._current_production_label() or str(snapshot.get("production_label") or "")
+        if not production_label:
+            production_label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
+        request = {
+            "label_no": int(label_no),
+            "production_label": str(production_label or ""),
+            "payload": dict(compact_payload),
+            "stop": {"ok": True, "skipped": "already_in_label_removal_pause", "target_state": 7},
+            "target_state": 7,
+            "operator_message": f"Label {label_no} entnehmen",
+            "rewind_required": True,
+            "rewind_executed": False,
+            "ts": now_ts(),
+        }
+        production_info["active"] = False
+        production_info["paused"] = True
+        production_info.pop("pending_start", None)
+        merged = self._merge_label_removal_request(production_info, request)
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=bool(snapshot.get("warning_active")),
+            purge_active=bool(snapshot.get("purge_active")),
+            production_label=str(production_label or ""),
+            last_label_no=max(_safe_int(snapshot.get("last_label_no"), 0), int(label_no)),
+            info=info,
+        )
+        event_result = self._record_production_event_once(
+            "label_removal_request_updated",
+            "warning",
+            str(merged.get("operator_message") or f"Label {label_no} entnehmen"),
+            {
+                "label_no": label_no,
+                "label_nos": list(merged.get("label_nos") or [label_no]),
+                "reason": compact_payload.get("reason"),
+                "target_state": 7,
+            },
+            dedupe_window_s=2.0,
+        )
+        return {
+            "ok": True,
+            "accepted": True,
+            "event": "label_removal_required",
+            "label_no": label_no,
+            "label_removal_request": merged,
+            **event_result,
+        }
+
+    def _handle_label_removal_required(self, payload: dict[str, Any]) -> dict[str, Any]:
+        label_no = _safe_int(payload.get("label_no"), 0)
+        if label_no <= 0:
+            raise RuntimeError("label_no missing")
+        label = self._current_production_label()
+        if not label:
+            label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
+        compact_payload = self._compact_label_removal_payload(payload)
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
         info["last_label_payload"] = dict(compact_payload)
@@ -2711,6 +2849,8 @@ class MachineRuntime:
             "verify_ok": verify_ok,
             "quality_ok": quality_ok,
             "removed": removed,
+            "expected_removed": _truthy(payload.get("expected_removed", 0)),
+            "removed_confirmed": _truthy(payload.get("removed_confirmed", 0)),
             "should_remove": should_remove,
             "needs_removal": removal_pending,
             "removal_pending": removal_pending,
@@ -2887,10 +3027,9 @@ class MachineRuntime:
         }
         production_info["active"] = False
         production_info["paused"] = target_state == 7
-        production_info["pause_reason"] = f"label_removal_required:{label_no}"
-        production_info["label_removal_request"] = request
         production_info["last_stop"] = dict(stop_result or {})
         production_info.pop("pending_start", None)
+        merged_request = self._merge_label_removal_request(production_info, request)
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
 
         self.params.apply_device_value("MAS0001", str(target_state), promote_default=True)
@@ -2910,13 +3049,13 @@ class MachineRuntime:
             "label_removal_requested",
             "warning" if target_state == 7 else "error",
             (
-                f"Label {label_no} muss entnommen werden; Produktion in Pause"
+                f"{merged_request.get('operator_message', f'Label {label_no} entnehmen')} - Produktion in Pause"
                 if target_state == 7
-                else f"Label {label_no} muss entnommen werden; Stop fehlgeschlagen"
+                else f"{merged_request.get('operator_message', f'Label {label_no} entnehmen')} - Stop fehlgeschlagen"
             ),
-            request,
+            merged_request,
         )
-        return request
+        return merged_request
 
     def _state_row(self) -> dict[str, Any]:
         with self.db._conn() as c:
@@ -3850,24 +3989,58 @@ class MachineRuntime:
     ) -> dict[str, Any]:
         values = self._production_esp_sync_values(param_map)
         previous = {str(key): str(value) for key, value in (previous_values or {}).items()}
+        dedupe = ValueDedupeStore(self.params.db)
+        dedupe_channel = "esp-production-sync"
         synced: list[str] = []
         skipped: list[str] = []
         forced: list[str] = []
+        dedupe_skipped: list[str] = []
+        previous_skipped: list[str] = []
+        readback_skipped: list[str] = []
         readback: dict[str, str] = {}
         readback_errors: dict[str, str] = {}
         required = tuple(key for key in PRODUCTION_ESP_START_READBACK_KEYS if key in values)
+        written_required: list[str] = []
         for key, value in values.items():
             force = key in PRODUCTION_ESP_START_READBACK_KEYS
-            if force:
-                forced.append(key)
-            if not force and previous.get(key) == value:
+            previous_equal = values_effectively_equal(previous.get(key), value)
+            persistent_equal = dedupe.is_duplicate(dedupe_channel, key, value)
+            if persistent_equal or (previous_equal and not force):
                 skipped.append(key)
+                if previous_equal:
+                    previous_skipped.append(key)
+                if persistent_equal:
+                    dedupe_skipped.append(key)
+                if force:
+                    readback_skipped.append(key)
+                if not persistent_equal:
+                    dedupe.remember(dedupe_channel, key, value)
                 continue
             self._production_esp_retry(f"SYNC {key}={value}", read_timeout_s=5.0, attempts=3, priority=force)
             synced.append(key)
+            if force:
+                forced.append(key)
+                written_required.append(key)
+            else:
+                dedupe.remember(dedupe_channel, key, value)
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            for key in synced:
+                dedupe.remember(dedupe_channel, key, values.get(key, ""))
+            return {
+                "synced": synced,
+                "skipped": skipped,
+                "forced": forced,
+                "dedupe_skipped": dedupe_skipped,
+                "previous_skipped": previous_skipped,
+                "readback_skipped": readback_skipped,
+                "readback": readback,
+                "readback_errors": readback_errors,
+                "values": values,
+                "dedupe_channel": dedupe_channel,
+            }
         if not bool(getattr(self.cfg, "esp_simulation", False)):
             mismatches: list[dict[str, str]] = []
-            for key in required:
+            for key in written_required:
                 expected = self._normalize_esp_param_value(values.get(key, ""))
                 actual = ""
                 for attempt in range(1, 3):
@@ -3891,6 +4064,7 @@ class MachineRuntime:
                         readback[key] = actual
                         if actual == expected:
                             readback_errors.pop(key, None)
+                            dedupe.remember(dedupe_channel, key, values.get(key, ""))
                             break
                     except Exception as exc:
                         readback_errors[key] = repr(exc)
@@ -3912,9 +4086,13 @@ class MachineRuntime:
             "synced": synced,
             "skipped": skipped,
             "forced": forced,
+            "dedupe_skipped": dedupe_skipped,
+            "previous_skipped": previous_skipped,
+            "readback_skipped": readback_skipped,
             "readback": readback,
             "readback_errors": readback_errors,
             "values": values,
+            "dedupe_channel": dedupe_channel,
         }
 
     def _verify_wickler_production_state(
@@ -5001,6 +5179,32 @@ class MachineRuntime:
             results.append(item)
         return results
 
+    def _pending_label_removal_labels(self, production_info: dict[str, Any]) -> list[int]:
+        labels: list[int] = []
+        raw_labels = production_info.get("label_removal_pending_labels")
+        if isinstance(raw_labels, list):
+            labels.extend(_safe_int(item, 0) for item in raw_labels)
+        request = production_info.get("label_removal_request")
+        if isinstance(request, dict):
+            labels.extend(_safe_int(item, 0) for item in request.get("label_nos") or [])
+            labels.append(_safe_int(request.get("label_no"), 0))
+        requests = production_info.get("label_removal_requests")
+        if isinstance(requests, list):
+            labels.extend(_safe_int(item.get("label_no"), 0) for item in requests if isinstance(item, dict))
+        return sorted({label for label in labels if label > 0})
+
+    def _mark_pending_label_removals_on_esp(self, production_info: dict[str, Any]) -> dict[str, Any] | None:
+        labels = self._pending_label_removal_labels(production_info)
+        if not labels:
+            return None
+        label_text = ",".join(str(label) for label in labels)
+        command = f"PROCESS PRODUCTION MARK_REMOVED LABELS={label_text}"
+        try:
+            response = self._production_esp_retry(command, read_timeout_s=2.0, attempts=2, priority=True)
+            return {"ok": True, "labels": labels, "command": command, "response": response}
+        except Exception as exc:
+            return {"ok": False, "labels": labels, "command": command, "error": repr(exc)}
+
     def _start_production_motion(self, param_map: dict[str, str], format_plan: dict[str, Any]) -> dict[str, Any]:
         started_ts = now_ts()
         if not _PRODUCTION_MOTION_LOCK.acquire(blocking=False):
@@ -5009,7 +5213,9 @@ class MachineRuntime:
         try:
             plan = self._production_motion_plan(param_map, format_plan)
             state_info = dict(self._state_row().get("info") or {})
+            production_info_before_start = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
             previous_sync_values = self._production_esp_sync_reference(state_info)
+            removal_confirmation = self._mark_pending_label_removals_on_esp(production_info_before_start)
             laser_ready = self._ensure_laser_ready_for_production_start(param_map)
             self._sync_esp_machine_state(5, required=True)
             synced_state = 5
@@ -5103,6 +5309,7 @@ class MachineRuntime:
                 "post_start_wicklers": post_start_wicklers,
                 "laser_ready": laser_ready,
                 "tto_printer": tto_printer,
+                "removal_confirmation": removal_confirmation,
                 "command": start_command,
                 "response": response,
             }

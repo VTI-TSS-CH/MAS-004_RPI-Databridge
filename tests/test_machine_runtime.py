@@ -29,6 +29,7 @@ from mas004_rpi_databridge.machine_semantics import pack_label_status_word
 from mas004_rpi_databridge.motor_setup_lock import touch_motor_setup_manual_lock
 from mas004_rpi_databridge.outbox import Outbox
 from mas004_rpi_databridge.params import ParamStore
+from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
 
 
 def _insert_param(
@@ -911,10 +912,13 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("Laser Ready", result["error"])
         sync_state.assert_not_called()
 
-    def test_production_param_sync_forces_start_readback_keys(self):
+    def test_production_param_sync_skips_confirmed_start_values(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         previous_values = runtime._production_esp_sync_values(param_map)
+        dedupe = ValueDedupeStore(self.db)
+        for key, value in previous_values.items():
+            dedupe.remember("esp-production-sync", key, value)
 
         with patch.object(runtime, "_production_esp", return_value="ACK") as esp:
             result = runtime._sync_production_params_to_esp(
@@ -923,12 +927,8 @@ class MachineRuntimeTests(unittest.TestCase):
             )
 
         commands = [call.args[0] for call in esp.call_args_list]
-        self.assertIn("SYNC MAP0004=100", commands)
-        self.assertIn("SYNC MAP0006=0", commands)
-        self.assertIn("SYNC MAP0016=0", commands)
-        self.assertIn("SYNC MAP0019=11000", commands)
-        self.assertIn("SYNC MAP0035=0", commands)
-        expected_forced = [
+        self.assertEqual([], commands)
+        expected_readback_skipped = [
             "MAP0004",
             "MAP0006",
             "MAP0011",
@@ -948,8 +948,9 @@ class MachineRuntimeTests(unittest.TestCase):
             "MAP0075",
             "MAP0079",
         ]
-        self.assertEqual(expected_forced, result["synced"])
-        self.assertEqual(expected_forced, result["forced"])
+        self.assertEqual([], result["synced"])
+        self.assertEqual([], result["forced"])
+        self.assertEqual(expected_readback_skipped, result["readback_skipped"])
         self.assertNotIn("MAP0068", result["values"])
         self.assertNotIn("MAP0068", result["skipped"])
         self.assertEqual(previous_values, result["values"])
@@ -957,8 +958,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_production_param_sync_forces_tto_bypass_readback_values(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
-        param_map.update({"MAP0035": "1", "MAP0069": "1500", "MAP0070": "2000"})
         previous_values = runtime._production_esp_sync_values(param_map)
+        param_map.update({"MAP0035": "1", "MAP0069": "1500", "MAP0070": "2000"})
 
         with patch.object(runtime, "_production_esp", return_value="ACK") as esp:
             result = runtime._sync_production_params_to_esp(
@@ -992,7 +993,7 @@ class MachineRuntimeTests(unittest.TestCase):
 
         with patch.object(runtime, "_production_esp", side_effect=fake_esp):
             with self.assertRaisesRegex(RuntimeError, "MAP0019 expected 6000 got 11000"):
-                runtime._sync_production_params_to_esp(param_map, previous_values=param_map)
+                runtime._sync_production_params_to_esp(param_map, previous_values={})
 
     def test_wickler_ready_timeout_after_ready_event_is_ignored(self):
         runtime = self.build_runtime()
@@ -4024,6 +4025,50 @@ class MachineRuntimeTests(unittest.TestCase):
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertEqual(10, production_info["label_removal_request"]["label_no"])
         self.assertEqual("verify_bypass_nok", production_info["label_removal_request"]["payload"]["reason"])
+
+    def test_label_removal_required_during_pause_extends_removal_list(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=5,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:5",
+                    "label_removal_request": {"label_no": 5, "operator_message": "Label 5 entnehmen"},
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"reason": "label_removal_required:5", "finished_ts": now_ts() - 1.0},
+                }
+            },
+        )
+
+        result = runtime.handle_event(
+            {
+                "type": "label_removal_required",
+                "label_no": 9,
+                "reason": "verify_bypass_nok",
+                "verify_ok": 0,
+                "quality_ok": 0,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["accepted"])
+        snapshot = runtime.snapshot()
+        production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertEqual([5, 9], production_info["label_removal_pending_labels"])
+        self.assertEqual("Labels 5, 9 entnehmen", production_info["label_removal_request"]["operator_message"])
+        with self.db._conn() as c:
+            stale_count = c.execute(
+                "SELECT COUNT(*) FROM machine_events WHERE event_type='production_stale_event_ignored'"
+            ).fetchone()[0]
+        self.assertEqual(0, stale_count)
 
     def test_stale_label_complete_after_removal_pause_is_local_only(self):
         runtime = self.build_runtime()
