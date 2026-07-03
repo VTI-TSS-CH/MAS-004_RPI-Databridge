@@ -860,6 +860,22 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(5, result["synced_state"])
         self.assertTrue(result["post_start_wicklers"]["ok"], result)
 
+    def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
+        runtime = self.build_runtime()
+        param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        param_map["MAP0016"] = "1"
+        self.io_store.upsert_value("esp32_plc58__I0_12", "1", "simulation", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_2", "0", "simulation", "test")
+        format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
+
+        with patch.object(runtime, "_sync_esp_machine_state") as sync_state:
+            result = runtime._start_production_motion(param_map, format_plan)
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(0, result["synced_state"])
+        self.assertIn("Laser Ready", result["error"])
+        sync_state.assert_not_called()
+
     def test_production_param_sync_forces_start_readback_keys(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
@@ -1064,6 +1080,7 @@ class MachineRuntimeTests(unittest.TestCase):
         runtime = self.build_runtime()
         _insert_param(self.db, "TTS0001", "TTS", "0001", "0", "R", "W", "enum")
         _insert_device_map(self.db, "TTS0001", "STATUS[PRINTER_STATE_CODE]")
+        self.io_store.upsert_value("esp32_plc58__I0_2", "1", "simulation", "test")
         pulses: list[tuple[str, float, str]] = []
 
         def fake_pulse(io_key, *, high_s, source):
@@ -1103,6 +1120,28 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         self.assertTrue(result["laser_parallel_start"]["ok"])
         self.assertTrue(offline["laser_parallel_start"]["ok"])
+
+    def test_tto_printer_online_blocks_laser_parallel_when_laser_ready_low(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        _insert_param(self.db, "TTS0001", "TTS", "0001", "0", "R", "W", "enum")
+        _insert_device_map(self.db, "TTS0001", "STATUS[PRINTER_STATE_CODE]")
+        self.io_store.upsert_value("esp32_plc58__I0_2", "0", "simulation", "test")
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls, patch.object(
+            runtime,
+            "_pulse_io_output",
+        ) as pulse:
+            bridge_cls.return_value.execute.return_value = "ACK_TTS0001=3"
+            with self.assertRaisesRegex(RuntimeError, "Laser Ready"):
+                runtime._sync_tto_printer_for_machine_state(
+                    5,
+                    {"MAP0016": "0", "MAP0035": "0", "MAP0079": "1"},
+                    reason="test_parallel",
+                    required=True,
+                )
+
+        pulse.assert_not_called()
 
     def test_motor3_production_zero_falls_back_to_status_after_empty_refresh(self):
         self.cfg.esp_simulation = False
@@ -3145,11 +3184,11 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("Laser System Ready", snapshot["info"]["safety"]["last_reset"]["error"])
         self.assertEqual("0", self.params.get_effective_value("MAS0002"))
 
-    def test_laser_reset_sequence_pulses_separate_reset_waits_ready_then_starts_laser(self):
+    def test_laser_reset_sequence_pulses_separate_reset_without_waiting_laser_ready(self):
         runtime = self.build_runtime()
         self.params.set_value("MAP0016", "1", actor="microtom")
         self.io_store.upsert_value("esp32_plc58__I0_12", "1", "simulation", "test")
-        self.io_store.upsert_value("esp32_plc58__I0_2", "1", "simulation", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_2", "0", "simulation", "test")
         runtime._write_state(
             current_state=21,
             requested_state=21,
@@ -3177,8 +3216,8 @@ class MachineRuntimeTests(unittest.TestCase):
         step = next(item for item in last_reset["steps"] if item.get("step") == "laser_safety_reset_and_start")
         self.assertTrue(step["ok"], step)
         self.assertTrue(any(item.get("step") == "laser_safety_reset_pulse" for item in step["steps"]))
-        self.assertTrue(any(item.get("step") == "wait_laser_ready" and item.get("ok") for item in step["steps"]))
-        self.assertTrue(any(item.get("step") == "laser_start_pulse" for item in step["steps"]))
+        self.assertFalse(any(item.get("step") == "wait_laser_ready" for item in step["steps"]))
+        self.assertFalse(any(item.get("step") == "laser_start_pulse" for item in step["steps"]))
         self.assertEqual("0", self.io_store.get_point("moxa_e1213_1__DIO3")["value"])
         self.assertEqual("0", self.io_store.get_point("esp32_plc58__Q0_3")["value"])
 

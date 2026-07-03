@@ -3664,6 +3664,8 @@ class MachineRuntime:
                 "actual_code": actual,
             }
             if _truthy(param_map.get("MAP0079", self.params.get_effective_value("MAP0079"))):
+                if target_code == TTO_PRINTER_ONLINE_CODE:
+                    result["laser_ready"] = self._ensure_laser_ready_for_production_start(param_map)
                 result["laser_parallel_start"] = self._pulse_io_output(
                     f"esp32_plc58__{LASER_START_PIN.replace('.', '_')}",
                     high_s=LASER_START_PULSE_HIGH_S,
@@ -4947,11 +4949,14 @@ class MachineRuntime:
         started_ts = now_ts()
         if not _PRODUCTION_MOTION_LOCK.acquire(blocking=False):
             return {"ok": False, "error": "production_motion_start_already_running", "started_ts": started_ts}
+        synced_state = 0
         try:
             plan = self._production_motion_plan(param_map, format_plan)
             state_info = dict(self._state_row().get("info") or {})
             previous_sync_values = self._production_esp_sync_reference(state_info)
+            laser_ready = self._ensure_laser_ready_for_production_start(param_map)
             self._sync_esp_machine_state(5, required=True)
+            synced_state = 5
             tto_printer = self._sync_tto_printer_for_machine_state(
                 5,
                 param_map,
@@ -5040,6 +5045,7 @@ class MachineRuntime:
                 "motor3_zero": motor3_zero,
                 "wicklers": wicklers,
                 "post_start_wicklers": post_start_wicklers,
+                "laser_ready": laser_ready,
                 "tto_printer": tto_printer,
                 "command": start_command,
                 "response": response,
@@ -5056,7 +5062,7 @@ class MachineRuntime:
                 "ok": False,
                 "started_ts": started_ts,
                 "finished_ts": now_ts(),
-                "synced_state": 5,
+                "synced_state": synced_state,
                 "error": str(exc),
             }
         finally:
@@ -6275,6 +6281,77 @@ class MachineRuntime:
             )
         return status
 
+    def _laser_output_required(self, param_map: dict[str, str] | None = None) -> bool:
+        return bool(self._laser_printer_active(param_map) or self._laser_parallel_tto_active(param_map))
+
+    def _laser_ready_status_for_production(
+        self,
+        *,
+        param_map: dict[str, str] | None = None,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        required = self._laser_output_required(param_map)
+        status: dict[str, Any] = {
+            "ok": True,
+            "required": required,
+            "laser_active": self._laser_printer_active(param_map),
+            "laser_parallel_tto": self._laser_parallel_tto_active(param_map),
+            "pin_label": LASER_READY_PIN,
+        }
+        if not required:
+            status["skipped"] = "laser_output_not_required"
+            return status
+
+        refresh_result: dict[str, Any] | None = None
+        if refresh:
+            refresh_result = self._refresh_single_io_device("esp32_plc58", {LASER_READY_PIN})
+            status["refresh"] = refresh_result
+        io_map = self._io_values_for_pins({("esp32_plc58", LASER_READY_PIN)})
+        detail = self._io_point_detail(
+            io_map,
+            "esp32_plc58",
+            LASER_READY_PIN,
+            default=False,
+        )
+        point_defined = bool(self.io_store.get_point(f"esp32_plc58__{LASER_READY_PIN.replace('.', '_')}"))
+        refresh_ok = True if refresh_result is None else bool(refresh_result.get("ok", False))
+        ready = bool(detail.get("active")) and point_defined and refresh_ok
+        status.update(
+            {
+                "ok": ready,
+                "ready": ready,
+                "ready_input": detail,
+                "ready_defined": point_defined,
+            }
+        )
+        if not refresh_ok:
+            status["reason"] = "laser_ready_refresh_failed"
+            status["message"] = (
+                f"Laser Ready ESP32 PLC 58 {LASER_READY_PIN} konnte nicht live gelesen werden; "
+                "Produktionsstart gesperrt"
+            )
+        elif not ready:
+            status["reason"] = "laser_ready_low"
+            status["message"] = (
+                f"Laser Ready ESP32 PLC 58 {LASER_READY_PIN} ist LOW; "
+                "Produktionsstart gesperrt"
+            )
+        return status
+
+    def _ensure_laser_ready_for_production_start(self, param_map: dict[str, str] | None = None) -> dict[str, Any]:
+        status = self._laser_ready_status_for_production(param_map=param_map, refresh=True)
+        if not bool(status.get("ok")):
+            message = str(status.get("message") or "Laser Ready fehlt")
+            self.logs.log("machine", "warning", f"production_start: {message}")
+            self._record_event(
+                "production_start_laser_ready_blocked",
+                "warning",
+                message,
+                status,
+            )
+            raise RuntimeError(message)
+        return status
+
     def _ensure_laser_reset_interlock_clear(self, *, source: str) -> dict[str, Any]:
         interlock = self._laser_reset_interlock_status(refresh=True)
         if bool(interlock.get("blocked")):
@@ -7108,30 +7185,6 @@ class MachineRuntime:
         except Exception as exc:
             result["steps"].append({"step": "laser_safety_reset_pulse", "ok": False, "error": str(exc)})
             result["error"] = f"Laser safety reset pulse failed: {exc}"
-            result["finished_ts"] = now_ts()
-            return result
-
-        ready = self._wait_for_esp_input_high(
-            LASER_READY_PIN,
-            timeout_s=LASER_READY_WAIT_TIMEOUT_S,
-            poll_s=LASER_READY_WAIT_POLL_S,
-        )
-        result["steps"].append({"step": "wait_laser_ready", **ready})
-        if not ready.get("ok"):
-            result["error"] = ready.get("error") or "Laser Ready did not become HIGH"
-            result["finished_ts"] = now_ts()
-            return result
-
-        try:
-            start = self._pulse_io_output(
-                f"esp32_plc58__{LASER_START_PIN.replace('.', '_')}",
-                high_s=LASER_START_PULSE_HIGH_S,
-                source="laser-start",
-            )
-            result["steps"].append({"step": "laser_start_pulse", **start})
-        except Exception as exc:
-            result["steps"].append({"step": "laser_start_pulse", "ok": False, "error": str(exc)})
-            result["error"] = f"Laser start pulse failed: {exc}"
             result["finished_ts"] = now_ts()
             return result
 
