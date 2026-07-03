@@ -1171,6 +1171,25 @@ class MachineRuntime:
                 requested_state = 7
 
         previous_state = int(snapshot["current_state"] or 0)
+        superseded_by_label_removal = self._label_removal_state_superseded_snapshot(snapshot, int(new_state or 0))
+        if superseded_by_label_removal is not None:
+            self.logs.log(
+                "machine",
+                "info",
+                (
+                    "Refresh verworfen: Label-Entnahmepause wurde parallel bereits gesetzt "
+                    f"({snapshot['current_state']} -> {superseded_by_label_removal['current_state']})"
+                ),
+            )
+            if include_snapshot:
+                return self.snapshot()
+            return {
+                "ok": True,
+                "current_state": int(superseded_by_label_removal.get("current_state") or 0),
+                "requested_state": int(superseded_by_label_removal.get("requested_state") or 0),
+                "state_source": str(superseded_by_label_removal.get("state_source") or "label_removal_required"),
+                "skipped": "superseded_by_label_removal",
+            }
         production_state_synced_to_esp = False
         pending_start_ts = _safe_float((pending_start or {}).get("request_ts"), 0.0)
         pending_start_age_s = max(0.0, float(ts) - pending_start_ts) if pending_start_ts > 0.0 else 0.0
@@ -1352,6 +1371,25 @@ class MachineRuntime:
             )
             safety_info["light_curtain_wickler_recovery_last_attempt_ts"] = ts
             safety_info["last_light_curtain_wickler_recovery_start"] = recovery_start
+        superseded_by_label_removal = self._label_removal_state_superseded_snapshot(snapshot, int(new_state or 0))
+        if superseded_by_label_removal is not None:
+            self.logs.log(
+                "machine",
+                "info",
+                (
+                    "Refresh-Endzustand verworfen: Label-Entnahmepause wurde parallel bereits gesetzt "
+                    f"({snapshot['current_state']} -> {superseded_by_label_removal['current_state']})"
+                ),
+            )
+            if include_snapshot:
+                return self.snapshot()
+            return {
+                "ok": True,
+                "current_state": int(superseded_by_label_removal.get("current_state") or 0),
+                "requested_state": int(superseded_by_label_removal.get("requested_state") or 0),
+                "state_source": str(superseded_by_label_removal.get("state_source") or "label_removal_required"),
+                "skipped": "superseded_by_label_removal",
+            }
         if state_changed or mas0001_value_changed:
             self.params.apply_device_value("MAS0001", str(new_state), promote_default=True)
             self._notify_microtom("MAS0001", str(new_state), dedupe_key="machine:MAS0001")
@@ -2058,6 +2096,17 @@ class MachineRuntime:
             return None
 
         label_no = _safe_int((payload or {}).get("label_no"), 0)
+        recorded_label: dict[str, Any] | None = None
+        if event_type == "label_complete" and label_no > 0:
+            try:
+                recorded_label = self._handle_label_complete(
+                    dict(payload or {}),
+                    forward_to_microtom=False,
+                    allow_removal_action=False,
+                    record_machine_event=False,
+                )
+            except Exception as exc:
+                recorded_label = {"ok": False, "error": repr(exc)}
         stale_payload = {
             "type": "production_stale_event_ignored",
             "stale_event_type": event_type,
@@ -2066,6 +2115,8 @@ class MachineRuntime:
             "requested_state": requested_state,
             "production_active": production_active,
         }
+        if recorded_label is not None:
+            stale_payload["recorded_label_only"] = recorded_label
         event_result = self._record_production_event_once(
             "production_stale_event_ignored",
             "info",
@@ -2080,8 +2131,33 @@ class MachineRuntime:
             "ignored": "stale_production_event",
             "machine_state": current_state,
             "production_active": production_active,
+            "recorded_label_only": recorded_label,
             **event_result,
         }
+
+    def _label_removal_state_superseded_snapshot(
+        self,
+        snapshot: dict[str, Any],
+        candidate_state: int,
+    ) -> dict[str, Any] | None:
+        latest = self._state_row()
+        if _safe_float(latest.get("updated_ts"), 0.0) <= _safe_float(snapshot.get("updated_ts"), 0.0) + 0.0001:
+            return None
+        latest_info = dict(latest.get("info") or {})
+        latest_production = dict(latest_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        removal_request = latest_production.get("label_removal_request")
+        pause_reason = str(latest_production.get("pause_reason") or "")
+        latest_source = str(latest.get("state_source") or "")
+        if not (
+            latest_source == "label_removal_required"
+            or pause_reason.startswith("label_removal_required:")
+            or isinstance(removal_request, dict)
+        ):
+            return None
+        snapshot_production = dict((snapshot.get("info") or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        if int(candidate_state or 0) in (4, 5, 6) or bool(snapshot_production.get("active")):
+            return latest
+        return None
 
     def _first_print_wickler_ready_key(self, *, label_no: int, payload: dict[str, Any] | None) -> str:
         state_info = dict(self._state_row().get("info") or {})
@@ -2527,7 +2603,14 @@ class MachineRuntime:
             "removal_action": removal_action,
         }
 
-    def _handle_label_complete(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _handle_label_complete(
+        self,
+        payload: dict[str, Any],
+        *,
+        forward_to_microtom: bool = True,
+        allow_removal_action: bool = True,
+        record_machine_event: bool = True,
+    ) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
         if label_no <= 0:
             raise RuntimeError("label_no missing")
@@ -2640,22 +2723,23 @@ class MachineRuntime:
                 (now_ts(), label, label_no, "label_complete", json.dumps(compact_payload, ensure_ascii=False)),
             )
 
-        self.params.apply_device_value("MAS0003", str(packed), promote_default=True)
-        self._notify_microtom("MAS0003", str(packed), dedupe_key=None)
-        self.production_logs.append_line(
-            "labels",
-            label,
-            (
-                f"[label_complete] label={label_no} packed={packed} material_ok={int(material_ok)} "
-                f"print_ok={int(print_ok)} verify_ok={int(verify_ok)} removed={int(removed)} "
-                f"production_ok={int(production_ok)} zero_mm={zero_mm:.3f} exit_mm={exit_mm:.3f}\n"
-            ),
-        )
+        if forward_to_microtom:
+            self.params.apply_device_value("MAS0003", str(packed), promote_default=True)
+            self._notify_microtom("MAS0003", str(packed), dedupe_key=None)
+            self.production_logs.append_line(
+                "labels",
+                label,
+                (
+                    f"[label_complete] label={label_no} packed={packed} material_ok={int(material_ok)} "
+                    f"print_ok={int(print_ok)} verify_ok={int(verify_ok)} removed={int(removed)} "
+                    f"production_ok={int(production_ok)} zero_mm={zero_mm:.3f} exit_mm={exit_mm:.3f}\n"
+                ),
+            )
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
         info["last_label_payload"] = dict(compact_payload)
         removal_action = None
-        if removal_pending:
+        if removal_pending and allow_removal_action:
             removal_action = self._pause_for_label_removal(
                 production_label=label,
                 label_no=label_no,
@@ -2674,28 +2758,35 @@ class MachineRuntime:
                 last_label_no=max(snapshot["last_label_no"], label_no),
                 info=info,
             )
-        self._record_event(
-            "label_complete",
-            "info",
-            f"Label {label_no} abgeschlossen -> MAS0003={packed}",
-            {
-                "production_label": label,
-                "label_no": label_no,
-                "packed": packed,
-                "material_ok": material_ok,
-                "print_ok": print_ok,
-                "verify_ok": verify_ok,
-                "removed": removed,
-                "production_ok": production_ok,
-                "removal_pending": removal_pending,
-                "removal_action": removal_action,
-            },
-        )
+        if record_machine_event:
+            self._record_event(
+                "label_complete",
+                "info",
+                (
+                    f"Label {label_no} abgeschlossen -> MAS0003={packed}"
+                    if forward_to_microtom
+                    else f"Label {label_no} nach Stopp lokal abgeschlossen"
+                ),
+                {
+                    "production_label": label,
+                    "label_no": label_no,
+                    "packed": packed,
+                    "material_ok": material_ok,
+                    "print_ok": print_ok,
+                    "verify_ok": verify_ok,
+                    "removed": removed,
+                    "production_ok": production_ok,
+                    "removal_pending": removal_pending,
+                    "removal_action": removal_action,
+                    "forwarded_to_microtom": bool(forward_to_microtom),
+                },
+            )
         return {
             "production_label": label,
             "label_no": label_no,
             "packed": packed,
             "removal_action": removal_action,
+            "forwarded_to_microtom": bool(forward_to_microtom),
         }
 
     def _pause_for_label_removal(

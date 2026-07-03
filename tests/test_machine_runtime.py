@@ -3717,6 +3717,87 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(10, production_info["label_removal_request"]["label_no"])
         self.assertEqual("verify_bypass_nok", production_info["label_removal_request"]["payload"]["reason"])
 
+    def test_stale_label_complete_after_removal_pause_is_local_only(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=5,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:5",
+                    "label_removal_request": {"label_no": 5},
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"reason": "label_removal_required:5", "finished_ts": now_ts() - 1.0},
+                }
+            },
+        )
+        before = self.params.get_effective_value("MAS0003")
+
+        result = runtime.handle_event(
+            {
+                "type": "label_complete",
+                "label_no": 15,
+                "material_ok": 1,
+                "print_ok": 1,
+                "verify_ok": 0,
+                "quality_ok": 0,
+                "removal_pending": 1,
+                "zero_mm": 1474.849,
+                "exit_mm": 3015.164,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["accepted"])
+        self.assertEqual("stale_production_event", result["ignored"])
+        self.assertFalse(result["recorded_label_only"]["forwarded_to_microtom"])
+        self.assertEqual(before, self.params.get_effective_value("MAS0003"))
+        snapshot = runtime.snapshot()
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(15, snapshot["last_label_no"])
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT verify_ok,payload_json FROM label_register WHERE production_label=? AND label_no=?",
+                ("JOB_TEST", 15),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(0, row[0])
+
+    def test_label_removal_pause_supersedes_stale_refresh_snapshot(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        old_snapshot = runtime._state_row()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=5,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:5",
+                    "label_removal_request": {"label_no": 5},
+                }
+            },
+        )
+
+        superseded = runtime._label_removal_state_superseded_snapshot(old_snapshot, 5)
+
+        self.assertIsNotNone(superseded)
+        self.assertEqual(7, superseded["current_state"])
+        self.assertEqual("label_removal_required", superseded["state_source"])
+
     def test_stale_label_complete_after_production_stop_is_not_forwarded(self):
         runtime = self.build_runtime()
         runtime._write_state(

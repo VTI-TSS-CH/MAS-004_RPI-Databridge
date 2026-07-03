@@ -71,6 +71,7 @@ class _MachineEventDispatcher:
         event_type = str((event or {}).get("type") or "").strip().lower()
         if event_type in {
             "label_complete",
+            "label_removal_required",
             "production_fault",
             "production_registration_fault",
             "production_registration_late",
