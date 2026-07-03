@@ -3218,8 +3218,50 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(any(item.get("step") == "laser_safety_reset_pulse" for item in step["steps"]))
         self.assertFalse(any(item.get("step") == "wait_laser_ready" for item in step["steps"]))
         self.assertFalse(any(item.get("step") == "laser_start_pulse" for item in step["steps"]))
+        self.assertTrue(
+            any(item.get("step") == "wait_esp_endpoint_after_reset_pulse" and item.get("ok") for item in last_reset["steps"])
+        )
         self.assertEqual("0", self.io_store.get_point("moxa_e1213_1__DIO3")["value"])
         self.assertEqual("0", self.io_store.get_point("esp32_plc58__Q0_3")["value"])
+
+    def test_safety_reset_retries_q02_pulse_after_esp_endpoint_recovers(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="test",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True}},
+        )
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+
+        wait_results = [
+            {"ok": True, "source": "retry", "duration_s": 1.2},
+            {"ok": True, "source": "after", "duration_s": 0.3},
+        ]
+        with patch.object(
+            runtime,
+            "_pulse_esp_reset_output",
+            side_effect=[OSError(113, "No route to host"), {"ok": True}],
+        ) as pulse, patch.object(
+            runtime,
+            "_wait_for_esp_command_endpoint",
+            side_effect=wait_results,
+        ) as wait, patch.object(
+            runtime,
+            "_start_reset_motion_recovery_background",
+            return_value={"ok": True, "queued": True, "in_progress": True},
+        ):
+            result = runtime._perform_safety_reset(runtime._safety_status(runtime._io_values()), now_ts())
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(2, pulse.call_count)
+        self.assertEqual(2, wait.call_count)
+        self.assertTrue(any(item.get("step") == "wait_esp_endpoint_before_reset_retry" for item in result["steps"]))
+        self.assertTrue(any(item.get("step") == "wait_esp_endpoint_after_reset_pulse" for item in result["steps"]))
 
     def test_virtual_stop_button_is_not_reset_in_safety_context(self):
         runtime = self.build_runtime()

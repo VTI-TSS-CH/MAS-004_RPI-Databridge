@@ -333,9 +333,13 @@ def _esp_io_poll_paused_for_critical_motion(db: DB) -> bool:
             ).fetchone()
         if not row:
             return False
-        if int(row[0] or 0) in (2, 3, 4, 5, 6):
+        state = int(row[0] or 0)
+        if state in (2, 3, 4, 5, 6, 8):
             return True
         info = json.loads(row[1] or "{}")
+        safety = dict(info.get("safety") or {})
+        if str(safety.get("phase") or "") == "resetting":
+            return True
         production = dict(info.get("production_runtime") or {})
         return bool(production.get("pending_start"))
     except Exception:
@@ -379,21 +383,30 @@ def io_runtime_loop(cfg_path: str):
                 "moxa_e1213_2": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
                 "moxa_e1213_3": max(0.5, float(getattr(cfg, "moxa_poll_interval_s", 1.0) or 1.0)),
             }
-            due_devices = {
+            due_devices = [
                 device_code
-                for device_code, interval_s in intervals.items()
-                if now_m >= float(next_due_by_device.get(device_code, 0.0))
-            }
+                for device_code in (
+                    "raspi_plc21",
+                    "moxa_e1211_1",
+                    "moxa_e1211_2",
+                    "moxa_e1213_1",
+                    "moxa_e1213_2",
+                    "moxa_e1213_3",
+                    "esp32_plc58",
+                )
+                if device_code in intervals and now_m >= float(next_due_by_device.get(device_code, 0.0))
+            ]
             if "esp32_plc58" in due_devices and _esp_io_poll_paused_for_critical_motion(db):
-                due_devices.discard("esp32_plc58")
+                due_devices.remove("esp32_plc58")
                 next_due_by_device["esp32_plc58"] = now_m + max(
                     2.0,
                     float(getattr(cfg, "esp_io_poll_interval_s", 1.0) or 1.0),
                 )
-            if due_devices:
-                IoRuntime(cfg, io_store).refresh(include_points=False, device_codes=due_devices)
-                for device_code in due_devices:
-                    next_due_by_device[device_code] = now_m + intervals[device_code]
+            runtime = IoRuntime(cfg, io_store)
+            for device_code in due_devices:
+                started = time.monotonic()
+                runtime.refresh(include_points=False, device_codes={device_code})
+                next_due_by_device[device_code] = max(started + intervals[device_code], time.monotonic())
         except Exception as e:
             print(f"[IO] loop error: {repr(e)}", flush=True)
 

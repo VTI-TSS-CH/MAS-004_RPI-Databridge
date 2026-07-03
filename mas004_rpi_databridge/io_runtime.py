@@ -20,6 +20,8 @@ _MOXA_ENDPOINT_LOCKS_GUARD = threading.Lock()
 _MOXA_CLIENTS: dict[tuple[str, int, str, float], Any] = {}
 _MOXA_COOLDOWN_UNTIL: dict[tuple[str, int], float] = {}
 _MOXA_COOLDOWN_ERROR: dict[tuple[str, int], str] = {}
+_DEVICE_OFFLINE_FAILURES: dict[str, int] = {}
+_DEVICE_LAST_LIVE_MONOTONIC: dict[str, float] = {}
 _MOXA_DEVICE_CODES = {
     "moxa_e1211_1",
     "moxa_e1211_2",
@@ -272,6 +274,7 @@ class IoRuntime:
                 )
                 for point in device_points
             )
+            self._record_device_live("esp32_plc58")
             return self._device_result("esp32_plc58", device_points, False, True, "", changed)
         except Exception as exc:
             return self._apply_static_quality("esp32_plc58", device_points, "offline", "esp32", str(exc))
@@ -297,6 +300,7 @@ class IoRuntime:
             except Exception:
                 values.append((point, point.get("value", "0"), "offline", "raspi"))
         changed = self._upsert_runtime_values(values)
+        self._record_device_live("raspi_plc21")
         return self._device_result("raspi_plc21", device_points, False, True, "", changed)
 
     def _refresh_moxa(self, device_code: str, device_points: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -320,6 +324,7 @@ class IoRuntime:
                 )
                 for point in device_points
             )
+            self._record_device_live(device_code)
             return self._device_result(device_code, device_points, False, True, "", changed)
         except Exception as exc:
             return self._apply_static_quality(device_code, device_points, "offline", device_code, str(exc))
@@ -332,6 +337,10 @@ class IoRuntime:
         source: str,
         error: str,
     ) -> Dict[str, Any]:
+        if quality == "offline" and self._debounce_transient_offline(device_code, device_points):
+            result = self._device_result(device_code, device_points, False, False, error, 0)
+            result["debounced"] = True
+            return result
         values: list[tuple[Dict[str, Any], Any, str, str]] = []
         for point in device_points:
             fallback = point.get("value", "0")
@@ -347,6 +356,34 @@ class IoRuntime:
             values.append((point, fallback, quality, source))
         changed = self._upsert_runtime_values(values)
         return self._device_result(device_code, device_points, quality == "simulation", False, error, changed)
+
+    def _record_device_live(self, device_code: str) -> None:
+        _DEVICE_OFFLINE_FAILURES.pop(str(device_code or ""), None)
+        _DEVICE_LAST_LIVE_MONOTONIC[str(device_code or "")] = time.monotonic()
+
+    def _debounce_transient_offline(self, device_code: str, device_points: List[Dict[str, Any]]) -> bool:
+        code = str(device_code or "")
+        failures = int(_DEVICE_OFFLINE_FAILURES.get(code, 0) or 0) + 1
+        _DEVICE_OFFLINE_FAILURES[code] = failures
+        threshold = max(1, int(self.cfg.get_float("io_offline_debounce_failures", 3.0)))
+        grace_s = max(0.0, min(self.cfg.get_float("io_offline_grace_s", 8.0), 60.0))
+        if failures >= threshold:
+            return False
+
+        now_m = time.monotonic()
+        last_live_m = float(_DEVICE_LAST_LIVE_MONOTONIC.get(code, 0.0) or 0.0)
+        if last_live_m > 0.0 and (now_m - last_live_m) <= grace_s:
+            return True
+
+        now_ts = time.time()
+        for point in device_points:
+            quality = str(point.get("quality") or "").lower()
+            if quality not in {"live", "override"}:
+                continue
+            updated_ts = float(point.get("updated_ts") or 0.0)
+            if updated_ts > 0.0 and (now_ts - updated_ts) <= grace_s:
+                return True
+        return False
 
     def _upsert_runtime_values(self, values) -> int:
         items: list[tuple[str, Any, str, str]] = []

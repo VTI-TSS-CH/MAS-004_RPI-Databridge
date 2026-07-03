@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -156,6 +157,9 @@ SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
 ESP_RESET_PULSE_HIGH_S = 0.2
 ESP_RESET_PULSE_GAP_S = 1.0
+ESP_RESET_ENDPOINT_RECOVERY_TIMEOUT_S = 60.0
+ESP_RESET_ENDPOINT_RETRY_TIMEOUT_S = 45.0
+ESP_RESET_ENDPOINT_POLL_S = 0.5
 LASER_SYSTEM_READY_PIN = "I0.12"
 LASER_READY_PIN = "I0.2"
 LASER_START_PIN = "Q0.3"
@@ -6728,12 +6732,40 @@ class MachineRuntime:
         )
         self._apply_status_lamp(8, warning_active=False, ts=ts)
 
-        try:
-            self._pulse_esp_reset_output()
-            result["steps"].append({"step": "esp_q0_2_reset_pulse", "ok": True})
-        except Exception as exc:
-            result["steps"].append({"step": "esp_q0_2_reset_pulse", "ok": False, "error": str(exc)})
-            result["error"] = f"ESP reset pulse failed: {exc}"
+        reset_pulsed = False
+        for attempt_no in (1, 2):
+            try:
+                pulse = self._pulse_esp_reset_output()
+                result["steps"].append({"step": "esp_q0_2_reset_pulse", "attempt": attempt_no, "ok": True, **pulse})
+                reset_pulsed = True
+                break
+            except Exception as exc:
+                result["steps"].append({"step": "esp_q0_2_reset_pulse", "attempt": attempt_no, "ok": False, "error": str(exc)})
+                if attempt_no >= 2:
+                    result["error"] = f"ESP reset pulse failed: {exc}"
+                    return result
+                wait_retry = self._wait_for_esp_command_endpoint(
+                    timeout_s=ESP_RESET_ENDPOINT_RETRY_TIMEOUT_S,
+                    poll_s=ESP_RESET_ENDPOINT_POLL_S,
+                    source="safety_reset_retry_before_q0_2",
+                )
+                result["steps"].append({"step": "wait_esp_endpoint_before_reset_retry", **wait_retry})
+                if not wait_retry.get("ok"):
+                    result["error"] = wait_retry.get("error") or f"ESP reset pulse failed: {exc}"
+                    return result
+
+        if not reset_pulsed:
+            result["error"] = "ESP reset pulse failed"
+            return result
+
+        wait_after_reset = self._wait_for_esp_command_endpoint(
+            timeout_s=ESP_RESET_ENDPOINT_RECOVERY_TIMEOUT_S,
+            poll_s=ESP_RESET_ENDPOINT_POLL_S,
+            source="safety_reset_after_q0_2",
+        )
+        result["steps"].append({"step": "wait_esp_endpoint_after_reset_pulse", **wait_after_reset})
+        if not wait_after_reset.get("ok"):
+            result["error"] = wait_after_reset.get("error") or "ESP command endpoint did not recover after reset pulse"
             return result
 
         refreshed = self._refresh_single_io_device("esp32_plc58")
@@ -7043,6 +7075,66 @@ class MachineRuntime:
                     )
                 except Exception as exc:
                     self.logs.log("machine", "warning", f"safety-reset: failed to force DIO3 LOW: {exc}")
+
+    def _wait_for_esp_command_endpoint(self, *, timeout_s: float, poll_s: float, source: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": False,
+            "source": str(source or "esp_endpoint_wait"),
+            "started_ts": now_ts(),
+            "host": str(getattr(self.cfg, "esp_host", "") or ""),
+            "port": int(getattr(self.cfg, "esp_port", 0) or 0),
+            "attempts": [],
+        }
+        if bool(getattr(self.cfg, "esp_simulation", True)):
+            result.update({"ok": True, "skipped": "esp_simulation", "finished_ts": now_ts(), "duration_s": 0.0})
+            return result
+        if not result["host"] or int(result["port"] or 0) <= 0:
+            result.update({"ok": True, "skipped": "esp_endpoint_missing", "finished_ts": now_ts(), "duration_s": 0.0})
+            return result
+
+        deadline = time.monotonic() + max(0.5, float(timeout_s or 0.5))
+        poll_interval_s = max(0.05, float(poll_s or 0.05))
+        attempt_no = 0
+        last_error = ""
+        while True:
+            attempt_no += 1
+            attempt_ts = now_ts()
+            try:
+                with socket.create_connection(
+                    (str(result["host"]), int(result["port"])),
+                    timeout=min(0.75, poll_interval_s),
+                ):
+                    pass
+                finished = now_ts()
+                result["attempts"].append({"attempt": attempt_no, "ts": attempt_ts, "ok": True})
+                result.update(
+                    {
+                        "ok": True,
+                        "finished_ts": finished,
+                        "duration_s": round(max(0.0, finished - float(result["started_ts"])), 3),
+                    }
+                )
+                result["attempts"] = result["attempts"][-5:]
+                return result
+            except Exception as exc:
+                last_error = repr(exc)
+                result["attempts"].append({"attempt": attempt_no, "ts": attempt_ts, "ok": False, "error": last_error})
+            if time.monotonic() >= deadline:
+                finished = now_ts()
+                result.update(
+                    {
+                        "ok": False,
+                        "finished_ts": finished,
+                        "duration_s": round(max(0.0, finished - float(result["started_ts"])), 3),
+                        "error": (
+                            f"ESP command endpoint {result['host']}:{result['port']} "
+                            f"nicht erreichbar nach {float(timeout_s or 0.0):.1f}s: {last_error}"
+                        ),
+                    }
+                )
+                result["attempts"] = result["attempts"][-5:]
+                return result
+            time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
 
     def _pulse_io_output(self, io_key: str, *, high_s: float, source: str) -> dict[str, Any]:
         point = self.io_store.get_point(io_key)
