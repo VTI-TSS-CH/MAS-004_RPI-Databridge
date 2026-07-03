@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.io_master import IoStore
-from mas004_rpi_databridge.io_runtime import IoRuntime
+from mas004_rpi_databridge.io_runtime import IoRuntime, _MoxaEndpointCooldown
 
 
 class IoMasterImportTests(unittest.TestCase):
@@ -324,6 +324,36 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertTrue(result["best_effort"])
             self.assertEqual("offline", store.get_point("moxa_e1213_3__DIO0")["quality"])
+
+    def test_moxa_cooldown_refresh_keeps_previous_live_quality(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            store.upsert_value("moxa_e1213_3__DIO0", "1", "live", "test")
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    moxa3_host="127.0.0.1",
+                    moxa3_port=1,
+                    moxa3_simulation=False,
+                    moxa_timeout_s=0.3,
+                ),
+                store,
+            )
+
+            with patch.object(runtime, "_moxa_call", side_effect=_MoxaEndpointCooldown("cooldown")):
+                result = runtime.refresh(include_points=False, device_codes={"moxa_e1213_3"})
+
+            self.assertTrue(result["devices"][0]["cooldown"])
+            self.assertTrue(result["devices"][0]["debounced"])
+            self.assertEqual("live", store.get_point("moxa_e1213_3__DIO0")["quality"])
+            self.assertEqual("1", store.get_point("moxa_e1213_3__DIO0")["value"])
 
 
 if __name__ == "__main__":

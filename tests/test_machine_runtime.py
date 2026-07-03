@@ -3095,6 +3095,62 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("ready", snapshot["info"]["safety"]["phase"])
         self.assertFalse(snapshot["info"]["safety"]["latched"])
 
+    def test_stale_estop_latch_after_successful_reset_is_cleared_without_second_reset(self):
+        runtime = self.build_runtime()
+        self.params.apply_device_value("MAS0001", "21", promote_default=True)
+        self.params.apply_device_value("MAS0028", "0", promote_default=True)
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="safety_latched",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "safety": {
+                    "latched": True,
+                    "phase": "latched",
+                    "last_reasons": ["notaus"],
+                    "last_reset": {"ok": True, "initial_reasons": ["notaus"]},
+                }
+            },
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_7", "1", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_8", "1", "live", "test")
+
+        with patch.object(runtime, "_perform_safety_reset", return_value={"ok": True}) as full_reset:
+            snapshot = runtime.refresh()
+
+        full_reset.assert_not_called()
+        self.assertEqual(9, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual("stale_blocking_safety_latch_cleared", runtime._state_row()["state_source"])
+        self.assertEqual("ready", snapshot["info"]["safety"]["phase"])
+        self.assertFalse(snapshot["info"]["safety"]["latched"])
+
+    def test_stale_estop_latch_without_successful_reset_stays_latched(self):
+        runtime = self.build_runtime()
+        self.params.apply_device_value("MAS0001", "21", promote_default=True)
+        self.params.apply_device_value("MAS0028", "0", promote_default=True)
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="safety_latched",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True, "phase": "latched", "last_reasons": ["notaus"]}},
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_7", "1", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_8", "1", "live", "test")
+
+        snapshot = runtime.refresh()
+
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertEqual("safety_latched", runtime._state_row()["state_source"])
+
     def test_light_curtain_auto_reset_is_blocked_when_estop_is_active_too(self):
         runtime = self.build_runtime()
         runtime._write_state(

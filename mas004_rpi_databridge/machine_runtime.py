@@ -694,6 +694,25 @@ class MachineRuntime:
             if int(snapshot["current_state"] or 0) == 21:
                 forced_state = 9
                 forced_source = "stale_light_curtain_latch_cleared"
+        if self._stale_blocking_safety_latch_after_successful_reset(
+            safety_status=safety_status,
+            critical_reasons=critical_reasons,
+            safety_info=safety_info,
+            info=info,
+            mas0028_active=mas0028_active,
+        ):
+            safety_latched = False
+            safety_info = {
+                **safety_info,
+                "latched": False,
+                "phase": SAFETY_PHASE_READY,
+                "last_reasons": [],
+                "stale_blocking_latch_cleared_ts": ts,
+            }
+            info["safety"] = safety_info
+            if int(snapshot["current_state"] or 0) == 21:
+                forced_state = 9
+                forced_source = "stale_blocking_safety_latch_cleared"
         # Scenario B: a purge started by Microtom/DIClient remains active until
         # Microtom/DIClient sends MAS0028=0.  Do not auto-clear MAS0028 merely
         # because the local safety inputs are quiet; stale local latches are
@@ -6217,6 +6236,36 @@ class MachineRuntime:
             return False
         return bool(safety_info.get("latched") or mas0028_active)
 
+    def _stale_blocking_safety_latch_after_successful_reset(
+        self,
+        *,
+        safety_status: dict[str, Any],
+        critical_reasons: list[str],
+        safety_info: dict[str, Any],
+        info: dict[str, Any],
+        mas0028_active: bool,
+    ) -> bool:
+        if external_purge_active(info):
+            return False
+        if mas0028_active:
+            return False
+        if self._blocking_safety_active(safety_status):
+            return False
+        if safety_status.get("reasons"):
+            return False
+        if critical_reasons:
+            return False
+
+        last_reset = safety_info.get("last_reset") if isinstance(safety_info.get("last_reset"), dict) else {}
+        if not bool(last_reset.get("ok")) or bool(last_reset.get("in_progress")):
+            return False
+        last_reasons = {str(reason) for reason in (safety_info.get("last_reasons") or [])}
+        last_reset_reasons = {str(reason) for reason in (last_reset.get("initial_reasons") or [])}
+        blocking_history = last_reasons or last_reset_reasons
+        if blocking_history and not blocking_history.issubset({"notaus"}):
+            return False
+        return bool(safety_info.get("latched"))
+
     def _laser_printer_active(self, param_map: dict[str, str] | None = None) -> bool:
         values = param_map if param_map is not None else self._param_values_by_prefix(("MAP",))
         return _truthy((values or {}).get("MAP0016", "0"))
@@ -6862,7 +6911,10 @@ class MachineRuntime:
                     purge_active = bool(snapshot.get("purge_active"))
                     if ok:
                         try:
+                            final_esp_refresh = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
                             live_io = self._io_values()
+                            live_safety = self._safety_status(live_io)
+                            live_blocking_reasons = self._blocking_safety_reasons(live_safety)
                             live_params = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
                             live_critical, live_reasons = self._critical_state(
                                 live_io,
@@ -6870,10 +6922,27 @@ class MachineRuntime:
                                 band_break_bypass=quick_setup_band_break_bypass_active(snapshot.get("info") or {}),
                             )
                             live_purge = _truthy(live_params.get("MAS0028", "0"))
-                        except Exception:
-                            live_critical = False
-                            live_reasons = []
+                            safety_info["motion_recovery_final_safety"] = {
+                                "esp_refresh_ok": bool(final_esp_refresh.get("ok", False)),
+                                "safety_status": live_safety,
+                                "critical_reasons": list(live_reasons),
+                                "purge_active": bool(live_purge),
+                            }
+                            if not bool(final_esp_refresh.get("ok", False)):
+                                live_critical = True
+                                live_reasons = ["esp_safety_io_refresh_failed"]
+                            elif live_blocking_reasons:
+                                live_critical = True
+                                live_reasons = list(live_blocking_reasons)
+                        except Exception as exc:
+                            live_critical = True
+                            live_reasons = ["safety_state_refresh_failed"]
                             live_purge = bool(snapshot.get("purge_active"))
+                            safety_info["motion_recovery_final_safety"] = {
+                                "esp_refresh_ok": False,
+                                "error": str(exc),
+                                "purge_active": bool(live_purge),
+                            }
                         if not live_critical and not live_purge:
                             safety_info = {
                                 **safety_info,

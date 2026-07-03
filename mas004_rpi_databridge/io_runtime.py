@@ -32,6 +32,10 @@ _MOXA_DEVICE_CODES = {
 _RPIPLC21_ANALOG_DIGITAL_INPUTS = {"I0.7", "I0.8", "I0.9", "I0.10", "I0.11", "I0.12"}
 
 
+class _MoxaEndpointCooldown(RuntimeError):
+    pass
+
+
 def _to_int01(value: Any) -> int:
     if isinstance(value, bool):
         return 1 if value else 0
@@ -326,6 +330,11 @@ class IoRuntime:
             )
             self._record_device_live(device_code)
             return self._device_result(device_code, device_points, False, True, "", changed)
+        except _MoxaEndpointCooldown as exc:
+            result = self._device_result(device_code, device_points, False, False, str(exc), 0)
+            result["debounced"] = True
+            result["cooldown"] = True
+            return result
         except Exception as exc:
             return self._apply_static_quality(device_code, device_points, "offline", device_code, str(exc))
 
@@ -528,7 +537,7 @@ class IoRuntime:
         until = float(_MOXA_COOLDOWN_UNTIL.get(key, 0.0) or 0.0)
         if until > now:
             reason = _MOXA_COOLDOWN_ERROR.get(key, "previous MOXA error")
-            raise RuntimeError(f"MOXA cooldown active for {host}:{port} after {reason}")
+            raise _MoxaEndpointCooldown(f"MOXA cooldown active for {host}:{port} after {reason}")
         lock = self._moxa_lock(host, port)
         with lock:
             try:
