@@ -198,6 +198,20 @@ MACHINE_BYPASS_PARAM_DEFS = (
         "name": "TTO Bypass-Druckdauer",
         "message": "Simulierte Druckdauer in ms, wenn TTO/Drucksystem gebypasst ist.",
     },
+    {
+        "pkey": "MAP0079",
+        "ptype": "MAP",
+        "pid": "0079",
+        "default_v": "0",
+        "min_v": 0,
+        "max_v": 1,
+        "unit": "",
+        "rw": "W",
+        "esp_rw": "R",
+        "dtype": "bool",
+        "name": "Laser Testmodus Parallelbetrieb",
+        "message": "Bei aktivem TTO wird Laser Start Q0.3 parallel zum TTO-Drucktrigger Q0.0 und beim TTO Online-Schalten fuer 100 ms gepulst.",
+    },
 )
 
 MACHINE_LED_PARAM_DEFS = (

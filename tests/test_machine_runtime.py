@@ -165,6 +165,7 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0040", "MAP", "0040", "5", "W", "R", "uint8"),
             ("MAP0065", "MAP", "0065", "1111111", "W", "R", "uint8"),
             ("MAP0066", "MAP", "0066", "8000", "W", "R", "uint16"),
+            ("MAP0079", "MAP", "0079", "0", "W", "R", "bool"),
             ("MAE0008", "MAE", "0008", "0", "R", "W", "bool"),
             ("MAE0009", "MAE", "0009", "0", "R", "W", "bool"),
             ("MAE0010", "MAE", "0010", "0", "R", "W", "bool"),
@@ -876,6 +877,7 @@ class MachineRuntimeTests(unittest.TestCase):
             "MAP0036",
             "MAP0037",
             "MAP0038",
+            "MAP0079",
         ]
         self.assertEqual(expected_forced, result["synced"])
         self.assertEqual(expected_forced, result["forced"])
@@ -970,6 +972,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertNotIn("MAP0068", inactive)
         self.assertNotIn("MAP0069", inactive)
         self.assertNotIn("MAP0070", inactive)
+        self.assertEqual("0", inactive["MAP0079"])
 
         param_map.update({"MAP0035": "1", "MAP0036": "1", "MAP0037": "1"})
         active = runtime._production_esp_sync_values(param_map)
@@ -977,6 +980,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("4", active["MAP0068"])
         self.assertEqual("1500", active["MAP0069"])
         self.assertEqual("2000", active["MAP0070"])
+        self.assertEqual("0", active["MAP0079"])
 
     def test_tto_printer_syncs_online_and_offline_for_real_tto_without_bypass(self):
         self.cfg.vj6530_simulation = False
@@ -1036,6 +1040,38 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("tto_print_bypass_active", result["skipped"])
         bridge_cls.assert_not_called()
+
+    def test_tto_printer_online_pulses_laser_start_in_parallel_mode(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        _insert_param(self.db, "TTS0001", "TTS", "0001", "0", "R", "W", "enum")
+        _insert_device_map(self.db, "TTS0001", "STATUS[PRINTER_STATE_CODE]")
+        pulses: list[tuple[str, float, str]] = []
+
+        def fake_pulse(io_key, *, high_s, source):
+            pulses.append((io_key, float(high_s), source))
+            return {"ok": True, "io_key": io_key, "high_s": high_s}
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls, patch.object(
+            runtime,
+            "_pulse_io_output",
+            side_effect=fake_pulse,
+        ):
+            bridge_cls.return_value.execute.return_value = "ACK_TTS0001=3"
+            result = runtime._sync_tto_printer_for_machine_state(
+                5,
+                {"MAP0016": "0", "MAP0035": "0", "MAP0079": "1"},
+                reason="test_parallel",
+                required=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("3", result["actual_code"])
+        self.assertEqual(
+            [("esp32_plc58__Q0_3", 0.1, "laser-parallel-tto-online")],
+            pulses,
+        )
+        self.assertTrue(result["laser_parallel_start"]["ok"])
 
     def test_motor3_production_zero_falls_back_to_status_after_empty_refresh(self):
         self.cfg.esp_simulation = False

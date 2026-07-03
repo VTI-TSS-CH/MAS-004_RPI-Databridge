@@ -259,6 +259,7 @@ PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0074",
     "MAP0075",
     "MAP0076",
+    "MAP0079",
 )
 PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0016",
@@ -276,6 +277,7 @@ PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0068",
     "MAP0069",
     "MAP0070",
+    "MAP0079",
 )
 TTO_PRINTER_STATE_PKEY = "TTS0001"
 TTO_PRINTER_OFFLINE_CODE = "0"
@@ -3383,6 +3385,15 @@ class MachineRuntime:
                 "response": response_text,
                 "actual_code": actual,
             }
+            if (
+                target_code == TTO_PRINTER_ONLINE_CODE
+                and _truthy(param_map.get("MAP0079", self.params.get_effective_value("MAP0079")))
+            ):
+                result["laser_parallel_start"] = self._pulse_io_output(
+                    f"esp32_plc58__{LASER_START_PIN.replace('.', '_')}",
+                    high_s=LASER_START_PULSE_HIGH_S,
+                    source="laser-parallel-tto-online",
+                )
             self._record_event(
                 "tto_printer_state_sync",
                 "info",

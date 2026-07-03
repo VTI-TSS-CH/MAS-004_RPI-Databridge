@@ -107,7 +107,7 @@ def build_machine_control_ui_html(nav_html: str) -> str:
     <div class="title">
       <div>
         <h2>Bypass / Simulation</h2>
-        <div class="muted small">MAP0035-MAP0038 werden wie Microtom-Parameter geschrieben und zur ESP32-PLC gespiegelt.</div>
+        <div class="muted small">Die Bypass-/Simulationswerte werden wie Microtom-Parameter geschrieben und zur ESP32-PLC gespiegelt.</div>
       </div>
       <span id="bypass_status" class="pill">lade...</span>
     </div>
@@ -194,6 +194,12 @@ const bypassCards = [
     title:"Drucksystem",
     note:"Laser/TTO wird nicht getriggert; Bereit/Fertig wird ueber die simulierte Druckdauer erzeugt.",
     fields:[["MAP0069", "Laser-Dauer ms", "Simulierte Laser-Druckdauer"], ["MAP0070", "TTO-Dauer ms", "Simulierte TTO-Druckdauer"]]
+  }},
+  {{
+    key:"MAP0079",
+    title:"Laser Parallelbetrieb",
+    note:"TTO bleibt aktiv; Laser Start Q0.3 wird parallel zum TTO-Drucktrigger und beim TTO Online-Schalten testweise gepulst.",
+    fields:[]
   }},
   {{
     key:"MAP0037",

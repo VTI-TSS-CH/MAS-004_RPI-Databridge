@@ -110,5 +110,6 @@ def build_format_plan(values: dict[str, Any]) -> dict[str, Any]:
             "ocr_camera_sim_bad_every_n": _safe_int(values, "MAP0068", 0),
             "laser_sim_print_ms": _safe_int(values, "MAP0069", 2000),
             "tto_sim_print_ms": _safe_int(values, "MAP0070", 2000),
+            "laser_parallel_tto": _safe_bool(values, "MAP0079", False),
         },
     }
