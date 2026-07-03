@@ -159,12 +159,24 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0004", "MAP", "0004", "100", "W", "R", "uint16"),
             ("MAP0005", "MAP", "0005", "0", "W", "W", "int8"),
             ("MAP0006", "MAP", "0006", "0", "W", "W", "int8"),
+            ("MAP0011", "MAP", "0011", "0", "W", "R", "int8"),
+            ("MAP0012", "MAP", "0012", "0", "W", "R", "int8"),
             ("MAP0014", "MAP", "0014", "100", "W", "R", "uint16"),
             ("MAP0016", "MAP", "0016", "0", "W", "R", "bool"),
+            ("MAP0017", "MAP", "0017", "1050", "W", "R", "uint16"),
+            ("MAP0018", "MAP", "0018", "6100", "W", "R", "uint16"),
             ("MAP0019", "MAP", "0019", "11000", "W", "R", "uint16"),
+            ("MAP0020", "MAP", "0020", "8500", "W", "R", "uint16"),
+            ("MAP0021", "MAP", "0021", "14900", "W", "R", "uint16"),
+            ("MAP0035", "MAP", "0035", "0", "W", "R", "bool"),
+            ("MAP0036", "MAP", "0036", "0", "W", "R", "bool"),
+            ("MAP0037", "MAP", "0037", "0", "W", "R", "bool"),
+            ("MAP0038", "MAP", "0038", "0", "W", "R", "bool"),
             ("MAP0040", "MAP", "0040", "5", "W", "R", "uint8"),
             ("MAP0065", "MAP", "0065", "1111111", "W", "R", "uint8"),
             ("MAP0066", "MAP", "0066", "8000", "W", "R", "uint16"),
+            ("MAP0071", "MAP", "0071", "5200", "W", "R", "uint16"),
+            ("MAP0075", "MAP", "0075", "100", "W", "R", "uint16"),
             ("MAP0079", "MAP", "0079", "0", "W", "R", "bool"),
             ("MAE0008", "MAE", "0008", "0", "R", "W", "bool"),
             ("MAE0009", "MAE", "0009", "0", "R", "W", "bool"),
@@ -868,7 +880,10 @@ class MachineRuntimeTests(unittest.TestCase):
         expected_forced = [
             "MAP0004",
             "MAP0006",
+            "MAP0011",
+            "MAP0012",
             "MAP0016",
+            "MAP0017",
             "MAP0018",
             "MAP0019",
             "MAP0020",
@@ -877,6 +892,9 @@ class MachineRuntimeTests(unittest.TestCase):
             "MAP0036",
             "MAP0037",
             "MAP0038",
+            "MAP0066",
+            "MAP0071",
+            "MAP0075",
             "MAP0079",
         ]
         self.assertEqual(expected_forced, result["synced"])
@@ -1057,21 +1075,34 @@ class MachineRuntimeTests(unittest.TestCase):
             "_pulse_io_output",
             side_effect=fake_pulse,
         ):
-            bridge_cls.return_value.execute.return_value = "ACK_TTS0001=3"
+            bridge_cls.return_value.execute.side_effect = ["ACK_TTS0001=3", "ACK_TTS0001=0"]
             result = runtime._sync_tto_printer_for_machine_state(
                 5,
                 {"MAP0016": "0", "MAP0035": "0", "MAP0079": "1"},
                 reason="test_parallel",
                 required=True,
             )
+            self.params.apply_device_value("TTS0001", "3", promote_default=True)
+            offline = runtime._sync_tto_printer_for_machine_state(
+                7,
+                {"MAP0016": "0", "MAP0035": "0", "MAP0079": "1"},
+                reason="test_parallel_offline",
+                required=True,
+            )
 
         self.assertTrue(result["ok"], result)
         self.assertEqual("3", result["actual_code"])
+        self.assertTrue(offline["ok"], offline)
+        self.assertEqual("0", offline["actual_code"])
         self.assertEqual(
-            [("esp32_plc58__Q0_3", 0.1, "laser-parallel-tto-online")],
+            [
+                ("esp32_plc58__Q0_3", 0.1, "laser-parallel-tto-state-3"),
+                ("esp32_plc58__Q0_3", 0.1, "laser-parallel-tto-state-0"),
+            ],
             pulses,
         )
         self.assertTrue(result["laser_parallel_start"]["ok"])
+        self.assertTrue(offline["laser_parallel_start"]["ok"])
 
     def test_motor3_production_zero_falls_back_to_status_after_empty_refresh(self):
         self.cfg.esp_simulation = False
@@ -3517,6 +3548,47 @@ class MachineRuntimeTests(unittest.TestCase):
             writes,
         )
         self.assertEqual([0.2, 1.0, 0.2], [call.args[0] for call in sleep.call_args_list])
+
+    def test_esp_q02_reset_pulses_laser_safety_reset_in_parallel_mode_when_ready(self):
+        self.params.apply_device_value("MAP0079", "1", promote_default=True)
+        with self.db._conn() as c:
+            c.execute(
+                "UPDATE io_values SET value=?, quality=?, source=?, updated_ts=? WHERE io_key=?",
+                ("1", "simulation", "test", now_ts(), "esp32_plc58__I0_12"),
+            )
+        runtime = self.build_runtime()
+        writes: list[tuple[str, bool, bool, str]] = []
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, io_key, enabled, *, force=False, source="runtime", **_kwargs):
+                writes.append((io_key, bool(enabled), bool(force), source))
+                return {"ok": True}
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime), patch.object(
+            runtime,
+            "_refresh_single_io_device",
+            return_value={"ok": True},
+        ), patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+            result = runtime._pulse_esp_reset_output()
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["laser_parallel_reset"]["enabled"])
+        self.assertEqual(
+            [
+                ("moxa_e1213_1__DIO3", True, True, "laser-safety-reset-parallel"),
+                ("esp32_plc58__Q0_2", True, True, "safety-reset"),
+                ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("moxa_e1213_1__DIO3", False, True, "laser-safety-reset-parallel"),
+                ("moxa_e1213_1__DIO3", True, True, "laser-safety-reset-parallel"),
+                ("esp32_plc58__Q0_2", True, True, "safety-reset"),
+                ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("moxa_e1213_1__DIO3", False, True, "laser-safety-reset-parallel"),
+            ],
+            writes,
+        )
 
     def test_virtual_setup_is_blocked_during_reset_context(self):
         runtime = self.build_runtime()

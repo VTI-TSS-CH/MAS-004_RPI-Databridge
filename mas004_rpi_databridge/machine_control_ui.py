@@ -198,7 +198,7 @@ const bypassCards = [
   {{
     key:"MAP0079",
     title:"Laser Parallelbetrieb",
-    note:"TTO bleibt aktiv; Laser Start Q0.3 wird parallel zum TTO-Drucktrigger und beim TTO Online-Schalten testweise gepulst.",
+    note:"TTO bleibt aktiv; Q0.3 Laser Start wird beim TTO Online/Offline-Schalten gepulst, Q0.1 triggert 100 ms parallel zu Q0.0.",
     fields:[]
   }},
   {{

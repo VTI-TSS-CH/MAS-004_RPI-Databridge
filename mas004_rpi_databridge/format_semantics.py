@@ -94,7 +94,7 @@ def build_format_plan(values: dict[str, Any]) -> dict[str, Any]:
             "led_controller_enabled": _safe_bool(values, "MAP0072", True),
             "led_controller_target_last_octet": _safe_int(values, "MAP0073", 255),
             "led_controller_udp_port": _safe_int(values, "MAP0074", 3050),
-            "led_controller_frame_interval_ms": _safe_int(values, "MAP0075", 33),
+            "led_controller_frame_interval_ms": _safe_int(values, "MAP0075", 100),
             "label_length_compensation_tenths_mm": _safe_int(values, "MAP0076", 0),
             "infeed_encoder_diameter_um": _safe_int(values, "MAP0077", 100765),
             "drive_encoder_diameter_um": _safe_int(values, "MAP0078", 100649),

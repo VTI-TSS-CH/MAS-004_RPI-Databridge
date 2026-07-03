@@ -210,7 +210,7 @@ MACHINE_BYPASS_PARAM_DEFS = (
         "esp_rw": "R",
         "dtype": "bool",
         "name": "Laser Testmodus Parallelbetrieb",
-        "message": "Bei aktivem TTO wird Laser Start Q0.3 parallel zum TTO-Drucktrigger Q0.0 und beim TTO Online-Schalten fuer 100 ms gepulst.",
+        "message": "Bei aktivem TTO wird Laser Start Q0.3 beim TTO Online/Offline-Schalten fuer 100 ms gepulst; Q0.1 triggert 100 ms parallel zu Q0.0.",
     },
 )
 
@@ -279,7 +279,7 @@ MACHINE_LED_PARAM_DEFS = (
         "pkey": "MAP0075",
         "ptype": "MAP",
         "pid": "0075",
-        "default_v": "33",
+        "default_v": "100",
         "min_v": 20,
         "max_v": 1000,
         "unit": "ms",
@@ -288,7 +288,7 @@ MACHINE_LED_PARAM_DEFS = (
         "dtype": "uint16",
         "format_relevant": "NO",
         "name": "LED-Controller Frame-Intervall",
-        "message": "Minimaler Sendeabstand der LED-Frames. 33 ms entspricht ca. 30 Hz.",
+        "message": "Minimaler Sendeabstand der LED-Frames. 100 ms entspricht 10 Hz.",
     },
 )
 
@@ -2144,7 +2144,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "controller_target": f"192.168.2.{led_controller_last_octet}:{led_controller_port}",
                 "controller_broadcast": led_controller_last_octet == 255,
                 "controller_enabled": led_controller_enabled,
-                "frame_interval_ms": safe_param_int(values, "MAP0075", 33),
+                "frame_interval_ms": safe_param_int(values, "MAP0075", 100),
                 "warning": (
                     "Die PLC58 treibt keinen WS2812-Pin mehr. Sie sendet fertige RGB-Frames "
                     "direkt aus dem ESP-Schieberegister per UDP an den Olimex ESP32-POE-ISO-IND LED-Controller."
