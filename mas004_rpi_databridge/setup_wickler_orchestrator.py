@@ -27,6 +27,8 @@ MOTOR3_SCALE_CALIBRATION_TARGET_MM = 2000.0
 MOTOR3_SCALE_CALIBRATION_TOLERANCE_MM = 0.5
 MOTOR3_SCALE_CALIBRATION_MAX_ATTEMPTS = 4
 MOTOR3_SCALE_CALIBRATION_MAX_CORRECTION_FACTOR = 0.05
+MOTOR3_SETUP_READY_TIMEOUT_S = 12.0
+MOTOR3_SETUP_RECOVERY_ATTEMPTS = 4
 WICKLER_MOTION_ABORT_LOW_PERCENT = 8.0
 WICKLER_MOTION_ABORT_HIGH_PERCENT = 92.0
 WICKLER_STATE_SAFETY_TIMEOUT_S = 0.8
@@ -285,25 +287,96 @@ class SetupWicklerOrchestrator:
         )
 
     def _motor3_operable(self, motor: dict[str, Any]) -> bool:
-        # Some AZD installations do not expose a stable READY bit even though
-        # the drive is link-ok, alarm-free and out of HWTO. Treat READY as
-        # diagnostic information here; the measuring run is verified by exact
-        # target/feedback stop tolerance afterwards.
         return (
             bool(motor.get("link_ok") or motor.get("linkOk"))
             and not bool(motor.get("alarm"))
             and not bool(motor.get("hwto"))
         )
 
+    def _motor3_ready_for_setup_measurement(self, motor: dict[str, Any]) -> bool:
+        return (
+            self._motor3_operable(motor)
+            and bool(motor.get("ready"))
+            and not bool(motor.get("busy"))
+            and not bool(motor.get("move"))
+        )
+
+    @staticmethod
+    def _motor3_setup_ready_details(motor: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: motor.get(key)
+            for key in (
+                "link_ok",
+                "ready",
+                "busy",
+                "move",
+                "alarm",
+                "alarm_code",
+                "hwto",
+                "input_raw_hex",
+                "output_raw_hex",
+                "monitor0179_hex",
+                "monitor017b_hex",
+                "monitor017d_hex",
+                "mps",
+                "mbc",
+                "edm",
+                "last_error",
+                "last_reply",
+            )
+            if key in motor
+        }
+
     def _motor3_status(self) -> dict[str, Any]:
         return self._motor3_state_from_status(self._json_response(self._esp("MOTOR 3 REFRESH", read_timeout_s=5.0)))
+
+    def _recover_motor3_for_setup_measurement(self, reason: str, state: dict[str, Any], attempt: int) -> None:
+        self.logs.log(
+            "esp-plc",
+            "warning",
+            "Motor 3 setup recovery "
+            f"{attempt}/{MOTOR3_SETUP_RECOVERY_ATTEMPTS} ({reason}): "
+            + json.dumps(self._motor3_setup_ready_details(state), ensure_ascii=False, sort_keys=True),
+        )
+        for command in ("MOTOR 3 MOVE_VEL_MM_S=0", "MOTOR 3 RESET_ALARM", "MOTOR 3 RECOVER_ETO"):
+            try:
+                self._esp_retry(command, read_timeout_s=5.0, attempts=2, settle_s=0.25)
+            except Exception as exc:
+                self.logs.log(
+                    "esp-plc",
+                    "warning",
+                    f"Motor 3 setup recovery command failed: {command}: {repr(exc)}",
+                )
+
+    def _ensure_motor3_ready_for_setup_measurement(
+        self,
+        reason: str,
+        *,
+        timeout_s: float = MOTOR3_SETUP_READY_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        deadline = time.time() + max(1.0, float(timeout_s))
+        last_state: dict[str, Any] = {}
+        recoveries = 0
+        while time.time() < deadline:
+            self._abort_if_not_setup_active()
+            last_state = self._motor3_status()
+            if self._motor3_ready_for_setup_measurement(last_state):
+                return last_state
+            if recoveries < MOTOR3_SETUP_RECOVERY_ATTEMPTS:
+                recoveries += 1
+                self._recover_motor3_for_setup_measurement(reason, last_state, recoveries)
+            time.sleep(0.5)
+        raise RuntimeError(
+            f"Motor 3 is not ready for setup measurement ({reason}): "
+            + json.dumps(self._motor3_setup_ready_details(last_state), ensure_ascii=False, sort_keys=True)
+        )
 
     def _prepare_motor3_for_measurement(self) -> dict[str, Any]:
         # The measuring run starts from the current physical label position. It
         # is not a tolerance check yet; the tolerance is evaluated after the
         # 1000-mm pass and again after returning to this newly captured zero.
         def _zero_current_position(motor_state: dict[str, Any]) -> dict[str, Any] | None:
-            if not self._motor3_operable(motor_state):
+            if not self._motor3_ready_for_setup_measurement(motor_state):
                 return None
             try:
                 self._esp_retry("MOTOR 3 SET_POSITION_MM=0.000", read_timeout_s=5.0, attempts=2)
@@ -312,7 +385,12 @@ class SetupWicklerOrchestrator:
                 feedback = int(verify_state.get("feedback_tenths_mm") or 0)
                 target = int(verify_state.get("target_tenths_mm") or 0)
                 moving = bool(verify_state.get("move")) or bool(verify_state.get("busy"))
-                if feedback != 0 or target != 0 or moving or not self._motor3_operable(verify_state):
+                if (
+                    feedback != 0
+                    or target != 0
+                    or moving
+                    or not self._motor3_ready_for_setup_measurement(verify_state)
+                ):
                     raise
                 self.logs.log(
                     "esp-plc",
@@ -322,11 +400,13 @@ class SetupWicklerOrchestrator:
                 self._set_motor3_postposition_error(False)
                 return verify_state
             zero_state = self._motor3_status()
+            if not self._motor3_ready_for_setup_measurement(zero_state):
+                return None
             self._set_motor3_postposition_error(False)
             return zero_state
 
         try:
-            initial_state = self._motor3_status()
+            initial_state = self._ensure_motor3_ready_for_setup_measurement("before_zero")
             zero_state = _zero_current_position(initial_state)
             if zero_state is not None:
                 return zero_state
@@ -363,7 +443,7 @@ class SetupWicklerOrchestrator:
         last_state: dict[str, Any] = {}
         while time.time() < deadline:
             self._abort_if_not_setup_active()
-            last_state = self._motor3_status()
+            last_state = self._ensure_motor3_ready_for_setup_measurement("before_zero_retry", timeout_s=2.0)
             zero_state = _zero_current_position(last_state)
             if zero_state is not None:
                 return zero_state
@@ -1521,6 +1601,7 @@ class SetupWicklerOrchestrator:
         try:
             self._abort_if_not_setup_active()
             self._teach_infeed_sensor_before_motion(teach_ms)
+            self._ensure_motor3_ready_for_setup_measurement("before_setup_measure_start")
             command = (
                 "PROCESS SETUP_MEASURE START "
                 f"SPEED_MM_S={speed_mm_s:.3f} "
