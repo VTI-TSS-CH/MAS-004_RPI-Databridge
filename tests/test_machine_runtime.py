@@ -68,6 +68,30 @@ def _insert_param(
         )
 
 
+def _insert_device_map(db: DB, pkey: str, zbc_mapping: str):
+    with db._conn() as c:
+        c.execute(
+            """INSERT INTO param_device_map(
+                pkey, esp_key, zbc_mapping, zbc_message_id, zbc_command_id, zbc_value_codec,
+                zbc_scale, zbc_offset, ultimate_set_cmd, ultimate_get_cmd, ultimate_var_name, updated_ts
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                pkey,
+                None,
+                zbc_mapping,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now_ts(),
+            ),
+        )
+
+
 def _insert_io_point(
     db: DB,
     device_code: str,
@@ -768,12 +792,45 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("SYNC MAP0006=0", commands)
         self.assertIn("SYNC MAP0016=0", commands)
         self.assertIn("SYNC MAP0019=11000", commands)
-        expected_forced = ["MAP0004", "MAP0006", "MAP0016", "MAP0018", "MAP0019", "MAP0020", "MAP0021"]
+        self.assertIn("SYNC MAP0035=0", commands)
+        expected_forced = [
+            "MAP0004",
+            "MAP0006",
+            "MAP0016",
+            "MAP0018",
+            "MAP0019",
+            "MAP0020",
+            "MAP0021",
+            "MAP0035",
+            "MAP0036",
+            "MAP0037",
+            "MAP0038",
+        ]
         self.assertEqual(expected_forced, result["synced"])
         self.assertEqual(expected_forced, result["forced"])
         self.assertNotIn("MAP0068", result["values"])
         self.assertNotIn("MAP0068", result["skipped"])
         self.assertEqual(previous_values, result["values"])
+
+    def test_production_param_sync_forces_tto_bypass_readback_values(self):
+        runtime = self.build_runtime()
+        param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        param_map.update({"MAP0035": "1", "MAP0069": "1500", "MAP0070": "2000"})
+        previous_values = runtime._production_esp_sync_values(param_map)
+
+        with patch.object(runtime, "_production_esp", return_value="ACK") as esp:
+            result = runtime._sync_production_params_to_esp(
+                param_map,
+                previous_values=previous_values,
+            )
+
+        commands = [call.args[0] for call in esp.call_args_list]
+        self.assertIn("SYNC MAP0035=1", commands)
+        self.assertIn("SYNC MAP0069=1500", commands)
+        self.assertIn("SYNC MAP0070=2000", commands)
+        self.assertIn("MAP0035", result["forced"])
+        self.assertIn("MAP0069", result["forced"])
+        self.assertIn("MAP0070", result["forced"])
 
     def test_production_param_sync_rejects_esp_readback_mismatch(self):
         self.cfg.esp_simulation = False
@@ -849,6 +906,65 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("4", active["MAP0068"])
         self.assertEqual("1500", active["MAP0069"])
         self.assertEqual("2000", active["MAP0070"])
+
+    def test_tto_printer_syncs_online_and_offline_for_real_tto_without_bypass(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        _insert_param(self.db, "TTS0001", "TTS", "0001", "0", "R", "W", "enum")
+        _insert_device_map(self.db, "TTS0001", "STATUS[PRINTER_STATE_CODE]")
+        param_map = {"MAP0016": "0", "MAP0035": "0"}
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls:
+            bridge = bridge_cls.return_value
+            bridge.execute.side_effect = ["ACK_TTS0001=3", "ACK_TTS0001=0"]
+
+            online = runtime._sync_tto_printer_for_machine_state(
+                5,
+                param_map,
+                reason="test_start",
+                required=True,
+            )
+            self.params.apply_device_value("TTS0001", "3", promote_default=True)
+            offline = runtime._sync_tto_printer_for_machine_state(
+                7,
+                param_map,
+                reason="test_stop",
+                required=True,
+            )
+
+        self.assertTrue(online["ok"], online)
+        self.assertEqual("3", online["actual_code"])
+        self.assertTrue(offline["ok"], offline)
+        self.assertEqual("0", offline["actual_code"])
+        self.assertEqual(
+            [
+                ("vj6530", "TTS0001", "TTS", "write", "3"),
+                ("vj6530", "TTS0001", "TTS", "write", "0"),
+            ],
+            [call.args for call in bridge.execute.call_args_list],
+        )
+        self.assertEqual(
+            [{"actor": "esp32"}, {"actor": "esp32"}],
+            [call.kwargs for call in bridge.execute.call_args_list],
+        )
+
+    def test_tto_printer_sync_skips_when_tto_bypass_is_active(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        _insert_param(self.db, "TTS0001", "TTS", "0001", "0", "R", "W", "enum")
+        _insert_device_map(self.db, "TTS0001", "STATUS[PRINTER_STATE_CODE]")
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls:
+            result = runtime._sync_tto_printer_for_machine_state(
+                5,
+                {"MAP0016": "0", "MAP0035": "1"},
+                reason="test_bypass",
+                required=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("tto_print_bypass_active", result["skipped"])
+        bridge_cls.assert_not_called()
 
     def test_motor3_production_zero_falls_back_to_status_after_empty_refresh(self):
         self.cfg.esp_simulation = False

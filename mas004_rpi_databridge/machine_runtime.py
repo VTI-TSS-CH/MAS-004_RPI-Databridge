@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterable, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
+from mas004_rpi_databridge.device_bridge import DeviceBridge
 from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.format_semantics import build_format_plan
@@ -164,6 +165,7 @@ _RESET_MOTION_RECOVERY_LOCK = threading.Lock()
 _LIGHT_CURTAIN_WICKLER_RECOVERY_LOCK = threading.Lock()
 _SETUP_WICKLER_LOCK = threading.Lock()
 _PRODUCTION_MOTION_LOCK = threading.Lock()
+_TTO_PRINTER_STATE_LOCK = threading.Lock()
 _MACHINE_REFRESH_LOCK = threading.RLock()
 
 _SETUP_PAUSE_RECOVERY_WINDOW_S = 2 * 60 * 60
@@ -258,7 +260,18 @@ PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0006",
     "MAP0020",
     "MAP0021",
+    "MAP0035",
+    "MAP0036",
+    "MAP0037",
+    "MAP0038",
+    "MAP0067",
+    "MAP0068",
+    "MAP0069",
+    "MAP0070",
 )
+TTO_PRINTER_STATE_PKEY = "TTS0001"
+TTO_PRINTER_OFFLINE_CODE = "0"
+TTO_PRINTER_ONLINE_CODE = "3"
 WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
 WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
@@ -1318,6 +1331,14 @@ class MachineRuntime:
                 },
             )
             self.logs.log("machine", "info", f"state {snapshot['current_state']} -> {new_state} ({state_source})")
+            if int(new_state or 0) != 5:
+                tto_state_sync = self._queue_tto_printer_state_sync(
+                    int(new_state or 0),
+                    param_map,
+                    reason=f"state_change:{state_source}",
+                )
+                if tto_state_sync.get("queued") or not tto_state_sync.get("skipped"):
+                    info["last_tto_printer_state_sync"] = tto_state_sync
 
         pending_hmi_command = info.get("pending_hmi_command")
         if isinstance(pending_hmi_command, dict):
@@ -3246,6 +3267,141 @@ class MachineRuntime:
                 raise
             return False
 
+    @staticmethod
+    def _tto_printer_settled_codes(target_code: str) -> set[str]:
+        target = str(target_code or "").strip()
+        if target == TTO_PRINTER_OFFLINE_CODE:
+            return {"0", "1", "2"}
+        if target == TTO_PRINTER_ONLINE_CODE:
+            return {"3", "4", "5"}
+        return {target}
+
+    def _tto_printer_state_sync_plan(self, machine_state: int, param_map: dict[str, str]) -> dict[str, Any]:
+        target_code = TTO_PRINTER_ONLINE_CODE if int(machine_state or 0) == 5 else TTO_PRINTER_OFFLINE_CODE
+        result: dict[str, Any] = {
+            "pkey": TTO_PRINTER_STATE_PKEY,
+            "machine_state": int(machine_state or 0),
+            "target_code": target_code,
+        }
+        params = dict(param_map or {})
+        if _safe_int(params.get("MAP0016", self.params.get_effective_value("MAP0016")), 0) != 0:
+            return {**result, "ok": True, "skipped": "tto_not_selected"}
+        if _truthy(params.get("MAP0035", self.params.get_effective_value("MAP0035"))):
+            return {**result, "ok": True, "skipped": "tto_print_bypass_active"}
+        if bool(getattr(self.cfg, "vj6530_simulation", True)):
+            return {**result, "ok": True, "skipped": "vj6530_simulation"}
+        if not str(getattr(self.cfg, "vj6530_host", "") or "").strip() or _safe_int(
+            getattr(self.cfg, "vj6530_port", 0),
+            0,
+        ) <= 0:
+            return {**result, "ok": True, "skipped": "vj6530_not_configured"}
+        if not self.params.get_meta(TTO_PRINTER_STATE_PKEY):
+            return {**result, "ok": True, "skipped": "tts0001_missing"}
+        mapping = self.params.get_device_map(TTO_PRINTER_STATE_PKEY)
+        if not str((mapping or {}).get("zbc_mapping") or "").strip():
+            return {**result, "ok": True, "skipped": "tts0001_zbc_mapping_missing"}
+        cached = str(self.params.get_effective_value(TTO_PRINTER_STATE_PKEY) or "").strip()
+        result["cached_code"] = cached
+        if target_code == TTO_PRINTER_OFFLINE_CODE and cached in self._tto_printer_settled_codes(target_code):
+            return {**result, "ok": True, "skipped": "already_offline"}
+        return result
+
+    def _sync_tto_printer_for_machine_state(
+        self,
+        machine_state: int,
+        param_map: dict[str, str],
+        *,
+        reason: str,
+        required: bool = False,
+    ) -> dict[str, Any]:
+        plan = self._tto_printer_state_sync_plan(machine_state, param_map)
+        if plan.get("skipped"):
+            return plan
+        acquired = _TTO_PRINTER_STATE_LOCK.acquire(blocking=bool(required))
+        if not acquired:
+            return {**plan, "ok": True, "skipped": "sync_in_progress"}
+        target_code = str(plan.get("target_code") or "")
+        try:
+            response = DeviceBridge(self.cfg, self.params, self.logs).execute(
+                "vj6530",
+                TTO_PRINTER_STATE_PKEY,
+                "TTS",
+                "write",
+                target_code,
+                actor="esp32",
+            )
+            response_text = str(response or "").strip()
+            actual = response_text.split("=", 1)[1].strip() if "=" in response_text else ""
+            ok = response_text.upper().startswith(f"ACK_{TTO_PRINTER_STATE_PKEY}=".upper()) and actual in (
+                self._tto_printer_settled_codes(target_code)
+            )
+            if not ok:
+                raise RuntimeError(f"TTO printer state write failed: target={target_code}, response={response_text!r}")
+            result = {
+                **plan,
+                "ok": True,
+                "reason": str(reason or ""),
+                "response": response_text,
+                "actual_code": actual,
+            }
+            self._record_event(
+                "tto_printer_state_sync",
+                "info",
+                (
+                    "TTO Drucker Online gesetzt"
+                    if target_code == TTO_PRINTER_ONLINE_CODE
+                    else "TTO Drucker Offline gesetzt"
+                ),
+                result,
+            )
+            return result
+        except Exception as exc:
+            result = {
+                **plan,
+                "ok": False,
+                "reason": str(reason or ""),
+                "error": str(exc),
+            }
+            self._record_event(
+                "tto_printer_state_sync_failed",
+                "error" if required else "warning",
+                (
+                    "TTO Drucker konnte nicht online gesetzt werden"
+                    if target_code == TTO_PRINTER_ONLINE_CODE
+                    else "TTO Drucker konnte nicht offline gesetzt werden"
+                ),
+                result,
+            )
+            if required:
+                raise
+            return result
+        finally:
+            _TTO_PRINTER_STATE_LOCK.release()
+
+    def _queue_tto_printer_state_sync(
+        self,
+        machine_state: int,
+        param_map: dict[str, str],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        plan = self._tto_printer_state_sync_plan(machine_state, param_map)
+        if plan.get("skipped"):
+            return plan
+        params = dict(param_map or {})
+
+        def _worker():
+            self._sync_tto_printer_for_machine_state(
+                int(machine_state or 0),
+                params,
+                reason=reason,
+                required=False,
+            )
+
+        thread = threading.Thread(target=_worker, name="mas004-tto-printer-state-sync", daemon=True)
+        thread.start()
+        return {**plan, "ok": True, "queued": True, "reason": str(reason or "")}
+
     def _production_esp_sync_values(self, param_map: dict[str, str]) -> dict[str, str]:
         values: dict[str, str] = {}
         for key in PRODUCTION_ESP_SYNC_KEYS:
@@ -4459,6 +4615,12 @@ class MachineRuntime:
             state_info = dict(self._state_row().get("info") or {})
             previous_sync_values = self._production_esp_sync_reference(state_info)
             self._sync_esp_machine_state(5, required=True)
+            tto_printer = self._sync_tto_printer_for_machine_state(
+                5,
+                param_map,
+                reason="production_start",
+                required=True,
+            )
             # Let the ESP consume the MAS0001 transition reset before the real
             # production start, otherwise pollStateTransitions can clear it again.
             time.sleep(0.05)
@@ -4541,6 +4703,7 @@ class MachineRuntime:
                 "motor3_zero": motor3_zero,
                 "wicklers": wicklers,
                 "post_start_wicklers": post_start_wicklers,
+                "tto_printer": tto_printer,
                 "command": start_command,
                 "response": response,
             }
@@ -4686,6 +4849,11 @@ class MachineRuntime:
                 commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
         wicklers = self._set_production_wicklers_idle(target_state=target_state)
         self._sync_esp_machine_state(int(target_state or 0), required=False)
+        tto_printer = self._queue_tto_printer_state_sync(
+            int(target_state or 0),
+            self._param_values_by_prefix(("MAP", "TTS")),
+            reason=f"production_stop:{reason}",
+        )
         critical_commands_ok = all(item.get("ok") for item in commands if item.get("critical"))
         result = {
             "ok": critical_commands_ok and bool(motor3_stop.get("ok")) and all(item.get("ok") for item in wicklers),
@@ -4697,6 +4865,7 @@ class MachineRuntime:
             "critical_commands_ok": critical_commands_ok,
             "motor3_stop": motor3_stop,
             "wicklers": wicklers,
+            "tto_printer": tto_printer,
         }
         self._record_event(
             "production_motion_stopped",
