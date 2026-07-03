@@ -661,6 +661,45 @@ class MachineRuntimeTests(unittest.TestCase):
         stop_motion.assert_called_once()
         self.assertEqual(6, snapshot["current_state"])
         self.assertFalse(snapshot["info"]["production_runtime"]["active"])
+        self.assertTrue(snapshot["info"]["production_runtime"]["paused"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0002"))
+
+    def test_pause_from_production_accepts_wickler_bit_lag_without_purge(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"production_runtime": {"active": True}},
+        )
+        ok, msg = self.params.set_value("MAS0002", "7", actor="microtom")
+        self.assertTrue(ok, msg)
+        stop_result = {
+            "ok": True,
+            "target_state": 6,
+            "motion_safe": True,
+            "wicklers_ok": False,
+            "accepted_wickler_warning": True,
+        }
+
+        with patch.object(runtime, "_stop_production_motion", return_value=stop_result) as stop_motion, patch.object(
+            runtime.production_logs,
+            "handle_param_change",
+        ) as log_change:
+            snapshot = runtime.refresh()
+
+        stop_motion.assert_called_once()
+        log_change.assert_not_called()
+        self.assertEqual(6, snapshot["current_state"])
+        self.assertEqual(7, snapshot["requested_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        self.assertTrue(snapshot["info"]["production_runtime"]["paused"])
+        self.assertEqual(stop_result, snapshot["info"]["production_runtime"]["last_stop"])
 
     def test_production_stop_verifies_motor3_standstill_after_runner_stop(self):
         runtime = self.build_runtime()
@@ -684,8 +723,8 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("PROCESS PRODUCTION STOP", calls[0])
         self.assertEqual("MOTOR 3 MOVE_VEL_MM_S=0", calls[1])
-        self.assertIn("PROCESS PRODUCTION STOP", calls[6:])
-        self.assertIn("MOTOR 3 MOVE_VEL_MM_S=0", calls[6:])
+        self.assertGreaterEqual(calls.count("PROCESS PRODUCTION STOP"), 2)
+        self.assertGreaterEqual(calls.count("MOTOR 3 MOVE_VEL_MM_S=0"), 2)
         self.assertEqual([True, False], [item["active"] for item in result["motor3_stop"]["snapshots"]])
 
     def test_production_stop_reports_failure_when_motor3_remains_active(self):
@@ -727,6 +766,29 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["motor3_stop"]["ok"])
         self.assertTrue(result["motor3_stop"]["snapshots"][0]["stale_velocity_fields"])
+
+    def test_production_pause_accepts_wickler_warning_when_motion_is_safe(self):
+        runtime = self.build_runtime()
+
+        with patch.object(runtime, "_production_esp", return_value="ACK"), patch.object(
+            runtime,
+            "_verify_motor3_stopped_after_production_stop",
+            return_value={"ok": True},
+        ), patch.object(
+            runtime,
+            "_set_production_wicklers_idle",
+            return_value=[{"role": "unwinder", "ok": False, "errors": ["indexedModeEnabled=true"]}],
+        ), patch.object(runtime, "_sync_esp_machine_state"), patch.object(
+            runtime,
+            "_queue_tto_printer_state_sync",
+            return_value={"ok": True, "skipped": "test"},
+        ):
+            result = runtime._stop_production_motion(reason="operator_pause", target_state=6)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["motion_safe"])
+        self.assertFalse(result["wicklers_ok"])
+        self.assertTrue(result["accepted_wickler_warning"])
 
     def test_failed_production_stop_forces_fault_state(self):
         runtime = self.build_runtime()

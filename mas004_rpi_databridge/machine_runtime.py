@@ -1179,10 +1179,21 @@ class MachineRuntime:
         )
         if production_stop_due:
             stop_reason = f"state_{previous_state}_to_{int(new_state or 0)}"
+            controlled_pause_stop = False
             if light_curtain_motion_pause_due:
                 stop_reason = "light_curtain_pause"
+                controlled_pause_stop = True
             elif pause_active and int(new_state or 0) in (6, 7):
                 stop_reason = "pause:" + (",".join(pause_reasons) or "unknown")
+                controlled_pause_stop = True
+            elif (
+                requested_command == 7
+                and previous_state == 5
+                and int(requested_state or 0) == 7
+                and int(new_state or 0) in (6, 7)
+            ):
+                stop_reason = "operator_pause"
+                controlled_pause_stop = True
             stop_result = self._stop_production_motion(
                 reason=stop_reason,
                 target_state=int(new_state or 0),
@@ -1190,9 +1201,18 @@ class MachineRuntime:
             production_info["last_stop"] = stop_result
             production_info["active"] = False
             production_info.pop("pending_start", None)
-            event = self.production_logs.handle_param_change("MAS0002", "2")
-            if event and event.get("event") == "stop":
-                self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
+            if controlled_pause_stop and bool(stop_result.get("ok")):
+                production_info["paused"] = True
+                production_info["paused_ts"] = now_ts()
+                production_info["pause_reason"] = stop_reason
+                production_info["resume_from_state"] = int(new_state or 0)
+                if requested_command == 7:
+                    self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                    requested_command = 0
+            else:
+                event = self.production_logs.handle_param_change("MAS0002", "2")
+                if event and event.get("event") == "stop":
+                    self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
             if not bool(stop_result.get("ok")):
                 self.params.apply_device_value("MAS0028", "1", promote_default=True)
                 self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
@@ -1218,6 +1238,10 @@ class MachineRuntime:
                 production_info["active_since_ts"] = now_ts()
                 production_info["plan"] = dict(start_result.get("plan") or {})
                 production_info.pop("last_wickler_observed_travel", None)
+                production_info.pop("paused", None)
+                production_info.pop("paused_ts", None)
+                production_info.pop("pause_reason", None)
+                production_info.pop("resume_from_state", None)
             else:
                 self.logs.log("machine", "error", f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
                 self._record_event(
@@ -4594,6 +4618,18 @@ class MachineRuntime:
                             verify = dict(verify)
                             verify["ok"] = True
                             verify["soft_accepted"] = "idle_ready_continuous_bit_lag"
+                    if errors_now == ["indexedModeEnabled=true"]:
+                        telemetry = dict((state or {}).get("telemetry") or {})
+                        drive = dict((state or {}).get("drive") or {})
+                        if (
+                            str(telemetry.get("modeLabel") or "") == "Bereit"
+                            and not bool(drive.get("move"))
+                            and not bool(drive.get("alarm"))
+                            and not bool(telemetry.get("indexedMoveActive"))
+                        ):
+                            verify = dict(verify)
+                            verify["ok"] = True
+                            verify["soft_accepted"] = "idle_ready_indexed_bit_lag"
                     item["verify"] = verify
                     if not verify.get("ok"):
                         errors.extend(str(error) for error in verify.get("errors") or ["not_ready"])
@@ -4855,18 +4891,34 @@ class MachineRuntime:
             reason=f"production_stop:{reason}",
         )
         critical_commands_ok = all(item.get("ok") for item in commands if item.get("critical"))
+        wicklers_ok = all(item.get("ok") for item in wicklers)
+        motion_safe = critical_commands_ok and bool(motor3_stop.get("ok"))
+        pause_target = int(target_state or 0) in (6, 7)
+        pause_stop_reason = (
+            str(reason or "").startswith("operator_pause")
+            or str(reason or "").startswith("pause:")
+            or str(reason or "") == "light_curtain_pause"
+            or str(reason or "").startswith("state_5_to_6")
+            or str(reason or "").startswith("state_5_to_7")
+        )
+        ok = motion_safe and (wicklers_ok or (pause_target and pause_stop_reason))
         result = {
-            "ok": critical_commands_ok and bool(motor3_stop.get("ok")) and all(item.get("ok") for item in wicklers),
+            "ok": ok,
             "reason": reason,
             "target_state": int(target_state or 0),
             "started_ts": started_ts,
             "finished_ts": now_ts(),
             "commands": commands,
             "critical_commands_ok": critical_commands_ok,
+            "motion_safe": motion_safe,
+            "wicklers_ok": wicklers_ok,
             "motor3_stop": motor3_stop,
             "wicklers": wicklers,
             "tto_printer": tto_printer,
         }
+        if ok and not wicklers_ok:
+            result["accepted_wickler_warning"] = True
+            result["accepted_wickler_warning_reason"] = "pause_motion_safe"
         self._record_event(
             "production_motion_stopped",
             "info" if result["ok"] else "warning",
