@@ -58,7 +58,7 @@ def build_production_visualization_ui_html(nav_html: str) -> str:
     .lane{position:absolute;left:0;right:0;height:44px;border-top:1px solid #e2e9f2;background:rgba(255,255,255,.46)}
     .lane.alt{background:rgba(232,241,251,.35)}
     .lane-no{position:absolute;left:8px;font-size:11px;font-weight:800;color:#51647b;background:#fff;border:1px solid #d7e0eb;border-radius:999px;padding:2px 7px;z-index:2}
-    .label-bar{position:absolute;height:31px;border-radius:6px;border:1px solid rgba(15,23,42,.24);background:#cbd5e1;box-shadow:0 1px 3px rgba(15,23,42,.13);display:grid;grid-template-columns:auto 1fr;align-items:center;gap:7px;padding:0 8px;font-size:12px;font-weight:800;overflow:hidden;white-space:nowrap;z-index:3}
+    .label-bar{position:absolute;height:31px;border-radius:6px;border:1px solid var(--label-border,rgba(15,23,42,.24));background:var(--label-bg,#cbd5e1);color:var(--label-fg,#17202a);box-shadow:0 1px 3px rgba(15,23,42,.13);display:grid;grid-template-columns:auto 1fr;align-items:center;gap:7px;padding:0 8px;font-size:12px;font-weight:800;overflow:hidden;white-space:nowrap;z-index:3}
     .label-bar:before,.label-bar:after{content:"";position:absolute;top:4px;bottom:4px;width:2px;border-radius:2px;background:rgba(15,23,42,.42)}
     .label-bar:before{left:3px}.label-bar:after{right:3px}
     .label-id{font-family:Consolas,Menlo,monospace;font-size:12px}
@@ -68,6 +68,9 @@ def build_production_visualization_ui_html(nav_html: str) -> str:
     .label-bar.warn{background:#fff0b8;color:#6d4800;border-color:#e3c66c}
     .label-bar.bad{background:#ffc9c5;color:#8a1c15;border-color:#efaaa4}
     .label-bar.open{background:#dbeafe;color:#08345f;border-color:#8dbce8}
+    .label-bar.bypass{background:linear-gradient(90deg,var(--label-bg,#cbd5e1) 0 50%,#fff0b8 50% 100%)}
+    .label-bar.removal-blink{animation:removalBlink 1s steps(1,end) infinite}
+    @keyframes removalBlink{50%{opacity:.22}}
     .label-bar.clipped-left{border-left-style:dashed}.label-bar.clipped-right{border-right-style:dashed}
     .track-empty{position:absolute;left:18px;right:18px;top:304px;border:1px dashed #cbd6e4;border-radius:8px;padding:16px;color:var(--muted);background:#fff}
     .legend-dot{width:9px;height:9px;border-radius:999px;background:currentColor;display:inline-block}
@@ -146,22 +149,48 @@ function flags(label){
     ${flag("Material trig", label.material_triggered)}${flag("Material ok", label.material_ok, !bool(label.material_ok))}${flag("Material bypass", label.material_bypass)}
     ${flag("Print trig", label.print_triggered)}${flag("Print ok", label.print_ok, !bool(label.print_ok))}${flag("Print bypass", label.print_bypass)}
     ${flag("Verify trig", label.verify_triggered)}${flag("Verify ok", label.verify_ok, !bool(label.verify_ok))}${flag("Verify bypass", label.verify_bypass)}
-    ${flag("Control", label.control_seen)}${flag("Short", label.length_too_short, true)}${flag("Long", label.length_too_long, true)}${flag("Reg late", label.registration_late, true)}
+    ${flag("Control", label.control_seen)}${flag("Entnahme", label.removal_pending || label.needs_removal, true)}${flag("Short", label.length_too_short, true)}${flag("Long", label.length_too_long, true)}${flag("Reg late", label.registration_late, true)}
   </div>`;
 }
+const labelPalette = {
+  open:{bg:"#dbeafe", fg:"#08345f", border:"#8dbce8", pill:"open", text:"offen"},
+  detected:{bg:"#ffffff", fg:"#334155", border:"#cbd5e1", pill:"warn", text:"erfasst"},
+  materialOk:{bg:"#bdeec9", fg:"#14542d", border:"#78c48e", pill:"ok", text:"Material OK"},
+  materialBad:{bg:"#ffc9c5", fg:"#8a1c15", border:"#efaaa4", pill:"bad", text:"Material NOK"},
+  printOk:{bg:"#2563eb", fg:"#ffffff", border:"#1d4ed8", pill:"ok", text:"Druck OK"},
+  printBad:{bg:"#bfdbfe", fg:"#08345f", border:"#8dbce8", pill:"open", text:"Druck NOK"},
+  verifyOk:{bg:"#22c55e", fg:"#052e16", border:"#16a34a", pill:"ok", text:"Verify OK"},
+  verifyBad:{bg:"#ef4444", fg:"#ffffff", border:"#dc2626", pill:"bad", text:"Verify NOK"}
+};
+function labelVisual(label){
+  if(bool(label.length_too_short)||bool(label.length_too_long)||bool(label.registration_late)){
+    return {...labelPalette.verifyBad, bypass:bool(label.material_bypass)||bool(label.print_bypass)||bool(label.verify_bypass), text:"Fehler"};
+  }
+  if(bool(label.open)) return {...labelPalette.open, bypass:false};
+  if(!bool(label.material_triggered)) return {...labelPalette.detected, bypass:false};
+  if(!bool(label.print_triggered)){
+    if(!bool(label.material_resolved) && !bool(label.material_bypass)) return {...labelPalette.detected, bypass:false, text:"Material"};
+    return {...(bool(label.material_ok)?labelPalette.materialOk:labelPalette.materialBad), bypass:bool(label.material_bypass)};
+  }
+  if(!bool(label.verify_triggered)){
+    const bypass = bool(label.material_bypass)||bool(label.print_bypass);
+    return {...(bool(label.print_ok)?labelPalette.printOk:labelPalette.printBad), bypass};
+  }
+  const bypass = bool(label.material_bypass)||bool(label.print_bypass)||bool(label.verify_bypass);
+  if(!bool(label.verify_resolved) && !bool(label.verify_bypass)){
+    return {...labelPalette.printOk, bypass, text:"Verify"};
+  }
+  return {...(bool(label.verify_ok)?labelPalette.verifyOk:labelPalette.verifyBad), bypass};
+}
 function labelClass(label){
-  if(bool(label.length_too_short)||bool(label.length_too_long)||bool(label.registration_late)||!bool(label.material_ok)||!bool(label.print_ok)||!bool(label.verify_ok)) return "bad";
-  if(bool(label.open)) return "open";
-  if(bool(label.control_seen)) return "ok";
-  return "warn";
+  return labelVisual(label).pill;
 }
 function stageText(label){
-  if(bool(label.open)) return "offen";
-  if(!bool(label.material_triggered)) return "erfasst";
-  if(!bool(label.print_triggered)) return "Material";
-  if(!bool(label.verify_triggered)) return "Druck";
-  if(!bool(label.control_seen)) return "Verify";
-  return "Kontrolle";
+  return labelVisual(label).text;
+}
+function labelStyle(label){
+  const v = labelVisual(label);
+  return `--label-bg:${v.bg};--label-fg:${v.fg};--label-border:${v.border};`;
 }
 function componentKind(kind){
   const k = String(kind || "detect");
@@ -263,7 +292,8 @@ function renderTrack(payload){
     const top = laneTop + l._lane*laneHeight + 7;
     const err = Number(l.print_error_mm);
     const errText = Number.isFinite(err) ? ` / ${fmt(err,3)} mm` : "";
-    html += `<div class="label-bar ${labelClass(l)} ${l._clippedLeft?"clipped-left":""} ${l._clippedRight?"clipped-right":""}" title="#${esc(l.no)} ${fmt(l._tail,1)}..${fmt(l._lead,1)} mm${esc(errText)}" style="left:${l._leftPx}px;width:${l._barWidthPx}px;top:${top}px">
+    const visual = labelVisual(l);
+    html += `<div class="label-bar ${labelClass(l)} ${visual.bypass?"bypass":""} ${bool(l.removal_pending)||bool(l.needs_removal)?"removal-blink":""} ${l._clippedLeft?"clipped-left":""} ${l._clippedRight?"clipped-right":""}" title="#${esc(l.no)} ${fmt(l._tail,1)}..${fmt(l._lead,1)} mm${esc(errText)}" style="left:${l._leftPx}px;width:${l._barWidthPx}px;top:${top}px;${labelStyle(l)}">
       <span class="label-id">#${esc(l.no)}</span>
       <span class="label-stage">${esc(stageText(l))}${esc(errText)}</span>
       <span class="label-mm">${fmt(l._tail,1)}..${fmt(l._lead,1)} mm</span>
@@ -314,11 +344,15 @@ function renderRows(payload){
   document.getElementById("history_count").textContent = String(hist.length);
   document.getElementById("history_rows").innerHTML = hist.length ? hist.map(item => {
     const p = item.payload || {};
-    const ok = bool(item.production_ok);
+    const qualityOk = p.quality_ok !== undefined ? bool(p.quality_ok) : (bool(item.material_ok) && bool(item.print_ok) && bool(item.verify_ok));
+    const pendingRemoval = bool(p.removal_pending) || bool(p.needs_removal);
+    const ok = qualityOk && !pendingRemoval && !bool(item.removed);
+    const resultClass = pendingRemoval ? "bad" : (ok ? "ok" : "warn");
+    const resultText = pendingRemoval ? "Entnehmen" : (ok ? "OK" : "Bypass");
     return `<tr>
       <td><b>#${esc(item.label_no)}</b><br/><span class="muted small">${esc(item.production_label||"")}</span></td>
       <td>${fmt(p.measured_length_mm,1)} mm<br/><span class="muted small">Start ${fmt(p.zero_mm,1)} / Exit ${fmt(p.exit_mm,1)}</span></td>
-      <td><span class="pill ${ok?"ok":"bad"}">${ok?"OK":"NOK"}</span><br/>Material ${Number(item.material_ok)} / Print ${Number(item.print_ok)} / Verify ${Number(item.verify_ok)} / Removed ${Number(item.removed)}</td>
+      <td><span class="pill ${resultClass}">${resultText}</span><br/>Material ${Number(item.material_ok)} / Print ${Number(item.print_ok)} / Verify ${Number(item.verify_ok)} / Removed ${Number(item.removed)}</td>
       <td>${flags(p)}<br/><span class="muted small">Printfehler ${fmt(p.print_error_mm,3)} mm / Korr. ${esc(p.registration_attempts ?? 0)}</span></td>
     </tr>`;
   }).join("") : '<tr><td colspan="4" class="muted">Noch keine abgeschlossenen Labels in der Datenbank.</td></tr>';
@@ -330,6 +364,8 @@ function render(payload){
   const fmtData = payload.format || {};
   const led = payload.led || {};
   const ledTest = esp.led_test || {};
+  const runtimeInfo = ((machine.info || {}).production_runtime || {});
+  const removalRequest = runtimeInfo.label_removal_request || {};
   const pill = document.getElementById("state_pill");
   pill.className = `pill ${payload.ok ? "ok" : "bad"}`;
   pill.textContent = machine.current_state_label || "unbekannt";
@@ -349,6 +385,7 @@ function render(payload){
     ["Soll", `${fmt(fmtData.label_length_mm,1)} mm +/- ${fmt(fmtData.label_tolerance_mm,1)}`],
     ["Aktiv", esc((payload.active_labels||[]).length)],
     ["Erfasst", esc(prod.label_start_seen ? "ja" : "nein")],
+    ["Entnahme", removalRequest.operator_message ? `<span class="pill bad">${esc(removalRequest.operator_message)}</span>` : "-"],
     ["Fehler", `${bool(esp.faults?.label_short)?"zu kurz ":""}${bool(esp.faults?.label_long)?"zu lang ":""}${bool(esp.faults?.sensor_fault)?"Sensor ":""}` || "-"]
   ]);
   kv("led_kv", [

@@ -197,6 +197,7 @@ PRODUCTION_RUNTIME_EVENT_TYPES = {
     "production_print_trigger",
     "production_print_resolved",
     "production_print_position_failed",
+    "label_removal_required",
 }
 PRODUCTION_START_MOTION_ENABLED = True
 PRODUCTION_START_BLOCK_CODE = "NAK_ProductionRuntimeNotReleased"
@@ -1626,6 +1627,9 @@ class MachineRuntime:
         if event_type == "label_complete":
             result = self._handle_label_complete(payload)
             return {"ok": True, "accepted": True, "event": event_type, "result": result}
+        if event_type == "label_removal_required":
+            result = self._handle_label_removal_required(payload)
+            return {"ok": True, "accepted": True, "event": event_type, "result": result}
         if event_type == "label_length_fault":
             result = self._handle_label_length_fault(payload)
             return {"ok": True, "accepted": True, "event": event_type, "result": result}
@@ -2477,6 +2481,52 @@ class MachineRuntime:
             "snapshot": snapshot,
         }
 
+    def _handle_label_removal_required(self, payload: dict[str, Any]) -> dict[str, Any]:
+        label_no = _safe_int(payload.get("label_no"), 0)
+        if label_no <= 0:
+            raise RuntimeError("label_no missing")
+        label = self._current_production_label()
+        if not label:
+            label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
+        compact_payload = {
+            "type": "label_removal_required",
+            "label_no": label_no,
+            "reason": str(payload.get("reason") or "quality_nok"),
+            "material_ok": _truthy(payload.get("material_ok", 1)),
+            "print_ok": _truthy(payload.get("print_ok", 1)),
+            "verify_ok": _truthy(payload.get("verify_ok", 1)),
+            "quality_ok": _truthy(payload.get("quality_ok", 0)),
+            "needs_removal": True,
+            "removal_pending": True,
+            "material_triggered": _truthy(payload.get("material_triggered", 0)),
+            "material_resolved": _truthy(payload.get("material_resolved", 0)),
+            "material_bypass": _truthy(payload.get("material_bypass", 0)),
+            "print_triggered": _truthy(payload.get("print_triggered", 0)),
+            "print_resolved": _truthy(payload.get("print_resolved", 0)),
+            "print_bypass": _truthy(payload.get("print_bypass", 0)),
+            "use_laser": _truthy(payload.get("use_laser", 0)),
+            "verify_triggered": _truthy(payload.get("verify_triggered", 0)),
+            "verify_resolved": _truthy(payload.get("verify_resolved", 0)),
+            "verify_bypass": _truthy(payload.get("verify_bypass", 0)),
+            "control_seen": _truthy(payload.get("control_seen", 0)),
+            "control_bypass": _truthy(payload.get("control_bypass", 0)),
+        }
+        snapshot = self._state_row()
+        info = dict(snapshot.get("info") or {})
+        info["last_label_payload"] = dict(compact_payload)
+        removal_action = self._pause_for_label_removal(
+            production_label=label,
+            label_no=label_no,
+            compact_payload=compact_payload,
+            snapshot=snapshot,
+            info=info,
+        )
+        return {
+            "production_label": label,
+            "label_no": label_no,
+            "removal_action": removal_action,
+        }
+
     def _handle_label_complete(self, payload: dict[str, Any]) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
         if label_no <= 0:
@@ -2484,11 +2534,31 @@ class MachineRuntime:
         label = self._current_production_label()
         if not label:
             label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
-        material_ok = bool(int(payload.get("material_ok", 1)))
-        print_ok = bool(int(payload.get("print_ok", 1)))
-        verify_ok = bool(int(payload.get("verify_ok", 1)))
-        removed = bool(int(payload.get("removed", 0)))
-        production_ok = bool(int(payload.get("production_ok", 1 if (material_ok and print_ok and verify_ok and not removed) else 0)))
+        material_ok = _truthy(payload.get("material_ok", 1))
+        print_ok = _truthy(payload.get("print_ok", 1))
+        verify_ok = _truthy(payload.get("verify_ok", 1))
+        removed = _truthy(payload.get("removed", 0))
+        material_bypass = _truthy(payload.get("material_bypass", 0))
+        print_bypass = _truthy(payload.get("print_bypass", 0))
+        verify_bypass = _truthy(payload.get("verify_bypass", 0))
+        control_bypass = _truthy(payload.get("control_bypass", 0))
+        control_seen = _truthy(payload.get("control_seen", 0))
+        material_triggered = _truthy(payload.get("material_triggered", 0))
+        material_resolved = _truthy(payload.get("material_resolved", 0))
+        print_triggered = _truthy(payload.get("print_triggered", 0))
+        print_resolved = _truthy(payload.get("print_resolved", 0))
+        verify_triggered = _truthy(payload.get("verify_triggered", 0))
+        verify_resolved = _truthy(payload.get("verify_resolved", 0))
+        quality_ok = _truthy(
+            payload.get("quality_ok", 1 if (material_ok and print_ok and verify_ok) else 0)
+        )
+        should_remove = _truthy(payload.get("should_remove", 1 if not quality_ok else 0))
+        removal_pending = _truthy(
+            payload.get("removal_pending", payload.get("needs_removal", 1 if should_remove and not removed else 0))
+        )
+        production_ok = _truthy(
+            payload.get("production_ok", 1 if (material_ok and print_ok and verify_ok and not removed) else 0)
+        )
         zero_mm = float(payload.get("zero_mm", 0.0) or 0.0)
         exit_mm = float(payload.get("exit_mm", 0.0) or 0.0)
         compact_payload = {
@@ -2500,11 +2570,28 @@ class MachineRuntime:
             "material_ok": material_ok,
             "print_ok": print_ok,
             "verify_ok": verify_ok,
+            "quality_ok": quality_ok,
             "removed": removed,
+            "should_remove": should_remove,
+            "needs_removal": removal_pending,
+            "removal_pending": removal_pending,
             "production_ok": production_ok,
-            "length_too_short": bool(payload.get("length_too_short")),
-            "length_too_long": bool(payload.get("length_too_long")),
-            "registration_late": bool(payload.get("registration_late")),
+            "material_triggered": material_triggered,
+            "material_resolved": material_resolved,
+            "material_bypass": material_bypass,
+            "print_triggered": print_triggered,
+            "print_resolved": print_resolved,
+            "print_bypass": print_bypass,
+            "use_laser": _truthy(payload.get("use_laser", 0)),
+            "verify_triggered": verify_triggered,
+            "verify_resolved": verify_resolved,
+            "verify_bypass": verify_bypass,
+            "control_seen": control_seen,
+            "control_matched": _truthy(payload.get("control_matched", 0)),
+            "control_bypass": control_bypass,
+            "length_too_short": _truthy(payload.get("length_too_short", 0)),
+            "length_too_long": _truthy(payload.get("length_too_long", 0)),
+            "registration_late": _truthy(payload.get("registration_late", 0)),
             "registration_attempts": _safe_int(payload.get("registration_attempts"), 0),
             "print_error_mm": _safe_float(payload.get("print_error_mm"), 0.0),
         }
@@ -2567,16 +2654,26 @@ class MachineRuntime:
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
         info["last_label_payload"] = dict(compact_payload)
-        self._write_state(
-            current_state=snapshot["current_state"],
-            requested_state=snapshot["requested_state"],
-            state_source=snapshot["state_source"],
-            warning_active=bool(snapshot["warning_active"]),
-            purge_active=bool(snapshot["purge_active"]),
-            production_label=label,
-            last_label_no=max(snapshot["last_label_no"], label_no),
-            info=info,
-        )
+        removal_action = None
+        if removal_pending:
+            removal_action = self._pause_for_label_removal(
+                production_label=label,
+                label_no=label_no,
+                compact_payload=compact_payload,
+                snapshot=snapshot,
+                info=info,
+            )
+        else:
+            self._write_state(
+                current_state=snapshot["current_state"],
+                requested_state=snapshot["requested_state"],
+                state_source=snapshot["state_source"],
+                warning_active=bool(snapshot["warning_active"]),
+                purge_active=bool(snapshot["purge_active"]),
+                production_label=label,
+                last_label_no=max(snapshot["last_label_no"], label_no),
+                info=info,
+            )
         self._record_event(
             "label_complete",
             "info",
@@ -2590,13 +2687,89 @@ class MachineRuntime:
                 "verify_ok": verify_ok,
                 "removed": removed,
                 "production_ok": production_ok,
+                "removal_pending": removal_pending,
+                "removal_action": removal_action,
             },
         )
         return {
             "production_label": label,
             "label_no": label_no,
             "packed": packed,
+            "removal_action": removal_action,
         }
+
+    def _pause_for_label_removal(
+        self,
+        *,
+        production_label: str,
+        label_no: int,
+        compact_payload: dict[str, Any],
+        snapshot: dict[str, Any],
+        info: dict[str, Any],
+    ) -> dict[str, Any]:
+        current_state = _safe_int(snapshot.get("current_state"), 1)
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        stop_result: dict[str, Any] = {
+            "ok": True,
+            "skipped": f"machine_state={current_state}",
+            "target_state": 7,
+        }
+        if current_state in (4, 5, 6) or bool(production_info.get("active")):
+            stop_result = self._stop_production_motion(
+                reason=f"label_removal_required:{label_no}",
+                target_state=7,
+            )
+
+        target_state = 7 if bool(stop_result.get("ok", False)) else 21
+        purge_active = bool(snapshot.get("purge_active"))
+        if target_state == 21:
+            purge_active = True
+            self.params.apply_device_value("MAS0028", "1", promote_default=True)
+            self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+
+        request = {
+            "label_no": int(label_no),
+            "production_label": str(production_label or ""),
+            "payload": dict(compact_payload),
+            "stop": dict(stop_result or {}),
+            "target_state": target_state,
+            "operator_message": f"Label {label_no} entnehmen",
+            "rewind_required": True,
+            "rewind_executed": False,
+            "ts": now_ts(),
+        }
+        production_info["active"] = False
+        production_info["paused"] = target_state == 7
+        production_info["pause_reason"] = f"label_removal_required:{label_no}"
+        production_info["label_removal_request"] = request
+        production_info["last_stop"] = dict(stop_result or {})
+        production_info.pop("pending_start", None)
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+
+        self.params.apply_device_value("MAS0001", str(target_state), promote_default=True)
+        self._notify_microtom("MAS0001", str(target_state), dedupe_key="machine:MAS0001")
+        self._sync_esp_machine_state(target_state, required=False)
+        self._write_state(
+            current_state=target_state,
+            requested_state=target_state,
+            state_source="label_removal_required",
+            warning_active=bool(snapshot.get("warning_active")),
+            purge_active=purge_active,
+            production_label=str(production_label or ""),
+            last_label_no=max(_safe_int(snapshot.get("last_label_no"), 0), int(label_no)),
+            info=info,
+        )
+        self._record_event(
+            "label_removal_requested",
+            "warning" if target_state == 7 else "error",
+            (
+                f"Label {label_no} muss entnommen werden; Produktion in Pause"
+                if target_state == 7
+                else f"Label {label_no} muss entnommen werden; Stop fehlgeschlagen"
+            ),
+            request,
+        )
+        return request
 
     def _state_row(self) -> dict[str, Any]:
         with self.db._conn() as c:

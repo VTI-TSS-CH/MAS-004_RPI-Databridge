@@ -140,7 +140,7 @@ MACHINE_BYPASS_PARAM_DEFS = (
         "esp_rw": "R",
         "dtype": "bool",
         "name": "Bypass Etiketten-Entnahmesensor",
-        "message": "Bei aktivem Bypass wird keine Entnahmekontrolle/Rueckspulung erzwungen.",
+        "message": "Bei aktivem Bypass wird der Entnahmesensor ignoriert; schlechte Labels fordern trotzdem eine Entnahmepause an.",
     },
     {
         "pkey": "MAP0067",

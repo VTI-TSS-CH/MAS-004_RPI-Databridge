@@ -3641,6 +3641,82 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(1, len(snapshot["labels"]))
         self.assertEqual(12, snapshot["labels"][0]["label_no"])
 
+    def test_bad_label_complete_pauses_for_operator_removal(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "reason": "label_removal_required:10"})
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+
+        result = runtime.handle_event(
+            {
+                "type": "label_complete",
+                "label_no": 10,
+                "material_ok": 1,
+                "print_ok": 1,
+                "verify_ok": 0,
+                "quality_ok": 0,
+                "removed": 0,
+                "should_remove": 1,
+                "removal_pending": 1,
+                "verify_bypass": 1,
+                "control_bypass": 1,
+                "zero_mm": 0.0,
+                "exit_mm": 1540.0,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        runtime._stop_production_motion.assert_called_once()
+        snapshot = runtime.snapshot()
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(7, snapshot["requested_state"])
+        production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertFalse(production_info["active"])
+        self.assertTrue(production_info["paused"])
+        self.assertEqual(10, production_info["label_removal_request"]["label_no"])
+        self.assertEqual("Label 10 entnehmen", production_info["label_removal_request"]["operator_message"])
+
+        packed = pack_label_status_word(
+            label_no=10,
+            material_ok=True,
+            print_ok=True,
+            verify_ok=False,
+            removed=False,
+            production_ok=False,
+        )
+        self.assertEqual(str(packed), self.params.get_effective_value("MAS0003"))
+        self.assertEqual("7", self.params.get_effective_value("MAS0001"))
+
+    def test_label_removal_required_event_pauses_before_label_complete(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "reason": "label_removal_required:10"})
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+
+        result = runtime.handle_event(
+            {
+                "type": "label_removal_required",
+                "label_no": 10,
+                "reason": "verify_bypass_nok",
+                "material_ok": 1,
+                "print_ok": 1,
+                "verify_ok": 0,
+                "quality_ok": 0,
+                "verify_triggered": 1,
+                "verify_resolved": 1,
+                "verify_bypass": 1,
+                "control_bypass": 1,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        runtime._stop_production_motion.assert_called_once()
+        snapshot = runtime.snapshot()
+        self.assertEqual(7, snapshot["current_state"])
+        production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertEqual(10, production_info["label_removal_request"]["label_no"])
+        self.assertEqual("verify_bypass_nok", production_info["label_removal_request"]["payload"]["reason"])
+
     def test_stale_label_complete_after_production_stop_is_not_forwarded(self):
         runtime = self.build_runtime()
         runtime._write_state(

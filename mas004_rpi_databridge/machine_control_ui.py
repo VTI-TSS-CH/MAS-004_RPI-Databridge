@@ -210,7 +210,7 @@ const bypassCards = [
   {{
     key:"MAP0038",
     title:"Etiketten-Entnahmesensor",
-    note:"Keine Entnahmekontrolle/Rueckspulung; Registerwerte bleiben trotzdem dokumentiert.",
+    note:"Sensor wird ignoriert; schlechte Labels fordern trotzdem eine Entnahmepause an.",
     fields:[]
   }}
 ];
