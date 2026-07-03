@@ -887,7 +887,14 @@ class MachineRuntime:
                     command_action = None
             if command_action:
                 allowed_actions = state_actions(snapshot["current_state"])
-                if not allowed_actions.get(command_action, False):
+                pending_hmi_command = info.get("pending_hmi_command")
+                setup_command_already_queued = (
+                    requested_command == 3
+                    and int(snapshot["current_state"] or 0) == 2
+                    and isinstance(pending_hmi_command, dict)
+                    and _safe_int(pending_hmi_command.get("command"), 0) == 3
+                )
+                if not allowed_actions.get(command_action, False) and not setup_command_already_queued:
                     self.logs.log(
                         "machine",
                         "warning",
@@ -986,6 +993,7 @@ class MachineRuntime:
         setup_info = dict(info.get("setup") or {})
         setup_command_active = requested_command == 3
         requested_state_override: int | None = None
+        setup_direct_pause_complete = False
         setup_command_ts = self._param_updated_ts("MAS0002") if setup_command_active else 0.0
         setup_seen_ts = float(setup_info.get("mas0002_setup_seen_ts") or 0.0)
         # On software start/deploy while MAS0002 is already 3, do not start a
@@ -1067,6 +1075,7 @@ class MachineRuntime:
                         self.params.apply_device_value("MAS0002", "0", promote_default=True)
                         requested_command = 0
                         requested_state_override = 7
+                        setup_direct_pause_complete = True
                         setup_info["completed_ts"] = now_ts()
                         setup_info["pause_pending"] = True
                         setup_info["pause_pending_ts"] = setup_info["completed_ts"]
@@ -1187,6 +1196,10 @@ class MachineRuntime:
             state_source = str(forced_source or "safety")
             requested_state = forced_state
             purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
+        elif setup_direct_pause_complete:
+            new_state = 7
+            state_source = "setup_complete_pause"
+            requested_state = 7
         else:
             new_state, state_source = settle_machine_state(
                 requested_state,
@@ -1200,6 +1213,11 @@ class MachineRuntime:
                 requested_state = 7
 
         previous_state = int(snapshot["current_state"] or 0)
+        if setup_direct_pause_complete:
+            try:
+                previous_state = int(self._state_row().get("current_state") or previous_state)
+            except Exception:
+                pass
         superseded_by_label_removal = self._label_removal_state_superseded_snapshot(snapshot, int(new_state or 0))
         if superseded_by_label_removal is not None:
             self.logs.log(
@@ -1437,9 +1455,9 @@ class MachineRuntime:
             self._record_event(
                 "state_change",
                 "info",
-                f"Maschinenstatus gewechselt: {snapshot['current_state']} -> {new_state} ({state_label(new_state)})",
+                f"Maschinenstatus gewechselt: {previous_state} -> {new_state} ({state_label(new_state)})",
                 {
-                    "from_state": snapshot["current_state"],
+                    "from_state": previous_state,
                     "to_state": new_state,
                     "source": state_source,
                     "purge_active": bool(purge_active),
@@ -1451,7 +1469,7 @@ class MachineRuntime:
                     "safety_status": dict(safety_status),
                 },
             )
-            self.logs.log("machine", "info", f"state {snapshot['current_state']} -> {new_state} ({state_source})")
+            self.logs.log("machine", "info", f"state {previous_state} -> {new_state} ({state_source})")
             if int(new_state or 0) != 5:
                 tto_state_sync = self._queue_tto_printer_state_sync(
                     int(new_state or 0),
@@ -2554,6 +2572,15 @@ class MachineRuntime:
         )
         queued_snapshot = self._state_row()
         queued_info = dict(queued_snapshot.get("info") or {})
+        queued_current_state = int(queued_snapshot.get("current_state") or request["from_state"])
+        queued_requested_state = int(request["target_state"])
+        queued_state_source = str(queued_snapshot.get("state_source") or "runtime")
+        if int(request["command"]) == 3 and int(request["from_state"]) == 9:
+            queued_current_state = 2
+            queued_requested_state = 3
+            queued_state_source = "setup_button_queued"
+            self.params.apply_device_value("MAS0001", "2", promote_default=True)
+            self._notify_microtom("MAS0001", "2", dedupe_key="machine:MAS0001")
         queued_info["pending_hmi_command"] = {
             "button": request["button"],
             "action": request["action"],
@@ -2564,9 +2591,9 @@ class MachineRuntime:
             "actor": actor,
         }
         self._write_state(
-            current_state=int(queued_snapshot.get("current_state") or request["from_state"]),
-            requested_state=int(request["target_state"]),
-            state_source=str(queued_snapshot.get("state_source") or "runtime"),
+            current_state=queued_current_state,
+            requested_state=queued_requested_state,
+            state_source=queued_state_source,
             warning_active=bool(queued_snapshot.get("warning_active")),
             purge_active=bool(queued_snapshot.get("purge_active")),
             production_label=str(queued_snapshot.get("production_label") or ""),

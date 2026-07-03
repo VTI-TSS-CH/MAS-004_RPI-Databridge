@@ -33,7 +33,8 @@ WICKLER_MOTION_ABORT_LOW_PERCENT = 8.0
 WICKLER_MOTION_ABORT_HIGH_PERCENT = 92.0
 WICKLER_STATE_SAFETY_TIMEOUT_S = 0.8
 SETUP_MEASURE_STATUS_READ_TIMEOUT_S = 4.0
-SETUP_MEASURE_STATUS_POLL_S = 0.5
+SETUP_MEASURE_STATUS_POLL_S = 1.0
+SETUP_MEASURE_STATUS_LOG_INTERVAL_S = 5.0
 SETUP_MEASURE_STATUS_MAX_CONSECUTIVE_ERRORS = 8
 WICKLER_DIAMETER_FINALIZE_ATTEMPTS = 5
 WICKLER_DIAMETER_FINALIZE_RETRY_BASE_S = 0.4
@@ -68,6 +69,7 @@ class SetupWicklerOrchestrator:
         self.defaults = SetupWicklerDefaults()
         self._wickler_offline_fault_counts: dict[str, int] = {}
         self._esp_status_log_state: dict[str, dict[str, Any]] = {}
+        self._setup_sync_dedupe = ValueDedupeStore(self.params.db)
         self.esp = EspPlcClient(
             cfg.esp_host,
             cfg.esp_port,
@@ -79,11 +81,14 @@ class SetupWicklerOrchestrator:
         if "STATUS?" not in upper:
             return True, str(response)
         signature = str(response or "").strip()[:160]
+        payload: dict[str, Any] = {}
+        last_error = ""
         try:
             text = str(response or "").strip()
             if text.upper().startswith("JSON "):
                 text = text[5:].strip()
             payload = json.loads(text or "{}")
+            last_error = str(payload.get("last_error") or "").strip()
             signature = "|".join(
                 str(payload.get(key, ""))
                 for key in (
@@ -93,14 +98,10 @@ class SetupWicklerOrchestrator:
                     "phase_name",
                     "azd_target_mm",
                     "move_commanded",
-                    "move_command_age_ms",
                     "wickler_run_line_active",
                     "reference_found",
                     "control_teach_started",
                     "control_teach_done",
-                    "logical_infeed_mm",
-                    "return_error_mm",
-                    "labels_measured",
                     "last_error",
                 )
             )
@@ -119,7 +120,12 @@ class SetupWicklerOrchestrator:
         state = self._esp_status_log_state.get(line) or {}
         last_signature = str(state.get("signature") or "")
         last_ts = float(state.get("ts") or 0.0)
-        if signature != last_signature or (now - last_ts) >= 2.0:
+        force_log = bool(payload.get("completed")) or bool(last_error)
+        if (
+            force_log
+            or signature != last_signature
+            or (now - last_ts) >= SETUP_MEASURE_STATUS_LOG_INTERVAL_S
+        ):
             self._esp_status_log_state[line] = {"signature": signature, "ts": now}
             return True, summary
         return False, summary
@@ -277,7 +283,10 @@ class SetupWicklerOrchestrator:
             value = str(self.params.get_effective_value(key) or "").strip()
             if not value:
                 continue
+            if self._setup_sync_dedupe.is_duplicate("esp-setup-sync", key, value):
+                continue
             self._esp(f"SYNC {key}={value}", read_timeout_s=5.0)
+            self._setup_sync_dedupe.remember("esp-setup-sync", key, value)
 
     def _configure_motor3(self, speed_mm_s: float, ramp_mm_s2: float) -> None:
         speed = max(1.0, abs(float(speed_mm_s)))
@@ -1771,22 +1780,21 @@ class SetupWicklerOrchestrator:
                 "apply": apply_reply,
             }
 
-        # The SmartWickler HTTP server can briefly restart/rebind around
-        # persistent diameter writes. Finish/apply sequentially so a transient
-        # refusal on one device does not collide with the other device's write.
-        for client in clients:
-            role = self._wickler_role(client)
-            try:
-                result = _finish_one(client)
-                results[role] = result
-                self.logs.log(
-                    "raspi",
-                    "info",
-                    f"setup diameter applied {role}: {result['candidate_diameter_mm']:.1f}mm "
-                    f"after {travel_mm:.1f}mm absolute travel",
-                )
-            except Exception as exc:
-                errors.append(f"{role}: {exc}")
+        with ThreadPoolExecutor(max_workers=max(1, len(clients))) as executor:
+            futures = {executor.submit(_finish_one, client): self._wickler_role(client) for client in clients}
+            for future in as_completed(futures):
+                role = futures[future]
+                try:
+                    result = future.result()
+                    results[role] = result
+                    self.logs.log(
+                        "raspi",
+                        "info",
+                        f"setup diameter applied {role}: {result['candidate_diameter_mm']:.1f}mm "
+                        f"after {travel_mm:.1f}mm absolute travel",
+                    )
+                except Exception as exc:
+                    errors.append(f"{role}: {exc}")
         if errors:
             raise RuntimeError("Wickler diameter learning failed: " + "; ".join(errors))
         return results

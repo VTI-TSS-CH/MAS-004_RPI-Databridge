@@ -271,7 +271,7 @@ class MachineRuntimeTests(unittest.TestCase):
             first = runtime.refresh()
             controller.run.assert_called_once()
             self.assertTrue(callable(controller.run.call_args.kwargs.get("wait_for_format_axes")))
-        self.assertEqual(6, first["current_state"])
+        self.assertEqual(7, first["current_state"])
         self.assertEqual(7, first["requested_state"])
         self.assertEqual(0, first["info"]["requested_command"])
         self.assertEqual("0", self.params.get_effective_value("MAS0002"))
@@ -282,6 +282,36 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(7, second["current_state"])
         self.assertEqual(7, second["requested_state"])
         self.assertEqual(9600, second["info"]["format_plan"]["process"]["led_strip_first_led_distance_tenths_mm"])
+
+    def test_virtual_setup_button_sets_transition_status_immediately(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=9,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+
+        result = runtime.press_virtual_button("setup")
+
+        self.assertTrue(result["ok"], result)
+        snapshot = runtime.snapshot()
+        self.assertEqual(2, snapshot["current_state"])
+        self.assertEqual(3, snapshot["requested_state"])
+        self.assertEqual("2", self.params.get_effective_value("MAS0001"))
+        self.assertEqual("3", self.params.get_effective_value("MAS0002"))
+
+        with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
+            controller_cls.return_value.run.return_value = {"ok": True}
+            finished = runtime.refresh()
+
+        controller_cls.return_value.run.assert_called_once()
+        self.assertEqual(7, finished["current_state"])
+        self.assertEqual(7, finished["requested_state"])
 
     def test_setup_starts_wickler_before_format_axes_finish(self):
         runtime = self.build_runtime()
