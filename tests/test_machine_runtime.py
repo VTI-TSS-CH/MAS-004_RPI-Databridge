@@ -991,6 +991,42 @@ class MachineRuntimeTests(unittest.TestCase):
         events = runtime._recent_events(limit=3)
         self.assertEqual("production_fault_ignored", events[0]["event_type"])
 
+    def test_wickler_ready_timeout_after_failed_ready_attempt_is_not_ignored(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": True,
+                    "first_print_wickler_ready_attempt": {
+                        "label_no": 1,
+                        "ts": now_ts(),
+                        "wickler_takt_ok": True,
+                        "esp_ready_ok": False,
+                    },
+                }
+            },
+        )
+
+        result = runtime.handle_event(
+            {
+                "type": "production_fault",
+                "fault": "wickler_indexed_ready_timeout",
+                "label_no": 1,
+                "timeout_ms": 30000,
+            }
+        )
+
+        self.assertNotIn("ignored", result["result"])
+        events = runtime._recent_events(limit=3)
+        self.assertEqual("production_fault", events[0]["event_type"])
+
     def test_production_param_sync_includes_simulation_values_only_when_bypass_active(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))

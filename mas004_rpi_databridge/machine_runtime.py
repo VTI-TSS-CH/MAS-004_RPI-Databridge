@@ -2047,7 +2047,7 @@ class MachineRuntime:
                 continue
             if _safe_float(item.get("ts"), 0.0) < cutoff:
                 continue
-            if bool(item.get("wickler_takt_ok")):
+            if bool(item.get("esp_ready_ok")):
                 return True
         return False
 
