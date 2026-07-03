@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 sys.modules.setdefault("ping3", types.SimpleNamespace(ping=lambda *args, **kwargs: 1.0))
 
+from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.webui import MULTIPART_AVAILABLE, build_app
 
 
@@ -36,12 +37,54 @@ class MachineSetupAuthTests(unittest.TestCase):
         if config_overrides:
             cfg.update(config_overrides)
         cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        self._cfg = cfg
         return TestClient(build_app(str(cfg_path)), raise_server_exceptions=raise_server_exceptions)
 
     def tearDown(self):
         tmp = getattr(self, "_tmp", None)
         if tmp is not None:
             tmp.cleanup()
+
+    def insert_map_param(
+        self,
+        pkey: str,
+        default_v: str,
+        *,
+        min_v: float | None = None,
+        max_v: float | None = None,
+    ) -> None:
+        db = DB(self._cfg["db_path"])
+        with db._conn() as c:
+            c.execute(
+                """INSERT INTO params(
+                    pkey,ptype,pid,min_v,max_v,default_v,unit,rw,esp_rw,dtype,name,format_relevant,
+                    message,possible_cause,effects,remedy,updated_ts
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(pkey) DO UPDATE SET
+                    min_v=excluded.min_v,
+                    max_v=excluded.max_v,
+                    default_v=excluded.default_v,
+                    updated_ts=excluded.updated_ts""",
+                (
+                    pkey,
+                    "MAP",
+                    pkey[-4:],
+                    min_v,
+                    max_v,
+                    default_v,
+                    "1/10mm",
+                    "W",
+                    "R",
+                    "uint16",
+                    pkey,
+                    "YES",
+                    pkey,
+                    "",
+                    "",
+                    "",
+                    now_ts(),
+                ),
+            )
 
     def test_machine_setup_requires_login(self):
         client = self.build_client()
@@ -306,6 +349,38 @@ class MachineSetupAuthTests(unittest.TestCase):
         legacy = client.get("/ui/motors", follow_redirects=False)
         self.assertEqual(303, legacy.status_code)
         self.assertEqual("/ui/machine-setup/motors", legacy.headers.get("location"))
+
+    def test_visualization_marker_edit_stores_print_distance_default(self):
+        client = self.build_client()
+        login = client.post(
+            "/ui/machine-setup/login",
+            json={
+                "username": "Admin",
+                "password": "VideojetMAS004!",
+                "next": "/ui/machine-setup/visualization",
+            },
+        )
+        self.assertEqual(200, login.status_code)
+        self.insert_map_param("MAP0016", "0", min_v=0, max_v=1)
+        self.insert_map_param("MAP0004", "100", min_v=0, max_v=2500)
+        self.insert_map_param("MAP0006", "0", min_v=-50, max_v=50)
+        self.insert_map_param("MAP0019", "6000", min_v=3000, max_v=10000)
+
+        api = client.post("/api/machine/production-visualization/component", json={"key": "print", "mm": 607.0})
+
+        self.assertEqual(200, api.status_code)
+        saved = api.json()["saved"]
+        self.assertEqual("MAP0019", saved["pkey"])
+        self.assertEqual("5970", saved["value"])
+        db = DB(self._cfg["db_path"])
+        with db._conn() as c:
+            row = c.execute(
+                """SELECT p.default_v, v.value
+                   FROM params p
+                   LEFT JOIN param_values v ON v.pkey=p.pkey
+                   WHERE p.pkey='MAP0019'"""
+            ).fetchone()
+        self.assertEqual(("5970", "5970"), tuple(row))
 
     def test_settings_ui_and_config_api_expose_light_curtain_auto_reset(self):
         client = self.build_client(config_overrides={"light_curtain_auto_reset_enabled": False})

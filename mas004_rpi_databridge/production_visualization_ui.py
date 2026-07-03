@@ -41,16 +41,18 @@ def build_production_visualization_ui_html(nav_html: str) -> str:
     .track-head{display:grid;grid-template-columns:190px 1fr 100px;gap:10px;align-items:center;margin-bottom:8px}
     .track-note{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
     .track-shell{position:relative;border:1px solid var(--line);border-radius:8px;background:#f8fbff;overflow:auto;min-height:520px;max-height:780px}
-    .track{position:relative;min-width:1180px;background:linear-gradient(180deg,#fbfdff 0,#fbfdff 196px,#f3f7fc 196px,#f3f7fc 100%)}
+    .track{position:relative;min-width:1180px;background:linear-gradient(180deg,#fbfdff 0,#fbfdff 282px,#f3f7fc 282px,#f3f7fc 100%)}
     .track-ruler{position:absolute;left:0;right:0;top:28px;height:28px;border-top:1px solid #cfd9e6;border-bottom:1px solid #e2e9f2;background:#fff}
     .tick{position:absolute;top:28px;width:1px;height:28px;background:#cbd6e4}
     .tick.major{background:#8fa2b8}
     .tick-label{position:absolute;top:60px;transform:translateX(-50%);font-size:11px;color:#50637a;white-space:nowrap}
-    .rail{position:absolute;left:0;right:0;top:164px;height:18px;border-radius:999px;background:#d8e2ef;border:1px solid #c6d4e4}
+    .rail{position:absolute;left:0;right:0;top:226px;height:18px;border-radius:999px;background:#d8e2ef;border:1px solid #c6d4e4}
     .rail:after{content:"";position:absolute;right:10px;top:4px;width:8px;height:8px;border-top:2px solid #63758b;border-right:2px solid #63758b;transform:rotate(45deg)}
-    .component-line{position:absolute;top:92px;width:2px;background:#9cadc4;opacity:.72}
-    .component-pin{position:absolute;top:156px;transform:translateX(-50%);width:10px;height:10px;border-radius:999px;background:#fff;border:2px solid currentColor;z-index:4}
+    .component-line{position:absolute;top:94px;width:2px;background:#9cadc4;opacity:.72}
+    .component-pin{position:absolute;top:218px;transform:translateX(-50%);width:10px;height:10px;border-radius:999px;background:#fff;border:2px solid currentColor;z-index:4}
     .component-tag{position:absolute;text-align:center;background:#fff;border:1px solid var(--line);border-radius:7px;padding:4px 7px;font-size:11px;font-weight:800;color:#334155;line-height:1.15;box-shadow:0 1px 2px rgba(15,23,42,.08);z-index:5;white-space:normal;overflow:hidden}
+    .component-tag.editable{cursor:pointer;border-color:#9bb9d9}
+    .component-tag.editable:hover{box-shadow:0 2px 6px rgba(0,94,184,.18);border-color:#6fa0d4}
     .component-mm{display:block;margin-top:2px;font-size:10px;font-weight:600;color:var(--muted);white-space:nowrap}
     .component-detect{color:#475569}.component-material{color:var(--cyan)}.component-print{color:var(--blue)}.component-verify{color:var(--violet)}.component-control{color:var(--orange)}.component-exit{color:var(--red)}
     .lane{position:absolute;left:0;right:0;height:44px;border-top:1px solid #e2e9f2;background:rgba(255,255,255,.46)}
@@ -67,7 +69,7 @@ def build_production_visualization_ui_html(nav_html: str) -> str:
     .label-bar.bad{background:#ffc9c5;color:#8a1c15;border-color:#efaaa4}
     .label-bar.open{background:#dbeafe;color:#08345f;border-color:#8dbce8}
     .label-bar.clipped-left{border-left-style:dashed}.label-bar.clipped-right{border-right-style:dashed}
-    .track-empty{position:absolute;left:18px;right:18px;top:220px;border:1px dashed #cbd6e4;border-radius:8px;padding:16px;color:var(--muted);background:#fff}
+    .track-empty{position:absolute;left:18px;right:18px;top:304px;border:1px dashed #cbd6e4;border-radius:8px;padding:16px;color:var(--muted);background:#fff}
     .legend-dot{width:9px;height:9px;border-radius:999px;background:currentColor;display:inline-block}
     .panel{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin-top:12px}
     .table-wrap{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#fbfdff}
@@ -214,7 +216,7 @@ function renderTrack(payload){
     laneEnds[lane] = l._rightPx;
   });
   const laneCount = Math.max(2, laneEnds.length || 1);
-  const laneTop = 216;
+  const laneTop = 286;
   const laneHeight = 46;
   const heightPx = Math.max(430, laneTop + laneCount * laneHeight + 34);
   track.style.height = `${heightPx}px`;
@@ -235,16 +237,20 @@ function renderTrack(payload){
     const kind = componentKind(c.kind);
     const x = clampPx(toPx(c.mm || 0));
     const label = String(c.label || "");
-    const tagWidth = Math.min(148, Math.max(82, label.length * 7 + 34));
+    const tagWidth = Math.min(158, Math.max(92, label.length * 7 + 42));
     const tagLeft = clampPx(x - tagWidth / 2, 4, Math.max(4, widthPx - tagWidth - 4));
-    const row = componentRows.findIndex(end => tagLeft > end + 8);
-    const useRow = row >= 0 ? row : componentRows.length;
+    let useRow = 0;
+    while(componentRows[useRow] !== undefined && tagLeft <= componentRows[useRow] + 12){
+      useRow += 1;
+    }
     componentRows[useRow] = tagLeft + tagWidth;
-    const tagTop = 88 + useRow * 26;
+    const tagTop = 76 + useRow * 34;
+    const editable = bool(c.editable);
+    const title = editable ? `${label}: ${fmt(c.mm,1)} mm / ${esc(c.param || "")}` : `${label}: ${fmt(c.mm,1)} mm`;
     html += `
       <div class="component-line component-${kind}" style="left:${x}px;height:${heightPx-92}px"></div>
       <div class="component-pin component-${kind}" style="left:${x}px"></div>
-      <div class="component-tag component-${kind}" style="left:${tagLeft}px;top:${tagTop}px;width:${tagWidth}px">${esc(c.label)}<span class="component-mm">${fmt(c.mm,1)} mm</span></div>`;
+      <div class="component-tag component-${kind} ${editable?"editable":""}" data-key="${esc(c.key || "")}" data-mm="${fmt(c.mm,1)}" data-label="${esc(label)}" title="${title}" style="left:${tagLeft}px;top:${tagTop}px;width:${tagWidth}px">${esc(c.label)}<span class="component-mm">${fmt(c.mm,1)} mm</span></div>`;
   });
   for(let r=0;r<laneCount;r++){
     const top = laneTop + r*laneHeight;
@@ -264,6 +270,35 @@ function renderTrack(payload){
     </div>`;
   });
   track.innerHTML = html;
+}
+let savingComponent = false;
+async function editComponentMarker(tag){
+  if(savingComponent || !tag) return;
+  const key = tag.dataset.key || "";
+  const label = tag.dataset.label || key;
+  const current = tag.dataset.mm || "0.0";
+  const raw = window.prompt(`${label} Position in mm`, current);
+  if(raw === null) return;
+  const mm = Number(String(raw).trim().replace(",", "."));
+  if(!Number.isFinite(mm)){
+    window.alert("Ungueltiger mm-Wert");
+    return;
+  }
+  savingComponent = true;
+  tag.style.opacity = ".62";
+  try{
+    const payload = await postApi("/api/machine/production-visualization/component", {key, mm});
+    render(payload);
+    const pill = document.getElementById("state_pill");
+    const saved = payload.saved || {};
+    pill.className = "pill ok";
+    pill.textContent = `${saved.label || label} ${fmt(saved.mm ?? mm,1)} mm gespeichert`;
+  }catch(err){
+    window.alert(err.message || String(err));
+  }finally{
+    savingComponent = false;
+    tag.style.opacity = "";
+  }
 }
 function renderRows(payload){
   const labels = payload.active_labels || [];
@@ -381,6 +416,10 @@ async function loadAll(){
     pill.textContent = err.message;
   }
 }
+document.getElementById("track").addEventListener("dblclick", ev => {
+  const tag = ev.target.closest(".component-tag.editable");
+  if(tag) editComponentMarker(tag);
+});
 function schedule(){
   if(timer) clearInterval(timer);
   timer = setInterval(()=>{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }, 1500);

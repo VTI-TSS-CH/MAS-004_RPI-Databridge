@@ -649,6 +649,11 @@ class MachineLedTestReq(BaseModel):
     duration_ms: int = 0
 
 
+class ProductionVisualizationComponentReq(BaseModel):
+    key: str
+    mm: float
+
+
 class Motor3CalibrationApplyReq(BaseModel):
     actual_travel_mm: float
     actual_label_length_mm: Optional[float] = None
@@ -1802,6 +1807,122 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except Exception:
             return int(default)
 
+    def update_param_workbook_defaults(cfg2: Settings, pkey: str, value: str) -> list[str]:
+        updated: list[str] = []
+        ptype = str(pkey or "")[:3].upper()
+        pid = normalize_pid(ptype, str(pkey or "")[3:])
+        paths: list[str] = []
+        for candidate in (
+            getattr(cfg2, "master_params_xlsx_path", ""),
+            REPO_MASTER_PARAMS_XLSX,
+            WORKSPACE_MASTER_PARAMS_XLSX,
+            FALLBACK_REPO_MASTER_PARAMS_XLSX,
+        ):
+            if candidate and candidate not in paths:
+                paths.append(candidate)
+        try:
+            from openpyxl import load_workbook  # type: ignore
+        except Exception:
+            return updated
+        for path in paths:
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                wb = load_workbook(path)
+                changed = False
+                for ws in wb.worksheets:
+                    for row in ws.iter_rows():
+                        if len(row) < 5:
+                            continue
+                        row_ptype = str(row[0].value or "").strip().upper()
+                        row_pid = str(row[1].value or "").strip().zfill(4)
+                        if row_ptype == ptype and row_pid == pid:
+                            row[4].value = str(value)
+                            changed = True
+                            break
+                    if changed:
+                        break
+                if changed:
+                    wb.save(path)
+                    updated.append(path)
+            except Exception as exc:
+                try:
+                    logs.log(
+                        "machine",
+                        "WARN",
+                        f"Master-Excel Default fuer {pkey} konnte nicht aktualisiert werden: {path}: {exc}",
+                    )
+                except Exception:
+                    pass
+        return updated
+
+    def set_visualization_component_position(cfg2: Settings, body: ProductionVisualizationComponentReq) -> dict[str, Any]:
+        key = str(body.key or "").strip().lower()
+        try:
+            mm = float(body.mm)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Ungueltiger mm-Wert") from exc
+        if not math.isfinite(mm):
+            raise HTTPException(status_code=400, detail="Ungueltiger mm-Wert")
+        values = get_param_value_map()
+        use_laser = str(values.get("MAP0016", "0")).strip() not in ("", "0", "false", "False", "FALSE")
+        print_key = "MAP0018" if use_laser else "MAP0019"
+        recipes: dict[str, dict[str, Any]] = {
+            "material": {"param": "MAP0017", "offset_params": ("MAP0011",), "label": "Materialkamera"},
+            "print": {"param": print_key, "offset_params": ("MAP0004", "MAP0006"), "label": "Druck"},
+            "verify": {"param": "MAP0020", "offset_params": ("MAP0012",), "label": "Verifikation"},
+            "control": {"param": "MAP0021", "offset_params": (), "label": "Entnahmesensor"},
+            "led_start": {"param": "MAP0066", "offset_params": (), "label": "LED 1"},
+            "led_end": {"param": "MAP0071", "offset_params": ("MAP0066",), "label": "LED Ende"},
+            "exit": {"param": "MAP0021", "offset_mm": 50.0, "label": "Bahn verlassen"},
+        }
+        recipe = recipes.get(key)
+        if not recipe:
+            raise HTTPException(status_code=400, detail=f"Marker {key!r} ist nicht editierbar")
+        offset_tenths = 0
+        for offset_key in recipe.get("offset_params", ()):
+            sign = -1 if str(offset_key).startswith("-") else 1
+            actual_key = str(offset_key).lstrip("-")
+            offset_tenths += sign * safe_param_int(values, actual_key, 0)
+        if "offset_mm" in recipe:
+            offset_tenths += int(round(float(recipe.get("offset_mm") or 0.0) * 10.0))
+        value_tenths = int(round(mm * 10.0)) - offset_tenths
+        param_key = str(recipe["param"])
+        meta = params.get_meta(param_key)
+        if not meta:
+            raise HTTPException(status_code=400, detail=f"{param_key} ist unbekannt")
+        min_v = meta.get("min_v")
+        max_v = meta.get("max_v")
+        if min_v is not None and value_tenths < int(float(min_v)):
+            raise HTTPException(status_code=400, detail=f"{param_key} waere unter Minimum {min_v}")
+        if max_v is not None and value_tenths > int(float(max_v)):
+            raise HTTPException(status_code=400, detail=f"{param_key} waere ueber Maximum {max_v}")
+        ok, msg = params.set_value(param_key, str(value_tenths), actor="machine-setup-ui")
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+        workbook_paths = update_param_workbook_defaults(cfg2, param_key, str(value_tenths))
+        try:
+            logs.log(
+                "machine",
+                "INFO",
+                (
+                    f"Visualisierung Marker {recipe.get('label')} gespeichert: "
+                    f"{mm:.1f} mm -> {param_key}={value_tenths}"
+                ),
+            )
+        except Exception:
+            pass
+        payload = get_production_visualization_payload()
+        payload["saved"] = {
+            "key": key,
+            "label": recipe.get("label"),
+            "mm": mm,
+            "pkey": param_key,
+            "value": str(value_tenths),
+            "workbooks": workbook_paths,
+        }
+        return payload
+
     def parse_esp_json_reply(reply: str, *, command: str = "") -> dict[str, Any]:
         text = str(reply or "").strip()
         if text.upper().startswith("JSON "):
@@ -1929,14 +2050,14 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         led_offset_mm = safe_param_float(values, "MAP0066", 8000.0) / 10.0
         led_length_mm = max(1.0, min(520.0, safe_param_float(values, "MAP0071", 5200.0) / 10.0))
         components = [
-            {"key": "detect", "kind": "detect", "label": "Erfassung", "mm": 0.0},
-            {"key": "material", "kind": "material", "label": "Materialkamera", "mm": material_mm},
-            {"key": "print", "kind": "print", "label": "Druck", "mm": print_mm, "param": print_key},
-            {"key": "verify", "kind": "verify", "label": "Verifikation", "mm": verify_mm},
-            {"key": "control", "kind": "control", "label": "Entnahmesensor", "mm": control_mm},
-            {"key": "exit", "kind": "exit", "label": "Bahn verlassen", "mm": exit_mm},
-            {"key": "led_start", "kind": "detect", "label": "LED 1", "mm": led_offset_mm},
-            {"key": "led_end", "kind": "detect", "label": "LED Ende", "mm": led_offset_mm + led_length_mm},
+            {"key": "detect", "kind": "detect", "label": "Erfassung", "mm": 0.0, "editable": False},
+            {"key": "material", "kind": "material", "label": "Materialkamera", "mm": material_mm, "editable": True, "param": "MAP0017"},
+            {"key": "print", "kind": "print", "label": "Druck", "mm": print_mm, "editable": True, "param": print_key},
+            {"key": "verify", "kind": "verify", "label": "Verifikation", "mm": verify_mm, "editable": True, "param": "MAP0020"},
+            {"key": "control", "kind": "control", "label": "Entnahmesensor", "mm": control_mm, "editable": True, "param": "MAP0021"},
+            {"key": "exit", "kind": "exit", "label": "Bahn verlassen", "mm": exit_mm, "editable": True, "param": "MAP0021"},
+            {"key": "led_start", "kind": "detect", "label": "LED 1", "mm": led_offset_mm, "editable": True, "param": "MAP0066"},
+            {"key": "led_end", "kind": "detect", "label": "LED Ende", "mm": led_offset_mm + led_length_mm, "editable": True, "param": "MAP0071"},
         ]
         length_mm = max(item["mm"] for item in components) + 120.0
         return {
@@ -3749,6 +3870,12 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
         return get_production_visualization_payload()
+
+    @app.post("/api/machine/production-visualization/component")
+    def api_machine_production_visualization_component(request: Request, body: ProductionVisualizationComponentReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return set_visualization_component_position(cfg2, body)
 
     @app.get("/api/machine/mae0048-diagnostics")
     def api_machine_mae0048_diagnostics(request: Request):
