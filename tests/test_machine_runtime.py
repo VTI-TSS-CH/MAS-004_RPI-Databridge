@@ -3349,6 +3349,81 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(any(item.get("step") == "wait_esp_endpoint_before_reset_retry" for item in result["steps"]))
         self.assertTrue(any(item.get("step") == "wait_esp_endpoint_after_reset_pulse" for item in result["steps"]))
 
+    def test_esp_endpoint_wait_uses_broker_ping(self):
+        self.cfg.esp_simulation = False
+        self.cfg.esp_host = "192.168.2.101"
+        self.cfg.esp_port = 3010
+        runtime = self.build_runtime()
+        calls: list[tuple[str, int, float]] = []
+
+        def fake_broker(host: str, port: int, timeout_s: float):
+            calls.append((host, port, timeout_s))
+            return {
+                "warmup_reply": "PONG",
+                "connected": True,
+                "broker_supported": True,
+                "queue_depth": 0,
+                "reconnect_count": 1,
+            }
+
+        with patch(
+            "mas004_rpi_databridge.machine_runtime.start_esp_command_broker",
+            side_effect=fake_broker,
+        ):
+            result = runtime._wait_for_esp_command_endpoint(timeout_s=2.0, poll_s=0.05, source="test")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([("192.168.2.101", 3010, 0.2)], calls)
+        self.assertEqual("PONG", result["attempts"][-1]["reply"])
+
+    def test_failed_safety_reset_records_failure_event(self):
+        runtime = self.build_runtime()
+
+        with patch.object(runtime, "_pulse_esp_reset_output", return_value={"ok": True}), patch.object(
+            runtime,
+            "_wait_for_esp_command_endpoint",
+            return_value={"ok": False, "error": "broker ping timeout"},
+        ):
+            result = runtime._perform_safety_reset({"reasons": []}, now_ts())
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("broker ping timeout", result["error"])
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT severity,message,payload_json FROM machine_events WHERE event_type='safety_reset' "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("warning", row[0])
+        self.assertEqual("Safety-Reset fehlgeschlagen", row[1])
+        self.assertIn("broker ping timeout", row[2])
+
+    def test_failed_safety_reset_diagnostics_are_kept_in_state_21(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="safety_reset_failed",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "safety": {
+                    "latched": False,
+                    "phase": "failed",
+                    "last_reasons": [],
+                    "last_reset": {"ok": False, "error": "broker ping timeout"},
+                }
+            },
+        )
+
+        snapshot = runtime.refresh()
+
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertEqual("failed", snapshot["info"]["safety"]["phase"])
+        self.assertEqual("broker ping timeout", snapshot["info"]["safety"]["last_reset"]["error"])
+
     def test_virtual_stop_button_is_not_reset_in_safety_context(self):
         runtime = self.build_runtime()
         runtime._write_state(

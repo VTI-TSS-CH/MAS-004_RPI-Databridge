@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.device_bridge import DeviceBridge
-from mas004_rpi_databridge.device_clients import EspPlcClient
+from mas004_rpi_databridge.device_clients import EspPlcClient, start_esp_command_broker
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.io_master import IoStore
@@ -839,7 +838,11 @@ class MachineRuntime:
         else:
             if requested_command:
                 clear_motor_setup_manual_lock(self.db, reason=f"machine_command:{requested_command}")
-            if safety_info.get("phase") not in (SAFETY_PHASE_READY,):
+            safety_phase = str(safety_info.get("phase") or "")
+            keep_failed_reset_diagnostics = (
+                safety_phase == SAFETY_PHASE_FAILED and int(snapshot["current_state"] or 0) == 21
+            )
+            if safety_phase not in (SAFETY_PHASE_READY,) and not keep_failed_reset_diagnostics:
                 auto_reset_fields = {
                     key: value
                     for key, value in safety_info.items()
@@ -6759,14 +6762,27 @@ class MachineRuntime:
             "initial_reasons": list(safety_status.get("reasons") or []),
             "steps": [],
         }
+
+        def finish_failure(error: str) -> dict[str, Any]:
+            result["ok"] = False
+            result["error"] = str(error or "Safety reset failed")
+            result["finished_ts"] = now_ts()
+            result["duration_s"] = round(max(0.0, float(result["finished_ts"]) - float(result["started_ts"])), 3)
+            self.logs.log("machine", "warning", f"Safety-Reset fehlgeschlagen: {result['error']}")
+            self._record_event(
+                "safety_reset",
+                "warning",
+                "Safety-Reset fehlgeschlagen",
+                result,
+            )
+            return result
+
         try:
             laser_interlock = self._ensure_laser_reset_interlock_clear(source="safety_reset")
             result["laser_reset_interlock"] = laser_interlock
         except Exception as exc:
             result["steps"].append({"step": "verify_laser_system_ready", "ok": False, "error": str(exc)})
-            result["error"] = str(exc)
-            result["finished_ts"] = now_ts()
-            return result
+            return finish_failure(str(exc))
 
         self.logs.log("machine", "info", "safety reset requested")
         self.params.apply_device_value("MAS0001", "8", promote_default=True)
@@ -6808,8 +6824,7 @@ class MachineRuntime:
             except Exception as exc:
                 result["steps"].append({"step": "esp_q0_2_reset_pulse", "attempt": attempt_no, "ok": False, "error": str(exc)})
                 if attempt_no >= 2:
-                    result["error"] = f"ESP reset pulse failed: {exc}"
-                    return result
+                    return finish_failure(f"ESP reset pulse failed: {exc}")
                 wait_retry = self._wait_for_esp_command_endpoint(
                     timeout_s=ESP_RESET_ENDPOINT_RETRY_TIMEOUT_S,
                     poll_s=ESP_RESET_ENDPOINT_POLL_S,
@@ -6817,12 +6832,10 @@ class MachineRuntime:
                 )
                 result["steps"].append({"step": "wait_esp_endpoint_before_reset_retry", **wait_retry})
                 if not wait_retry.get("ok"):
-                    result["error"] = wait_retry.get("error") or f"ESP reset pulse failed: {exc}"
-                    return result
+                    return finish_failure(wait_retry.get("error") or f"ESP reset pulse failed: {exc}")
 
         if not reset_pulsed:
-            result["error"] = "ESP reset pulse failed"
-            return result
+            return finish_failure("ESP reset pulse failed")
 
         wait_after_reset = self._wait_for_esp_command_endpoint(
             timeout_s=ESP_RESET_ENDPOINT_RECOVERY_TIMEOUT_S,
@@ -6831,8 +6844,9 @@ class MachineRuntime:
         )
         result["steps"].append({"step": "wait_esp_endpoint_after_reset_pulse", **wait_after_reset})
         if not wait_after_reset.get("ok"):
-            result["error"] = wait_after_reset.get("error") or "ESP command endpoint did not recover after reset pulse"
-            return result
+            return finish_failure(
+                wait_after_reset.get("error") or "ESP command endpoint did not recover after reset pulse"
+            )
 
         refreshed = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
         result["steps"].append({"step": "refresh_esp_io", "ok": bool(refreshed.get("ok", True)), "detail": refreshed})
@@ -6843,22 +6857,21 @@ class MachineRuntime:
             result["steps"].append(
                 {"step": "verify_safety_inputs_high_ok", "ok": False, "reasons": refreshed_blocking_reasons}
             )
-            result["error"] = "ESP safety input still LOW/not OK after reset sequence: " + ",".join(refreshed_blocking_reasons)
-            return result
+            return finish_failure(
+                "ESP safety input still LOW/not OK after reset sequence: " + ",".join(refreshed_blocking_reasons)
+            )
         result["steps"].append({"step": "verify_safety_inputs_high_ok", "ok": True})
 
         if bool((result.get("laser_reset_interlock") or {}).get("laser_reset_required")):
             laser_reset = self._perform_laser_safety_reset_and_start()
             result["steps"].append({"step": "laser_safety_reset_and_start", **laser_reset})
             if not laser_reset.get("ok"):
-                result["error"] = laser_reset.get("error") or "Laser safety reset/start sequence failed"
-                return result
+                return finish_failure(laser_reset.get("error") or "Laser safety reset/start sequence failed")
 
         process_reset = self._reset_esp_process_runtime()
         result["steps"].append({"step": "esp_process_reset", **process_reset})
         if not process_reset.get("ok"):
-            result["error"] = process_reset.get("error") or "ESP process reset failed"
-            return result
+            return finish_failure(process_reset.get("error") or "ESP process reset failed")
 
         # Clear the soft Purge latch as soon as the safety inputs and ESP process
         # latches are quiet. Motion recovery can still fail afterwards, but that
@@ -7195,13 +7208,29 @@ class MachineRuntime:
             attempt_no += 1
             attempt_ts = now_ts()
             try:
-                with socket.create_connection(
-                    (str(result["host"]), int(result["port"])),
-                    timeout=min(0.75, poll_interval_s),
-                ):
-                    pass
+                diag = start_esp_command_broker(
+                    str(result["host"]),
+                    int(result["port"]),
+                    timeout_s=max(0.2, min(0.75, poll_interval_s)),
+                )
+                reply = str(diag.get("warmup_reply") or "").strip()
+                if reply.upper() != "PONG":
+                    raise RuntimeError(str(diag.get("warmup_error") or f"unexpected reply: {reply!r}"))
                 finished = now_ts()
-                result["attempts"].append({"attempt": attempt_no, "ts": attempt_ts, "ok": True})
+                result["attempts"].append(
+                    {
+                        "attempt": attempt_no,
+                        "ts": attempt_ts,
+                        "ok": True,
+                        "reply": reply,
+                        "broker": {
+                            "connected": bool(diag.get("connected")),
+                            "broker_supported": diag.get("broker_supported"),
+                            "queue_depth": diag.get("queue_depth"),
+                            "reconnect_count": diag.get("reconnect_count"),
+                        },
+                    }
+                )
                 result.update(
                     {
                         "ok": True,
