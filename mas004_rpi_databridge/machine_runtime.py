@@ -5205,6 +5205,105 @@ class MachineRuntime:
         except Exception as exc:
             return {"ok": False, "labels": labels, "command": command, "error": repr(exc)}
 
+    def _resume_production_after_label_removal(
+        self,
+        *,
+        param_map: dict[str, str],
+        plan: dict[str, Any],
+        state_info: dict[str, Any],
+        previous_sync_values: dict[str, str],
+        production_info: dict[str, Any],
+        started_ts: float,
+    ) -> dict[str, Any]:
+        labels = self._pending_label_removal_labels(production_info)
+        if not labels:
+            return {"ok": False, "error": "label_removal_resume_without_labels", "started_ts": started_ts}
+        label_text = ",".join(str(label) for label in labels)
+        laser_ready = self._ensure_laser_ready_for_production_start(param_map)
+        self._sync_esp_machine_state(5, required=True)
+        tto_printer = self._sync_tto_printer_for_machine_state(
+            5,
+            param_map,
+            reason="production_resume_label_removal",
+            required=True,
+        )
+        sync_info = self._sync_production_params_to_esp(
+            param_map,
+            previous_values=previous_sync_values,
+        )
+        self._production_esp_retry("PROCESS WICKLER CANCEL", read_timeout_s=2.0, attempts=2, priority=True)
+        self._production_esp_retry("PROCESS PROFILE STOP", read_timeout_s=2.0, attempts=2, priority=True)
+        self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2, priority=True)
+        self._production_esp_retry(
+            "MOTOR 3 SET "
+            f"speed_mm_s={float(plan['speed_mm_s']):.3f} "
+            f"accel_mm_s2={float(plan['ramp_mm_s2']):.3f} "
+            f"decel_mm_s2={float(plan['ramp_mm_s2']):.3f}",
+            read_timeout_s=5.0,
+            attempts=2,
+            priority=True,
+        )
+        wicklers = self._prepare_production_wicklers_continuous(plan)
+        quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
+        command = (
+            "PROCESS PRODUCTION RESUME_REMOVED "
+            f"LABELS={label_text} "
+            f"SPEED_MM_S={float(plan['speed_mm_s']):.3f} "
+            f"RAMP_MM_S2={float(plan['ramp_mm_s2']):.3f}"
+        )
+        if quick_band_break_bypass:
+            command += " BAND_BREAK_BYPASS=1"
+        response = self._production_esp(command, read_timeout_s=8.0, priority=True)
+        response_text = str(response or "").strip()
+        if response_text.upper().startswith("JSON "):
+            try:
+                response_payload = json.loads(response_text.removeprefix("JSON ").strip())
+            except Exception:
+                response_payload = {}
+            if response_payload and not bool(response_payload.get("ok", True)):
+                raise RuntimeError(f"PROCESS PRODUCTION RESUME_REMOVED rejected: {response_text[:240]}")
+        time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
+        post_start_wicklers = self._production_wickler_verifications(
+            timeout_s=2.0,
+            require_indexed_mode=False,
+        )
+        if not post_start_wicklers.get("ok"):
+            stop_result = self._stop_production_motion(
+                reason="production_label_removal_resume_wickler_verify_failed",
+                target_state=7,
+            )
+            post_start_wicklers["stop"] = stop_result
+            raise RuntimeError(
+                "Wickler nach Entnahme-Resume nicht stabil: "
+                + "; ".join(str(error) for error in post_start_wicklers.get("errors") or ["unknown"])
+            )
+        result = {
+            "ok": True,
+            "resume": "label_removal",
+            "labels_expected_removed": labels,
+            "started_ts": started_ts,
+            "finished_ts": now_ts(),
+            "synced_state": 5,
+            "synced_params": list(sync_info.get("synced") or []),
+            "skipped_synced_params": list(sync_info.get("skipped") or []),
+            "synced_param_values": dict(sync_info.get("values") or {}),
+            "plan": plan,
+            "band_break_bypass": quick_band_break_bypass,
+            "wicklers": wicklers,
+            "post_start_wicklers": post_start_wicklers,
+            "laser_ready": laser_ready,
+            "tto_printer": tto_printer,
+            "command": command,
+            "response": response,
+        }
+        self._record_event(
+            "production_motion_resumed",
+            "info",
+            f"Produktionslauf nach Labelentnahme fortgesetzt: Labels {label_text} werden als entfernt erwartet",
+            result,
+        )
+        return result
+
     def _start_production_motion(self, param_map: dict[str, str], format_plan: dict[str, Any]) -> dict[str, Any]:
         started_ts = now_ts()
         if not _PRODUCTION_MOTION_LOCK.acquire(blocking=False):
@@ -5215,7 +5314,18 @@ class MachineRuntime:
             state_info = dict(self._state_row().get("info") or {})
             production_info_before_start = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
             previous_sync_values = self._production_esp_sync_reference(state_info)
-            removal_confirmation = self._mark_pending_label_removals_on_esp(production_info_before_start)
+            pending_removal_labels = self._pending_label_removal_labels(production_info_before_start)
+            if pending_removal_labels and str(production_info_before_start.get("pause_reason") or "").startswith(
+                "label_removal_required:"
+            ):
+                return self._resume_production_after_label_removal(
+                    param_map=param_map,
+                    plan=plan,
+                    state_info=state_info,
+                    previous_sync_values=previous_sync_values,
+                    production_info=production_info_before_start,
+                    started_ts=started_ts,
+                )
             laser_ready = self._ensure_laser_ready_for_production_start(param_map)
             self._sync_esp_machine_state(5, required=True)
             synced_state = 5
@@ -5309,7 +5419,6 @@ class MachineRuntime:
                 "post_start_wicklers": post_start_wicklers,
                 "laser_ready": laser_ready,
                 "tto_printer": tto_printer,
-                "removal_confirmation": removal_confirmation,
                 "command": start_command,
                 "response": response,
             }
