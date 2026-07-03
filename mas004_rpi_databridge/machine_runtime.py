@@ -229,6 +229,7 @@ PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES = 3
 PRODUCTION_ESP_MONITOR_INTERVAL_S = 0.5
 PRODUCTION_ESP_MONITOR_COMM_MAX_MISSES = 3
 PRODUCTION_ESP_FIRST_READY_FALLBACK_INTERVAL_S = 0.75
+PRODUCTION_CONTROLLED_PAUSE_TIMEOUT_S = 120.0
 PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0001",
     "MAP0002",
@@ -1278,7 +1279,7 @@ class MachineRuntime:
             controlled_pause_stop = False
             if light_curtain_motion_pause_due:
                 stop_reason = "light_curtain_pause"
-                controlled_pause_stop = True
+                controlled_pause_stop = previous_state == 5 or bool(production_info.get("active"))
             elif pause_active and int(new_state or 0) in (6, 7):
                 stop_reason = "pause:" + (",".join(pause_reasons) or "unknown")
                 controlled_pause_stop = True
@@ -1290,10 +1291,16 @@ class MachineRuntime:
             ):
                 stop_reason = "operator_pause"
                 controlled_pause_stop = True
-            stop_result = self._stop_production_motion(
-                reason=stop_reason,
-                target_state=int(new_state or 0),
-            )
+            if controlled_pause_stop:
+                stop_result = self._pause_production_motion_after_print(
+                    reason=stop_reason,
+                    target_state=int(new_state or 0),
+                )
+            else:
+                stop_result = self._stop_production_motion(
+                    reason=stop_reason,
+                    target_state=int(new_state or 0),
+                )
             production_info["last_stop"] = stop_result
             production_info["active"] = False
             production_info.pop("pending_start", None)
@@ -1338,6 +1345,9 @@ class MachineRuntime:
                 production_info.pop("paused_ts", None)
                 production_info.pop("pause_reason", None)
                 production_info.pop("resume_from_state", None)
+                production_info.pop("label_removal_request", None)
+                production_info.pop("label_removal_requests", None)
+                production_info.pop("label_removal_pending_labels", None)
             else:
                 self.logs.log("machine", "error", f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
                 self._record_event(
@@ -1969,6 +1979,29 @@ class MachineRuntime:
                 "info",
                 f"Druck abgeschlossen {mode}: Label {label_no}",
                 dict(payload or {}),
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_pause_reached":
+            label_no = _safe_int(payload.get("after_label_no"), 0)
+            reason = str(payload.get("reason") or "pause_after_print")
+            labels_printed = _safe_int(payload.get("labels_printed"), 0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Produktionspause erreicht nach Label {label_no}: {reason}, gedruckt {labels_printed}",
+                dict(payload or {}),
+                dedupe_window_s=30.0,
+            )
+            return {"ok": True, "accepted": True, "event": event_type, **event_result}
+        if event_type == "production_resume":
+            next_label_no = _safe_int(payload.get("next_label_no"), 0)
+            speed = _safe_float(payload.get("speed_mm_s"), 0.0)
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Produktionslauf nahtlos fortgesetzt: naechstes Drucklabel {next_label_no}, {speed:.1f}mm/s",
+                dict(payload or {}),
+                dedupe_window_s=30.0,
             )
             return {"ok": True, "accepted": True, "event": event_type, **event_result}
         if event_type == "production_print_position_failed":
@@ -3002,7 +3035,7 @@ class MachineRuntime:
             "target_state": 7,
         }
         if current_state in (4, 5, 6) or bool(production_info.get("active")):
-            stop_result = self._stop_production_motion(
+            stop_result = self._pause_production_motion_after_print(
                 reason=f"label_removal_required:{label_no}",
                 target_state=7,
             )
@@ -5205,6 +5238,101 @@ class MachineRuntime:
         except Exception as exc:
             return {"ok": False, "labels": labels, "command": command, "error": repr(exc)}
 
+    def _resume_production_after_pause(
+        self,
+        *,
+        param_map: dict[str, str],
+        plan: dict[str, Any],
+        state_info: dict[str, Any],
+        previous_sync_values: dict[str, str],
+        production_info: dict[str, Any],
+        started_ts: float,
+    ) -> dict[str, Any]:
+        pause_reason = str(production_info.get("pause_reason") or "operator_pause")
+        laser_ready = self._ensure_laser_ready_for_production_start(param_map)
+        self._sync_esp_machine_state(5, required=True)
+        tto_printer = self._sync_tto_printer_for_machine_state(
+            5,
+            param_map,
+            reason="production_resume_pause",
+            required=True,
+        )
+        sync_info = self._sync_production_params_to_esp(
+            param_map,
+            previous_values=previous_sync_values,
+        )
+        self._production_esp_retry("PROCESS WICKLER CANCEL", read_timeout_s=2.0, attempts=2, priority=True)
+        self._production_esp_retry("PROCESS PROFILE STOP", read_timeout_s=2.0, attempts=2, priority=True)
+        self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2, priority=True)
+        self._production_esp_retry(
+            "MOTOR 3 SET "
+            f"speed_mm_s={float(plan['speed_mm_s']):.3f} "
+            f"accel_mm_s2={float(plan['ramp_mm_s2']):.3f} "
+            f"decel_mm_s2={float(plan['ramp_mm_s2']):.3f}",
+            read_timeout_s=5.0,
+            attempts=2,
+            priority=True,
+        )
+        wicklers = self._prepare_production_wicklers_continuous(plan)
+        quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
+        command = (
+            "PROCESS PRODUCTION RESUME "
+            f"SPEED_MM_S={float(plan['speed_mm_s']):.3f} "
+            f"RAMP_MM_S2={float(plan['ramp_mm_s2']):.3f}"
+        )
+        if quick_band_break_bypass:
+            command += " BAND_BREAK_BYPASS=1"
+        response = self._production_esp(command, read_timeout_s=8.0, priority=True)
+        response_text = str(response or "").strip()
+        if response_text.upper().startswith("JSON "):
+            try:
+                response_payload = json.loads(response_text.removeprefix("JSON ").strip())
+            except Exception:
+                response_payload = {}
+            if response_payload and not bool(response_payload.get("ok", True)):
+                raise RuntimeError(f"PROCESS PRODUCTION RESUME rejected: {response_text[:240]}")
+        time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
+        post_start_wicklers = self._production_wickler_verifications(
+            timeout_s=2.0,
+            require_indexed_mode=False,
+        )
+        if not post_start_wicklers.get("ok"):
+            stop_result = self._stop_production_motion(
+                reason="production_pause_resume_wickler_verify_failed",
+                target_state=7,
+            )
+            post_start_wicklers["stop"] = stop_result
+            raise RuntimeError(
+                "Wickler nach Pause-Resume nicht stabil: "
+                + "; ".join(str(error) for error in post_start_wicklers.get("errors") or ["unknown"])
+            )
+        result = {
+            "ok": True,
+            "resume": "pause",
+            "pause_reason": pause_reason,
+            "started_ts": started_ts,
+            "finished_ts": now_ts(),
+            "synced_state": 5,
+            "synced_params": list(sync_info.get("synced") or []),
+            "skipped_synced_params": list(sync_info.get("skipped") or []),
+            "synced_param_values": dict(sync_info.get("values") or {}),
+            "plan": plan,
+            "band_break_bypass": quick_band_break_bypass,
+            "wicklers": wicklers,
+            "post_start_wicklers": post_start_wicklers,
+            "laser_ready": laser_ready,
+            "tto_printer": tto_printer,
+            "command": command,
+            "response": response,
+        }
+        self._record_event(
+            "production_motion_resumed",
+            "info",
+            f"Produktionslauf nach Pause nahtlos fortgesetzt ({pause_reason})",
+            result,
+        )
+        return result
+
     def _resume_production_after_label_removal(
         self,
         *,
@@ -5315,10 +5443,20 @@ class MachineRuntime:
             production_info_before_start = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
             previous_sync_values = self._production_esp_sync_reference(state_info)
             pending_removal_labels = self._pending_label_removal_labels(production_info_before_start)
+            pause_reason_before_start = str(production_info_before_start.get("pause_reason") or "")
             if pending_removal_labels and str(production_info_before_start.get("pause_reason") or "").startswith(
                 "label_removal_required:"
             ):
                 return self._resume_production_after_label_removal(
+                    param_map=param_map,
+                    plan=plan,
+                    state_info=state_info,
+                    previous_sync_values=previous_sync_values,
+                    production_info=production_info_before_start,
+                    started_ts=started_ts,
+                )
+            if bool(production_info_before_start.get("paused")) and pause_reason_before_start:
+                return self._resume_production_after_pause(
                     param_map=param_map,
                     plan=plan,
                     state_info=state_info,
@@ -5524,6 +5662,131 @@ class MachineRuntime:
             "Motor 3 Produktionsnullpunkt nach SET_POSITION_MM=0 nicht lesbar: "
             f"status_attempts={status_attempts}"
         )
+
+    def _controlled_pause_reason_token(self, reason: str) -> str:
+        token = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(reason or "pause_after_print").strip())
+        return (token or "pause_after_print")[:80]
+
+    def _pause_production_motion_after_print(self, *, reason: str, target_state: int) -> dict[str, Any]:
+        started_ts = now_ts()
+        token = self._controlled_pause_reason_token(reason)
+        commands: list[dict[str, Any]] = []
+        monitor_snapshots: list[dict[str, Any]] = []
+        try:
+            response = self._production_esp(
+                f"PROCESS PRODUCTION PAUSE_AFTER_PRINT REASON={token}",
+                read_timeout_s=2.0,
+                priority=True,
+            )
+            commands.append({"command": "PROCESS PRODUCTION PAUSE_AFTER_PRINT", "ok": True, "response": response})
+        except Exception as exc:
+            commands.append({"command": "PROCESS PRODUCTION PAUSE_AFTER_PRINT", "ok": False, "error": repr(exc)})
+            fallback_stop = self._stop_production_motion(
+                reason=f"controlled_pause_after_print_request_failed:{reason}",
+                target_state=21,
+            )
+            result = {
+                "ok": False,
+                "reason": reason,
+                "target_state": int(target_state or 0),
+                "controlled": True,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "commands": commands,
+                "error": repr(exc),
+                "fallback_stop": fallback_stop,
+            }
+            self._record_event("production_pause_after_print_failed", "warning", f"Pause nach Druck nicht angefordert ({reason})", result)
+            return result
+
+        deadline = now_ts() + PRODUCTION_CONTROLLED_PAUSE_TIMEOUT_S
+        monitor_ok = False
+        fallback_stop: dict[str, Any] | None = None
+        while now_ts() < deadline:
+            try:
+                diag = self._read_production_monitor_diag()
+                snapshot = {
+                    "ts": now_ts(),
+                    "ok": True,
+                    "active": bool(diag.get("active")),
+                    "running": bool(diag.get("running")),
+                    "phase": diag.get("phase"),
+                    "reason": diag.get("reason"),
+                    "last_error": diag.get("last_error"),
+                    "label_no": diag.get("label_no"),
+                    "labels_printed": diag.get("labels_printed"),
+                }
+                monitor_snapshots.append(snapshot)
+                if not snapshot["active"] and not snapshot["running"]:
+                    monitor_ok = True
+                    break
+            except Exception as exc:
+                monitor_snapshots.append({"ts": now_ts(), "ok": False, "error": repr(exc)})
+            time.sleep(0.2)
+
+        wicklers: list[dict[str, Any]] = []
+        tto_printer: dict[str, Any] = {"ok": True, "skipped": "pause_not_confirmed"}
+        if monitor_ok:
+            cleanup_commands = (
+                ("PROCESS WICKLER CANCEL", 1.0),
+                ("PROCESS INDEXED STOP", 1.0),
+                ("PROCESS PROFILE STOP", 1.0),
+            )
+            for command, timeout_s in cleanup_commands:
+                try:
+                    commands.append(
+                        {
+                            "command": command,
+                            "ok": True,
+                            "critical": False,
+                            "response": self._production_esp(command, read_timeout_s=timeout_s),
+                        }
+                    )
+                except Exception as exc:
+                    commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
+
+            wicklers = self._set_production_wicklers_idle(target_state=target_state)
+            self._sync_esp_machine_state(int(target_state or 0), required=False)
+            tto_printer = self._queue_tto_printer_state_sync(
+                int(target_state or 0),
+                self._param_values_by_prefix(("MAP", "TTS")),
+                reason=f"production_pause_after_print:{reason}",
+            )
+        else:
+            fallback_stop = self._stop_production_motion(
+                reason=f"controlled_pause_after_print_timeout:{reason}",
+                target_state=21,
+            )
+        wicklers_ok = all(item.get("ok") for item in wicklers)
+        ok = bool(monitor_ok) and (wicklers_ok or int(target_state or 0) in (6, 7))
+        result = {
+            "ok": ok,
+            "reason": reason,
+            "target_state": int(target_state or 0),
+            "controlled": True,
+            "started_ts": started_ts,
+            "finished_ts": now_ts(),
+            "timeout_s": PRODUCTION_CONTROLLED_PAUSE_TIMEOUT_S,
+            "monitor_ok": monitor_ok,
+            "monitor_snapshots": monitor_snapshots[-12:],
+            "commands": commands,
+            "wicklers_ok": wicklers_ok,
+            "wicklers": wicklers,
+            "tto_printer": tto_printer,
+        }
+        if fallback_stop is not None:
+            result["fallback_stop"] = fallback_stop
+        self._record_event(
+            "production_motion_paused",
+            "info" if ok else "warning",
+            (
+                f"Produktionslauf kontrolliert nach Druck pausiert ({reason})"
+                if ok
+                else f"Produktionslauf-Pause nach Druck nicht bestaetigt ({reason})"
+            ),
+            result,
+        )
+        return result
 
     def _stop_production_motion(self, *, reason: str, target_state: int) -> dict[str, Any]:
         started_ts = now_ts()

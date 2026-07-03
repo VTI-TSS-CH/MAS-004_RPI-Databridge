@@ -694,7 +694,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("0", self.params.get_effective_value("MAE0025"))
         self.assertEqual(["MAE0025"], first["info"]["production_runtime"]["pending_start"]["cleared_pause_errors"])
 
-    def test_pause_from_production_stops_production_motion(self):
+    def test_pause_from_production_requests_controlled_pause_after_print(self):
         runtime = self.build_runtime()
         runtime._write_state(
             current_state=5,
@@ -711,12 +711,13 @@ class MachineRuntimeTests(unittest.TestCase):
 
         with patch.object(
             runtime,
-            "_stop_production_motion",
+            "_pause_production_motion_after_print",
             return_value={"ok": True, "target_state": 6},
-        ) as stop_motion:
+        ) as pause_motion, patch.object(runtime, "_stop_production_motion") as stop_motion:
             snapshot = runtime.refresh()
 
-        stop_motion.assert_called_once()
+        pause_motion.assert_called_once_with(reason="operator_pause", target_state=6)
+        stop_motion.assert_not_called()
         self.assertEqual(6, snapshot["current_state"])
         self.assertFalse(snapshot["info"]["production_runtime"]["active"])
         self.assertTrue(snapshot["info"]["production_runtime"]["paused"])
@@ -736,28 +737,32 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         ok, msg = self.params.set_value("MAS0002", "7", actor="microtom")
         self.assertTrue(ok, msg)
-        stop_result = {
+        pause_result = {
             "ok": True,
             "target_state": 6,
-            "motion_safe": True,
             "wicklers_ok": False,
-            "accepted_wickler_warning": True,
+            "controlled": True,
         }
 
-        with patch.object(runtime, "_stop_production_motion", return_value=stop_result) as stop_motion, patch.object(
+        with patch.object(
+            runtime,
+            "_pause_production_motion_after_print",
+            return_value=pause_result,
+        ) as pause_motion, patch.object(runtime, "_stop_production_motion") as stop_motion, patch.object(
             runtime.production_logs,
             "handle_param_change",
         ) as log_change:
             snapshot = runtime.refresh()
 
-        stop_motion.assert_called_once()
+        pause_motion.assert_called_once_with(reason="operator_pause", target_state=6)
+        stop_motion.assert_not_called()
         log_change.assert_not_called()
         self.assertEqual(6, snapshot["current_state"])
         self.assertEqual(7, snapshot["requested_state"])
         self.assertFalse(snapshot["purge_active"])
         self.assertEqual("0", self.params.get_effective_value("MAS0028"))
         self.assertTrue(snapshot["info"]["production_runtime"]["paused"])
-        self.assertEqual(stop_result, snapshot["info"]["production_runtime"]["last_stop"])
+        self.assertEqual(pause_result, snapshot["info"]["production_runtime"]["last_stop"])
 
     def test_production_stop_verifies_motor3_standstill_after_runner_stop(self):
         runtime = self.build_runtime()
@@ -848,6 +853,53 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertFalse(result["wicklers_ok"])
         self.assertTrue(result["accepted_wickler_warning"])
 
+    def test_controlled_pause_after_print_does_not_hard_stop_runner(self):
+        runtime = self.build_runtime()
+        calls: list[str] = []
+        monitor_replies = [
+            {
+                "active": True,
+                "running": True,
+                "phase": "registering",
+                "reason": "",
+                "label_no": 12,
+                "labels_printed": 11,
+            },
+            {
+                "active": False,
+                "running": False,
+                "phase": "idle",
+                "reason": "operator_pause",
+                "label_no": 0,
+                "labels_printed": 12,
+            },
+        ]
+
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
+            calls.append(command)
+            if command.startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"):
+                return 'JSON {"ok":true,"pause_requested":true}'
+            return "ACK"
+
+        with patch.object(runtime, "_production_esp", side_effect=fake_esp), patch.object(
+            runtime,
+            "_read_production_monitor_diag",
+            side_effect=monitor_replies,
+        ), patch.object(runtime, "_set_production_wicklers_idle", return_value=[{"ok": True}]), patch.object(
+            runtime, "_sync_esp_machine_state"
+        ) as sync_state, patch.object(
+            runtime, "_queue_tto_printer_state_sync", return_value={"ok": True, "skipped": "test"}
+        ), patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+            result = runtime._pause_production_motion_after_print(reason="operator_pause", target_state=7)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["controlled"])
+        self.assertTrue(result["monitor_ok"])
+        self.assertTrue(calls[0].startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"))
+        self.assertNotIn("PROCESS PRODUCTION STOP", calls)
+        self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
+        sync_state.assert_called_once_with(7, required=False)
+
     def test_failed_production_stop_forces_fault_state(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -865,7 +917,7 @@ class MachineRuntimeTests(unittest.TestCase):
 
         with patch.object(
             runtime,
-            "_stop_production_motion",
+            "_pause_production_motion_after_print",
             return_value={"ok": False, "target_state": 6, "motor3_stop": {"ok": False}},
         ):
             snapshot = runtime.refresh()
@@ -895,6 +947,38 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("MOTOR 3 SET_POSITION_MM=0.000", result["motor3_zero"]["command"])
         self.assertEqual(5, result["synced_state"])
         self.assertTrue(result["post_start_wicklers"]["ok"], result)
+
+    def test_production_start_after_operator_pause_uses_resume_without_reset(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="operator_pause",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=12,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "operator_pause",
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"ok": True, "reason": "operator_pause", "finished_ts": now_ts() - 1.0},
+                }
+            },
+        )
+        param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
+
+        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+            result = runtime._start_production_motion(param_map, format_plan)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("pause", result["resume"])
+        self.assertEqual("operator_pause", result["pause_reason"])
+        self.assertIn("PROCESS PRODUCTION RESUME SPEED_MM_S=100.000 RAMP_MM_S2=300.000", result["command"])
+        self.assertNotIn("motor3_zero", result)
 
     def test_production_start_after_label_removal_uses_resume_without_reset(self):
         runtime = self.build_runtime()
@@ -3097,15 +3181,21 @@ class MachineRuntimeTests(unittest.TestCase):
         with (
             patch.object(runtime, "_pulse_esp_reset_output", return_value=None) as pulse,
             patch.object(runtime, "_perform_safety_reset", return_value={"ok": True, "steps": []}) as full_reset,
-            patch.object(runtime, "_stop_production_motion", return_value={"ok": True, "target_state": 7}) as stop_motion,
+            patch.object(
+                runtime,
+                "_pause_production_motion_after_print",
+                return_value={"ok": True, "target_state": 7, "controlled": True},
+            ) as pause_motion,
+            patch.object(runtime, "_stop_production_motion") as stop_motion,
         ):
             snapshot = runtime.refresh()
 
         pulse.assert_called_once()
         full_reset.assert_not_called()
-        stop_motion.assert_called_once()
-        self.assertEqual("light_curtain_pause", stop_motion.call_args.kwargs["reason"])
-        self.assertEqual(7, stop_motion.call_args.kwargs["target_state"])
+        pause_motion.assert_called_once()
+        stop_motion.assert_not_called()
+        self.assertEqual("light_curtain_pause", pause_motion.call_args.kwargs["reason"])
+        self.assertEqual(7, pause_motion.call_args.kwargs["target_state"])
         self.assertEqual(7, snapshot["current_state"])
         self.assertEqual(7, snapshot["requested_state"])
         self.assertEqual("light_curtain_pause", runtime._state_row()["state_source"])
@@ -3987,7 +4077,9 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_bad_label_complete_pauses_for_operator_removal(self):
         runtime = self.build_runtime()
         self.mark_production_active(runtime)
-        runtime._stop_production_motion = Mock(return_value={"ok": True, "reason": "label_removal_required:10"})
+        runtime._pause_production_motion_after_print = Mock(
+            return_value={"ok": True, "reason": "label_removal_required:10", "controlled": True}
+        )
         runtime._sync_esp_machine_state = Mock(return_value=True)
 
         result = runtime.handle_event(
@@ -4009,7 +4101,10 @@ class MachineRuntimeTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
-        runtime._stop_production_motion.assert_called_once()
+        runtime._pause_production_motion_after_print.assert_called_once_with(
+            reason="label_removal_required:10",
+            target_state=7,
+        )
         snapshot = runtime.snapshot()
         self.assertEqual(7, snapshot["current_state"])
         self.assertEqual(7, snapshot["requested_state"])
@@ -4033,7 +4128,9 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_label_removal_required_event_pauses_before_label_complete(self):
         runtime = self.build_runtime()
         self.mark_production_active(runtime)
-        runtime._stop_production_motion = Mock(return_value={"ok": True, "reason": "label_removal_required:10"})
+        runtime._pause_production_motion_after_print = Mock(
+            return_value={"ok": True, "reason": "label_removal_required:10", "controlled": True}
+        )
         runtime._sync_esp_machine_state = Mock(return_value=True)
 
         result = runtime.handle_event(
@@ -4053,7 +4150,10 @@ class MachineRuntimeTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
-        runtime._stop_production_motion.assert_called_once()
+        runtime._pause_production_motion_after_print.assert_called_once_with(
+            reason="label_removal_required:10",
+            target_state=7,
+        )
         snapshot = runtime.snapshot()
         self.assertEqual(7, snapshot["current_state"])
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
