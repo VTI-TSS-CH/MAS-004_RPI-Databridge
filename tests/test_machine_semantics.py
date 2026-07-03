@@ -5,6 +5,7 @@ from mas004_rpi_databridge.machine_semantics import (
     button_led_plan,
     button_to_command,
     command_to_target_state,
+    lamp_outputs_for_state,
     pack_label_status_word,
     parse_button_mask,
     settle_machine_state,
@@ -122,6 +123,18 @@ class MachineSemanticsTests(unittest.TestCase):
 
             self.assertEqual(state, new_state)
             self.assertEqual("requested", source)
+
+    def test_transition_states_show_steady_magenta_status_lamp(self):
+        for state in (2, 4, 6, 8, 10, 12, 14, 16, 18):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    {"red": 1, "green": 0, "blue": 1},
+                    lamp_outputs_for_state(state, warning_active=False, ts=0.0),
+                )
+                self.assertEqual(
+                    {"red": 1, "green": 0, "blue": 1},
+                    lamp_outputs_for_state(state, warning_active=False, ts=0.75),
+                )
 
     def test_pack_label_status_word_sets_expected_bits(self):
         word = pack_label_status_word(
