@@ -15,6 +15,8 @@ class FakeEspMotorClient(EspMotorClient):
             return 'JSON {"ok":true,"auto_poll":false}'
         if line == "MOTOR POLL=1":
             return "ACK_MOTOR_POLL=1"
+        if line == "MOTOR ETO_RECOVERY?":
+            return 'JSON {"ok":true,"all_persisted_ready":true}'
         if line == "MOTOR 3 REFRESH":
             return 'JSON {"ok":true,"motor":{"id":3,"state":{"link_ok":true}}}'
         if line == "MOTOR 7 REFRESH":
@@ -28,6 +30,7 @@ class EspMotorClientTests(unittest.TestCase):
 
         self.assertFalse(client.poll_state()["auto_poll"])
         self.assertTrue(client.set_poll(True)["ok"])
+        self.assertTrue(client.eto_recovery_status()["all_persisted_ready"])
         self.assertTrue(client.apply_eto_recovery()["ok"])
         self.assertTrue(client.recover_eto()["ok"])
         self.assertTrue(client.recover_eto_motor(3)["ok"])
@@ -39,6 +42,7 @@ class EspMotorClientTests(unittest.TestCase):
             [
                 "MOTOR POLL?",
                 "MOTOR POLL=1",
+                "MOTOR ETO_RECOVERY?",
                 "MOTOR APPLY_ETO_RECOVERY",
                 "MOTOR RECOVER_ETO",
                 "MOTOR 3 RECOVER_ETO",

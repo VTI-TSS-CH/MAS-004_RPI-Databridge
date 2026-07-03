@@ -5786,6 +5786,20 @@ class MachineRuntime:
                 info["stop_positions"] = stop_info
             return
 
+        if _RESET_MOTION_RECOVERY_LOCK.locked():
+            stop_info.update(
+                {
+                    "active": True,
+                    "ok": False,
+                    "skipped": True,
+                    "reason": "reset_motion_recovery_in_progress",
+                    "last_skipped_ts": ts,
+                    "target_key": target_key,
+                }
+            )
+            info["stop_positions"] = stop_info
+            return
+
         manual_lock = motor_setup_manual_lock_status(self.db, now=ts)
         if bool(manual_lock.get("active")):
             stop_info.update(
@@ -6820,7 +6834,7 @@ class MachineRuntime:
             result["error"] = wait_after_reset.get("error") or "ESP command endpoint did not recover after reset pulse"
             return result
 
-        refreshed = self._refresh_single_io_device("esp32_plc58")
+        refreshed = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
         result["steps"].append({"step": "refresh_esp_io", "ok": bool(refreshed.get("ok", True)), "detail": refreshed})
         refreshed_io = self._io_values()
         refreshed_safety = self._safety_status(refreshed_io)
@@ -7513,15 +7527,43 @@ class MachineRuntime:
 
         esp = EspMotorClient(self.cfg)
         if esp.available():
-            for label, action in (
-                ("apply_eto_recovery", esp.apply_eto_recovery),
-                ("recover_eto", esp.recover_eto),
-            ):
+            eto_config_ok = False
+            eto_config_mismatch = False
+            try:
+                eto_status = esp.eto_recovery_status()
+                eto_readback_ok = bool(eto_status.get("ok", True))
+                eto_config_ok = eto_readback_ok and bool(eto_status.get("all_persisted_ready"))
+                eto_config_mismatch = eto_readback_ok and not bool(eto_status.get("all_persisted_ready"))
+                details["esp_motors"].append(
+                    {
+                        "step": "eto_recovery_readback",
+                        "ok": eto_readback_ok,
+                        "all_persisted_ready": eto_config_ok,
+                        "mismatch": eto_config_mismatch,
+                        "applied": False,
+                        "reply": eto_status,
+                    }
+                )
+            except Exception as exc:
+                details["esp_motors"].append(
+                    {
+                        "step": "eto_recovery_readback",
+                        "ok": False,
+                        "all_persisted_ready": False,
+                        "mismatch": False,
+                        "applied": False,
+                        "error": str(exc),
+                    }
+                )
+            if eto_config_mismatch:
                 try:
-                    reply = action()
-                    details["esp_motors"].append({"step": label, **reply})
+                    reply = esp.apply_eto_recovery()
+                    details["esp_motors"].append({"step": "apply_eto_recovery", "reason": "readback_mismatch", **reply})
+                    if not bool(reply.get("ok", False)):
+                        hard_failures.append(f"Motor ETO recovery config apply failed: {reply}")
                 except Exception as exc:
-                    details["esp_motors"].append({"step": label, "ok": False, "error": str(exc)})
+                    details["esp_motors"].append({"step": "apply_eto_recovery", "ok": False, "reason": "readback_mismatch", "error": str(exc)})
+                    hard_failures.append(f"Motor ETO recovery config apply failed: {exc}")
             for motor_id in range(1, 10):
                 try:
                     reply = esp.reset_alarm(motor_id)
@@ -7631,30 +7673,30 @@ class MachineRuntime:
         else:
             details["esp_motors"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
 
-        for role in ("unwinder", "rewinder"):
+        def recover_wickler_role(role: str) -> tuple[dict[str, Any], list[str]]:
             client = SmartWicklerClient(self.cfg, role)
             role_detail: dict[str, Any] = {"role": role, "steps": []}
+            role_failures: list[str] = []
             if not client.available():
                 role_detail["steps"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
-                details["wicklers"].append(role_detail)
-                continue
+                return role_detail, role_failures
             try:
                 reply = client.post_master({"indexedModeEnabled": "0"}, timeout_s=8.0)
                 role_detail["steps"].append({"step": "disable_indexed_mode", "ok": bool(reply.get("ok", True)), "reply": reply})
                 if reply.get("ok") is False:
-                    hard_failures.append(f"{role} disable_indexed_mode: {reply}")
+                    role_failures.append(f"{role} disable_indexed_mode: {reply}")
             except Exception as exc:
                 role_detail["steps"].append({"step": "disable_indexed_mode", "ok": False, "error": str(exc)})
-                hard_failures.append(f"{role} disable_indexed_mode: {exc}")
+                role_failures.append(f"{role} disable_indexed_mode: {exc}")
             for mode in ("stop", "resetAlarm", "etoRecovery", "stop"):
                 try:
                     reply = client.post_mode(mode, timeout_s=8.0)
                     role_detail["steps"].append({"step": mode, "ok": bool(reply.get("ok", True)), "reply": reply})
                     if reply.get("ok") is False:
-                        hard_failures.append(f"{role} {mode}: {reply}")
+                        role_failures.append(f"{role} {mode}: {reply}")
                 except Exception as exc:
                     role_detail["steps"].append({"step": mode, "ok": False, "error": str(exc)})
-                    hard_failures.append(f"{role} {mode}: {exc}")
+                    role_failures.append(f"{role} {mode}: {exc}")
             try:
                 state = client.fetch_state()
                 drive = state.get("drive") if isinstance(state, dict) else {}
@@ -7692,7 +7734,7 @@ class MachineRuntime:
                 }
                 role_detail["steps"].append(verify)
                 if not verify["ok"]:
-                    hard_failures.append(
+                    role_failures.append(
                         f"{role} not in safe stop "
                         f"(online={verify['online']}, ready={verify['ready']}, alarm={verify['alarm']}, "
                         f"alarm_code={verify['alarm_code']}, mode={verify['mode']}, "
@@ -7700,8 +7742,20 @@ class MachineRuntime:
                     )
             except Exception as exc:
                 role_detail["steps"].append({"step": "verify_ready", "ok": False, "error": str(exc)})
-                hard_failures.append(f"{role} verify_ready: {exc}")
-            details["wicklers"].append(role_detail)
+                role_failures.append(f"{role} verify_ready: {exc}")
+            return role_detail, role_failures
+
+        wickler_roles = ("unwinder", "rewinder")
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="mas004-reset-wickler") as executor:
+            futures = {role: executor.submit(recover_wickler_role, role) for role in wickler_roles}
+            for role in wickler_roles:
+                try:
+                    role_detail, role_failures = futures[role].result()
+                except Exception as exc:
+                    role_detail = {"role": role, "steps": [{"step": "parallel_recovery", "ok": False, "error": str(exc)}]}
+                    role_failures = [f"{role} parallel_recovery: {exc}"]
+                details["wicklers"].append(role_detail)
+                hard_failures.extend(role_failures)
 
         if hard_failures:
             return {"ok": False, "error": "; ".join(hard_failures[:5]), "details": details}

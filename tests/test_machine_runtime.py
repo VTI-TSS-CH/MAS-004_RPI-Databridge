@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 sys.modules.setdefault("ping3", SimpleNamespace(ping=lambda *_args, **_kwargs: 1.0))
 
+import mas004_rpi_databridge.machine_runtime as machine_runtime_module
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.io_master import IoStore
@@ -2156,6 +2157,31 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("motor_setup_manual_lock_active", snapshot["info"]["stop_positions"]["reason"])
         self.assertEqual(6, snapshot["info"]["stop_positions"]["manual_lock"]["motor_id"])
         client.move_absolute_set_mm.assert_not_called()
+
+    def test_motion_recovery_suppresses_automatic_stop_axis_positions(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=8,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        self.assertTrue(machine_runtime_module._RESET_MOTION_RECOVERY_LOCK.acquire(blocking=False))
+        try:
+            with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
+                snapshot = runtime.refresh()
+        finally:
+            machine_runtime_module._RESET_MOTION_RECOVERY_LOCK.release()
+
+        self.assertEqual(9, snapshot["current_state"])
+        self.assertEqual("reset_motion_recovery_in_progress", snapshot["info"]["stop_positions"]["reason"])
+        self.assertFalse(snapshot["info"]["stop_positions"]["ok"])
+        client_cls.return_value.move_absolute_set_mm.assert_not_called()
 
     def test_stop_axis_positions_are_not_ok_when_drive_accepts_but_does_not_move(self):
         self.cfg.esp_simulation = False
@@ -4926,6 +4952,74 @@ class MachineRuntimeTests(unittest.TestCase):
             self.assertTrue(verify["safe_stop"])
             self.assertFalse(verify["ready"])
             self.assertFalse(verify["move"])
+
+    def test_motion_reset_skips_persistent_eto_apply_and_global_recover_when_readback_ok(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        calls: list[str] = []
+
+        class FakeEspMotorClient:
+            def __init__(self, _cfg):
+                pass
+
+            def available(self):
+                return True
+
+            def eto_recovery_status(self):
+                calls.append("MOTOR ETO_RECOVERY?")
+                return {"ok": True, "all_persisted_ready": True}
+
+            def apply_eto_recovery(self):
+                calls.append("MOTOR APPLY_ETO_RECOVERY")
+                raise AssertionError("APPLY_ETO_RECOVERY must be skipped when readback is already OK")
+
+            def recover_eto(self):
+                calls.append("MOTOR RECOVER_ETO")
+                raise AssertionError("global RECOVER_ETO must not be used during normal reset")
+
+            def reset_alarm(self, motor_id):
+                calls.append(f"MOTOR {int(motor_id)} RESET_ALARM")
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RESET_ALARM"}
+
+            def recover_eto_motor(self, motor_id):
+                calls.append(f"MOTOR {int(motor_id)} RECOVER_ETO")
+                return {"ok": True, "reply": f"ACK_MOTOR_{int(motor_id)}_RECOVER_ETO"}
+
+            def refresh(self, motor_id):
+                motor_id = int(motor_id)
+                return {
+                    "ok": True,
+                    "motor": {
+                        "state": {
+                            "link_ok": True,
+                            "ready": motor_id != 3,
+                            "alarm": False,
+                            "alarm_code": 0,
+                            "hwto": False,
+                            "input_raw_hex": "4",
+                            "output_raw_hex": "40",
+                        }
+                    },
+                }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, _role):
+                pass
+
+            def available(self):
+                return False
+
+        with patch("mas004_rpi_databridge.machine_runtime.EspMotorClient", FakeEspMotorClient), patch(
+            "mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient
+        ):
+            result = runtime._reset_motion_devices()
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("MOTOR ETO_RECOVERY?", calls)
+        self.assertNotIn("MOTOR APPLY_ETO_RECOVERY", calls)
+        self.assertNotIn("MOTOR RECOVER_ETO", calls)
+        self.assertEqual(9, len([call for call in calls if call.endswith(" RESET_ALARM")]))
+        self.assertEqual(9, len([call for call in calls if call.endswith(" RECOVER_ETO") and call != "MOTOR RECOVER_ETO"]))
 
     def test_motion_reset_accepts_motor3_operable_without_ready_bit(self):
         self.cfg.esp_simulation = False

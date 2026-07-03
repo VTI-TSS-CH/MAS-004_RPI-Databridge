@@ -85,6 +85,9 @@ class EspMotorClient:
     def apply_eto_recovery(self) -> dict[str, Any]:
         return self._ack("MOTOR APPLY_ETO_RECOVERY")
 
+    def eto_recovery_status(self) -> dict[str, Any]:
+        return self._json("MOTOR ETO_RECOVERY?")
+
     def recover_eto(self) -> dict[str, Any]:
         return self._ack("MOTOR RECOVER_ETO")
 
