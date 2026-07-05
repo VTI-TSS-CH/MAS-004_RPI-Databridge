@@ -4629,6 +4629,43 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("error", row[0])
         self.assertIn("wickler_indexed_ready_timeout", row[2])
 
+    def test_production_esp_monitor_label_removal_required_pauses_without_purge(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True}
+
+        def fake_esp(command, **_kwargs):
+            if command == "PROCESS PRODUCTION MONITOR?":
+                return (
+                    'JSON {"active":true,"running":false,"phase":0,'
+                    '"reason":"completed","last_error":"label_removal_required:3",'
+                    '"label_no":6,"labels_printed":6}'
+                )
+            if command in ("PROCESS WICKLER CANCEL", "PROCESS INDEXED STOP", "PROCESS PROFILE STOP"):
+                return "ACK"
+            raise AssertionError(command)
+
+        runtime._production_esp = Mock(side_effect=fake_esp)
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "target_state": 21})
+        runtime._set_production_wicklers_idle = Mock(return_value=[{"role": "unwinder", "ok": True}])
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+        runtime._queue_tto_printer_state_sync = Mock(return_value={"queued": True})
+        runtime._notify_microtom = Mock()
+
+        result = runtime._monitor_active_production_esp(production_info, 100.0)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["label_removal_pause"])
+        self.assertEqual(7, result["target_state"])
+        self.assertEqual([3], result["labels"])
+        self.assertFalse(production_info["active"])
+        self.assertTrue(production_info["paused"])
+        self.assertEqual("label_removal_required:3", production_info["pause_reason"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        runtime._stop_production_motion.assert_not_called()
+        runtime._notify_microtom.assert_not_called()
+
     def test_production_esp_monitor_falls_back_to_status_for_old_firmware(self):
         self.cfg.esp_simulation = False
         runtime = self.build_runtime()

@@ -66,7 +66,7 @@ from mas004_rpi_databridge.motor_setup_lock import (
 from mas004_rpi_databridge.motor_state_store import MotorStateStore
 from mas004_rpi_databridge.protocol import normalize_pid
 from mas004_rpi_databridge.peers import peer_urls
-from mas004_rpi_databridge.production_logs import ProductionLogManager
+from mas004_rpi_databridge.production_logs import ProductionLogManager, sanitize_production_label
 from mas004_rpi_databridge.router import Router
 from mas004_rpi_databridge.smart_wickler_client import SmartWicklerClient, normalize_winder_role
 from mas004_rpi_databridge.smart_wickler_ui import build_winder_ui_html
@@ -691,6 +691,13 @@ class FormatProfileReq(BaseModel):
 class FormatSendReq(BaseModel):
     name: str = ""
     values: Dict[str, Any]
+
+
+class ProductionNewReq(BaseModel):
+    name: str
+    values: Dict[str, Any] = {}
+    send_format: bool = True
+    clear_previous: bool = True
 
 
 class CommissioningStartReq(BaseModel):
@@ -4199,6 +4206,33 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
+    @app.get("/api/production-setup/logfiles")
+    def api_production_setup_logfiles(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return production_logs.ready_manifest()
+
+    @app.get("/api/production-setup/logfiles/download")
+    def api_production_setup_logfile_download(request: Request, name: str = Query(...)):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        try:
+            data = logs.consume_production_file(name)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        safe_name = os.path.basename(name)
+        return Response(
+            content=data,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+
+    @app.post("/api/production-setup/logfiles/ack")
+    def api_production_setup_logfiles_ack(request: Request):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        return logs.acknowledge_production_files()
+
     @app.post("/api/production-setup/send")
     def api_production_setup_send(request: Request, body: FormatSendReq):
         cfg2 = Settings.load(cfg_path)
@@ -4208,6 +4242,49 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except ValueError:
             name = str(body.name or "").strip()[:80]
         return send_format_values(body.values, name=name)
+
+    @app.post("/api/production-setup/new-production")
+    def api_production_setup_new_production(request: Request, body: ProductionNewReq):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        label = sanitize_production_label(body.name)
+        if not label:
+            raise HTTPException(status_code=400, detail="Produktionsname fehlt")
+        router = Router(cfg2, inbox, outbox, params, logs)
+        name_line = f"MAS0029={label}"
+        try:
+            name_response = router.handle_microtom_line(
+                name_line,
+                correlation=f"machine-setup-new-production:{label}:MAS0029",
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Produktionsname konnte nicht gesendet werden: {exc}") from exc
+        if "NAK" in str(name_response).upper():
+            raise HTTPException(status_code=400, detail=f"Produktionsname abgelehnt: {name_response}")
+
+        format_result: dict[str, Any] = {"ok": True, "skipped": "send_format=false"}
+        if bool(body.send_format):
+            format_result = send_format_values(body.values or {}, name=label)
+
+        runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
+        try:
+            reset_result = runtime.prepare_new_production(
+                label,
+                reset_esp=True,
+                clear_previous=bool(body.clear_previous),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = get_production_setup_payload()
+        return {
+            "ok": bool(format_result.get("ok", True)) and bool(reset_result.get("ok", True)),
+            "production_label": label,
+            "name": {"line": name_line, "response": name_response, "ok": True},
+            "format": format_result,
+            "reset": reset_result,
+            "production_status": payload.get("production_status", []),
+            "machine": payload.get("machine", {}),
+        }
 
     @app.get("/api/commissioning/overview")
     def api_commissioning_overview(request: Request):

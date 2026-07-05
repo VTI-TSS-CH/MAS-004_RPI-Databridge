@@ -1435,10 +1435,19 @@ class MachineRuntime:
                 production_info["active"] = False
                 production_info["last_stop"] = dict(esp_monitor.get("stop") or {})
                 production_info.pop("pending_start", None)
-                new_state = 21
-                requested_state = 21
-                state_source = "production_esp_runner_fault"
-                purge_active = True
+                monitor_info = esp_monitor.get("production_info")
+                if isinstance(monitor_info, dict):
+                    production_info.update(monitor_info)
+                if bool(esp_monitor.get("label_removal_pause")):
+                    new_state = int(esp_monitor.get("target_state") or 7)
+                    requested_state = new_state
+                    state_source = "label_removal_required"
+                    purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
+                else:
+                    new_state = 21
+                    requested_state = 21
+                    state_source = "production_esp_runner_fault"
+                    purge_active = True
             else:
                 wickler_monitor = self._monitor_active_production_wicklers(production_info, ts)
                 if wickler_monitor is not None:
@@ -3260,6 +3269,115 @@ class MachineRuntime:
             merged_request,
         )
         return merged_request
+
+    def prepare_new_production(
+        self,
+        production_label: str,
+        *,
+        reset_esp: bool = True,
+        clear_previous: bool = True,
+    ) -> dict[str, Any]:
+        label = sanitize_production_label(production_label)
+        if not label:
+            raise RuntimeError("production_label missing")
+        snapshot = self._state_row()
+        current_state = _safe_int(snapshot.get("current_state"), 1)
+        if current_state in (4, 5, 6):
+            raise RuntimeError(
+                f"Neue Produktion kann im Maschinenstatus {current_state} ({state_label(current_state)}) nicht vorbereitet werden"
+            )
+
+        previous_label = str(snapshot.get("production_label") or "").strip()
+        if not previous_label:
+            previous_label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
+        log_stop = None
+        try:
+            if self.production_logs.active_state():
+                log_stop = self.production_logs.handle_param_change("MAS0002", "2")
+        except Exception as exc:
+            log_stop = {"ok": False, "error": repr(exc)}
+
+        esp_commands: list[dict[str, Any]] = []
+        if reset_esp and not bool(getattr(self.cfg, "esp_simulation", False)):
+            for command, timeout_s in (
+                ("PROCESS PRODUCTION STOP", 1.2),
+                ("PROCESS WICKLER CANCEL", 1.0),
+                ("PROCESS INDEXED STOP", 1.0),
+                ("PROCESS PROFILE STOP", 1.0),
+                ("PROCESS PRODUCTION_RESET", 5.0),
+            ):
+                try:
+                    response = self._production_esp_retry(
+                        command,
+                        read_timeout_s=timeout_s,
+                        attempts=2 if command == "PROCESS PRODUCTION_RESET" else 1,
+                        priority=True,
+                    )
+                    esp_commands.append({"command": command, "ok": True, "response": response})
+                except Exception as exc:
+                    esp_commands.append({"command": command, "ok": False, "error": repr(exc)})
+        else:
+            esp_commands.append(
+                {
+                    "command": "PROCESS PRODUCTION_RESET",
+                    "ok": True,
+                    "skipped": "esp_simulation" if bool(getattr(self.cfg, "esp_simulation", False)) else "reset_esp=false",
+                }
+            )
+
+        labels_to_clear = {label}
+        if clear_previous and previous_label:
+            labels_to_clear.add(previous_label)
+        deleted_register = 0
+        deleted_events = 0
+        with self.db._conn() as c:
+            for item_label in sorted(labels_to_clear):
+                cur = c.execute("DELETE FROM label_register WHERE production_label=?", (item_label,))
+                deleted_register += int(cur.rowcount or 0)
+                cur = c.execute("DELETE FROM label_events WHERE production_label=?", (item_label,))
+                deleted_events += int(cur.rowcount or 0)
+
+        info = dict(snapshot.get("info") or {})
+        previous_runtime = info.pop(PRODUCTION_RUNTIME_INFO_KEY, None)
+        info.pop("last_label_payload", None)
+        info["new_production_reset"] = {
+            "ts": now_ts(),
+            "production_label": label,
+            "previous_label": previous_label,
+            "clear_previous": bool(clear_previous),
+            "deleted_label_register": deleted_register,
+            "deleted_label_events": deleted_events,
+        }
+        self.params.apply_device_value("MAS0029", label, promote_default=True)
+        self.params.apply_device_value("MAS0003", "0", promote_default=False)
+        self._write_state(
+            current_state=current_state,
+            requested_state=_safe_int(snapshot.get("requested_state"), current_state),
+            state_source="new_production_reset",
+            warning_active=bool(snapshot.get("warning_active")),
+            purge_active=bool(snapshot.get("purge_active")),
+            production_label=label,
+            last_label_no=0,
+            info=info,
+        )
+        result = {
+            "ok": all(item.get("ok") for item in esp_commands),
+            "production_label": label,
+            "previous_label": previous_label,
+            "current_state": current_state,
+            "deleted_label_register": deleted_register,
+            "deleted_label_events": deleted_events,
+            "esp_commands": esp_commands,
+            "log_stop": log_stop,
+            "cleared_runtime": isinstance(previous_runtime, dict),
+        }
+        self._record_event(
+            "new_production_reset",
+            "info" if result["ok"] else "warning",
+            f"Neue Produktion vorbereitet: {label}",
+            result,
+        )
+        return result
 
     def _state_row(self) -> dict[str, Any]:
         with self.db._conn() as c:
@@ -5090,6 +5208,14 @@ class MachineRuntime:
         last_error_benign = last_error.lower() in {"", "reset", "stopped", "completed"}
         active = bool(diag.get("active"))
         running = bool(diag.get("running"))
+        if active and not running and last_error.lower().startswith("label_removal_required"):
+            return self._handle_production_esp_monitor_label_removal_required(
+                production_info,
+                diag=diag,
+                monitor=monitor,
+                last_error=last_error,
+                ts=ts,
+            )
         if active and not running and last_error and not last_error_benign:
             monitor["ok"] = False
             monitor["fault"] = last_error
@@ -5116,6 +5242,138 @@ class MachineRuntime:
             monitor["first_wickler_ready_fallback"] = fallback
             production_info["last_esp_monitor"] = monitor
         return None
+
+    def _label_removal_required_labels_from_error(self, last_error: str, diag: dict[str, Any]) -> list[int]:
+        raw = str(last_error or "").strip()
+        tail = raw.split(":", 1)[1] if ":" in raw else ""
+        labels = [_safe_int(item, 0) for item in re.findall(r"\d+", tail)]
+        labels = [label for label in labels if label > 0]
+        if not labels:
+            diag_label = _safe_int(diag.get("label_no"), _safe_int(diag.get("current_label_no"), 0))
+            if diag_label > 0:
+                labels.append(diag_label)
+        return sorted(set(labels))
+
+    def _handle_production_esp_monitor_label_removal_required(
+        self,
+        production_info: dict[str, Any],
+        *,
+        diag: dict[str, Any],
+        monitor: dict[str, Any],
+        last_error: str,
+        ts: float,
+    ) -> dict[str, Any]:
+        labels = self._label_removal_required_labels_from_error(last_error, diag)
+        if not labels:
+            labels = [max(1, _safe_int(production_info.get("last_label_no"), 1))]
+        production_label = self._current_production_label()
+        compact_requests: list[dict[str, Any]] = []
+        for label_no in labels:
+            compact_payload = self._compact_label_removal_payload(
+                {
+                    "label_no": int(label_no),
+                    "reason": "esp_monitor_last_error",
+                    "material_ok": 1,
+                    "print_ok": 1,
+                    "verify_ok": 0,
+                    "quality_ok": 0,
+                    "needs_removal": 1,
+                    "removal_pending": 1,
+                }
+            )
+            request = {
+                "label_no": int(label_no),
+                "production_label": str(production_label or ""),
+                "payload": compact_payload,
+                "stop": {
+                    "ok": True,
+                    "skipped": "esp_runner_already_paused_for_label_removal",
+                    "reason": last_error,
+                    "target_state": 7,
+                },
+                "rewind": {"ok": True, "skipped": "operator_removal_pause"},
+                "target_state": 7,
+                "operator_message": f"Label {label_no} entnehmen",
+                "rewind_required": False,
+                "rewind_executed": False,
+                "ts": now_ts(),
+            }
+            compact_requests.append(request)
+            self._merge_label_removal_request(production_info, request)
+
+        commands: list[dict[str, Any]] = []
+        for command, timeout_s in (
+            ("PROCESS WICKLER CANCEL", 1.0),
+            ("PROCESS INDEXED STOP", 1.0),
+            ("PROCESS PROFILE STOP", 1.0),
+        ):
+            try:
+                commands.append(
+                    {
+                        "command": command,
+                        "ok": True,
+                        "response": self._production_esp(command, read_timeout_s=timeout_s, priority=True),
+                    }
+                )
+            except Exception as exc:
+                commands.append({"command": command, "ok": False, "error": repr(exc)})
+        wicklers = self._set_production_wicklers_idle(target_state=7)
+        self._sync_esp_machine_state(7, required=False)
+        tto_printer = self._queue_tto_printer_state_sync(
+            7,
+            self._param_values_by_prefix(("MAP", "TTS")),
+            reason=f"label_removal_required:{','.join(str(label) for label in labels)}",
+        )
+
+        production_info["active"] = False
+        production_info["paused"] = True
+        production_info["paused_ts"] = float(ts)
+        production_info["last_stop"] = {
+            "ok": True,
+            "reason": last_error,
+            "target_state": 7,
+            "skipped": "esp_runner_already_paused_for_label_removal",
+            "finished_ts": now_ts(),
+            "commands": commands,
+            "wicklers": wicklers,
+            "tto_printer": tto_printer,
+        }
+        production_info.pop("pending_start", None)
+
+        monitor["ok"] = True
+        monitor["fault"] = last_error
+        monitor["label_removal_pause"] = True
+        monitor["target_state"] = 7
+        monitor["labels"] = labels
+        monitor["requests"] = compact_requests
+        monitor["stop"] = dict(production_info["last_stop"])
+        monitor_production_info = dict(production_info)
+        monitor_production_info.pop("last_esp_monitor", None)
+        monitor["production_info"] = monitor_production_info
+        self._record_production_event_once(
+            "label_removal_requested",
+            "warning",
+            (
+                f"Labels {', '.join(str(label) for label in labels)} entnehmen - Produktion in Pause"
+                if len(labels) > 1
+                else f"Label {labels[0]} entnehmen - Produktion in Pause"
+            ),
+            {
+                "label_no": int(labels[0]),
+                "label_nos": labels,
+                "reason": last_error,
+                "target_state": 7,
+                "source": "esp_monitor",
+            },
+            dedupe_window_s=2.0,
+        )
+        self._record_event(
+            "production_esp_label_removal_pause",
+            "info",
+            "ESP-Runner meldet Label-Entnahme; Raspi wechselt kontrolliert in Pause statt Purge",
+            monitor,
+        )
+        return monitor
 
     def _handle_production_esp_monitor_comm_error(
         self,

@@ -41,6 +41,8 @@ def build_production_setup_ui_html(nav_html: str) -> str:
     .profile{{border:1px solid var(--line);border-radius:12px;padding:9px;background:#fbfdff;cursor:pointer}}
     .profile:hover{{border-color:#8dbce8;background:#f2f8ff}}
     .profile.active{{border-color:#005eb8;background:#e8f1fb}}
+    .loglist{{display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto}}
+    .logitem{{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid var(--line);border-radius:12px;background:#fbfdff;padding:8px}}
     @media(max-width:1100px){{.hero{{grid-template-columns:1fr}}}}
   </style>
 </head>
@@ -71,6 +73,49 @@ def build_production_setup_ui_html(nav_html: str) -> str:
       <div id="profile_list" class="profiles" style="margin-top:12px"></div>
     </aside>
   </div>
+
+  <section class="card" style="margin-bottom:14px">
+    <div class="title">
+      <div>
+        <h2>Microtom-Simulation Neue Produktion</h2>
+        <div class="muted small">Bereitet eine neue Produktion wie ein Microtom-Auftrag vor: Produktionsname senden, optional Formatwerte senden, lokale/ESP-Produktionsreste loeschen.</div>
+      </div>
+      <div class="toolbar">
+        <button onclick="loadProductionLogs()">Logfiles laden</button>
+        <button onclick="ackProductionLogs()">Logfiles quittieren</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div>
+        <label class="small muted" for="new_production_name">Produktionsname / Auftrag</label>
+        <input id="new_production_name" placeholder="z.B. 001000544055"/>
+      </div>
+      <div>
+        <label class="small muted" for="new_production_mode">Aktion</label>
+        <select id="new_production_mode">
+          <option value="format">Name + aktuelle Formatwerte senden, Register resetten</option>
+          <option value="name">Nur Name senden und Register resetten</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:end">
+        <button class="primary" onclick="prepareNewProduction()">Neue Produktion vorbereiten</button>
+      </div>
+    </div>
+    <div class="grid" style="margin-top:12px">
+      <div>
+        <h3>Bereite Production-Logfiles</h3>
+        <div id="production_logfiles" class="loglist" style="margin-top:8px"><div class="muted small">Noch nicht geladen.</div></div>
+      </div>
+      <div>
+        <h3>Microtom-Ablauf</h3>
+        <div class="status-box small" style="min-height:160px">1. Logfiles laden/herunterladen/quittieren
+2. Produktionsname setzen
+3. Formatrelevante Parameter senden
+4. Raspi-/ESP-Schieberegister fuer neue Produktion leeren
+5. Danach Einrichten und Produktion wie gewohnt starten</div>
+      </div>
+    </div>
+  </section>
 
   <section class="card">
     <div class="title">
@@ -162,6 +207,9 @@ function renderProductionStatus(data){{
       <h3>${{esc(it.value ?? "-")}}</h3>
       <div class="small">${{esc(it.name || "")}}</div>
     </div>`).join("");
+  const nameEl = document.getElementById("new_production_name");
+  const mas0029 = status.find(it => it.pkey === "MAS0029");
+  if(nameEl && !nameEl.value && mas0029 && mas0029.value) nameEl.value = mas0029.value;
 }}
 async function loadCurrentValues(){{
   const j = await api("/api/production-setup/parameters");
@@ -229,8 +277,64 @@ async function sendFormat(){{
   document.getElementById("send_status").textContent = lines.join("\\n") || "Keine Werte gesendet.";
   await loadCurrentValues();
 }}
+function renderProductionLogs(j){{
+  const box = document.getElementById("production_logfiles");
+  const items = j.items || j.files || [];
+  if(!items.length){{
+    box.innerHTML = '<div class="muted small">Keine bereiten Production-Logfiles.</div>';
+    return;
+  }}
+  box.innerHTML = items.map(it => {{
+    const name = it.name || it;
+    const size = it.size_bytes ? `${{Math.round(it.size_bytes/1024)}} kB` : "";
+    return `<div class="logitem">
+      <div><b>${{esc(name)}}</b><div class="small muted">${{esc(size)}}</div></div>
+      <a class="btn" href="/api/production-setup/logfiles/download?name=${{encodeURIComponent(name)}}">Download</a>
+    </div>`;
+  }}).join("");
+}}
+async function loadProductionLogs(){{
+  const j = await api("/api/production-setup/logfiles");
+  renderProductionLogs(j);
+  document.getElementById("send_status").textContent = "Production-Logfiles geladen.";
+}}
+async function ackProductionLogs(){{
+  const j = await api("/api/production-setup/logfiles/ack", {{method:"POST"}});
+  document.getElementById("send_status").textContent = `Production-Logfiles quittiert: ${{JSON.stringify(j)}}`;
+  await loadProductionLogs();
+}}
+async function prepareNewProduction(){{
+  const name = document.getElementById("new_production_name").value.trim();
+  if(!name){{ document.getElementById("send_status").textContent = "Produktionsname fehlt."; return; }}
+  if(!confirm(`Neue Produktion '${{name}}' vorbereiten und alte Registerreste loeschen?`)) return;
+  const send_format = document.getElementById("new_production_mode").value === "format";
+  const payload = {{
+    name,
+    send_format,
+    clear_previous:true,
+    values: send_format ? collectWritableValues() : {{}}
+  }};
+  document.getElementById("send_status").textContent = "Bereite neue Produktion vor...";
+  const j = await api("/api/production-setup/new-production", {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body:JSON.stringify(payload)
+  }});
+  const formatLines = ((j.format || {{}}).results || []).map(r => `${{r.skipped ? "SKIP" : (r.ok ? "OK " : "NAK")}} ${{r.line}} -> ${{r.response || r.error || ""}}`);
+  const reset = j.reset || {{}};
+  const espLines = (reset.esp_commands || []).map(r => `${{r.ok ? "OK " : "ERR"}} ${{r.command}} -> ${{r.response || r.error || r.skipped || ""}}`);
+  document.getElementById("send_status").textContent = [
+    `Neue Produktion vorbereitet: ${{j.production_label}}`,
+    `Register geloescht: ${{reset.deleted_label_register || 0}}, Events geloescht: ${{reset.deleted_label_events || 0}}`,
+    "Format:",
+    ...(formatLines.length ? formatLines : ["SKIP"]),
+    "ESP:",
+    ...(espLines.length ? espLines : ["SKIP"])
+  ].join("\\n");
+  await loadCurrentValues();
+  await loadProductionLogs();
+}}
 async function init(){{
-  try{{ await loadCurrentValues(); await loadProfiles(); }}
+  try{{ await loadCurrentValues(); await loadProfiles(); await loadProductionLogs(); }}
   catch(err){{ document.getElementById("send_status").textContent = err.message; }}
 }}
 init();
