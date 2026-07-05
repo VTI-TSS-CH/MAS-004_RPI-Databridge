@@ -449,6 +449,8 @@ async function stopLedTest(){
   }
 }
 async function loadAll(){
+  if(window.__productionVisualizationLoadInFlight) return window.__productionVisualizationLoadInFlight;
+  window.__productionVisualizationLoadInFlight = (async () => {
   try{
     const payload = await api("/api/machine/production-visualization");
     render(payload);
@@ -457,6 +459,9 @@ async function loadAll(){
     pill.className = "pill bad";
     pill.textContent = err.message;
   }
+  })();
+  try{ return await window.__productionVisualizationLoadInFlight; }
+  finally{ window.__productionVisualizationLoadInFlight = null; }
 }
 document.getElementById("track").addEventListener("dblclick", ev => {
   const tag = ev.target.closest(".component-tag.editable");
@@ -464,7 +469,7 @@ document.getElementById("track").addEventListener("dblclick", ev => {
 });
 function schedule(){
   if(timer) clearInterval(timer);
-  timer = setInterval(()=>{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }, 1500);
+  timer = setInterval(()=>{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }, 2500);
 }
 document.getElementById("auto_refresh").addEventListener("change", schedule);
 schedule();

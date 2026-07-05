@@ -1014,6 +1014,55 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
         self.assertNotIn("motor3_zero", result)
 
+    def test_production_start_clears_stale_label_removal_when_esp_register_is_empty(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=3,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:3",
+                    "label_removal_pending_labels": [3],
+                    "label_removal_request": {"label_no": 3},
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"reason": "label_removal_required:3", "finished_ts": now_ts() - 1.0},
+                }
+            },
+        )
+        param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
+
+        with patch.object(
+            runtime,
+            "_validate_label_removal_resume_on_esp",
+            return_value={
+                "ok": True,
+                "valid": False,
+                "stale": True,
+                "labels": [3],
+                "labels_active": 0,
+                "active_labels": [],
+                "missing": [3],
+                "not_pending": [],
+            },
+        ), patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+            result = runtime._start_production_motion(param_map, format_plan)
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("PROCESS PRODUCTION START", result["command"])
+        self.assertNotIn("RESUME_REMOVED", result["command"])
+        self.assertIn("motor3_zero", result)
+        cleared = result.get("cleared_label_removal_state") or {}
+        self.assertEqual("esp_register_missing_before_start", cleared.get("reason"))
+        self.assertEqual([3], cleared.get("labels"))
+
     def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))

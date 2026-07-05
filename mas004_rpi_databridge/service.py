@@ -494,7 +494,7 @@ def machine_runtime_loop(cfg_path: str):
     reload_due = 0.0
     tick_s = 0.50
     next_tick = time.monotonic()
-    fast_states = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17}
+    fast_states = {2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 16, 17}
     while True:
         try:
             now_m = time.monotonic()
@@ -557,7 +557,8 @@ def button_input_loop(cfg_path: str):
 def button_led_loop(cfg_path: str):
     runtime = None
     reload_due = 0.0
-    tick_s = 0.25
+    tick_s = 0.50
+    force_refresh_due = 0.0
     next_tick = time.monotonic()
     while True:
         try:
@@ -571,7 +572,10 @@ def button_led_loop(cfg_path: str):
                 io_store = IoStore(db)
                 runtime = MachineRuntime(cfg, db, params, io_store, logs, outbox)
                 reload_due = now_m + 5.0
-            runtime.refresh_button_led_outputs(ts=now_m)
+            force = now_m >= force_refresh_due
+            runtime.refresh_button_led_outputs(ts=now_m, force=force)
+            if force:
+                force_refresh_due = now_m + 10.0
         except Exception as e:
             runtime = None
             print(f"[BUTTON-LED] loop error: {repr(e)}", flush=True)
@@ -744,4 +748,4 @@ def main():
             "ssl_keyfile": cfg.webui_ssl_keyfile,
         }
 
-    uvicorn.run(app, host=cfg.webui_host, port=cfg.webui_port, log_level="info", **ssl_kwargs)
+    uvicorn.run(app, host=cfg.webui_host, port=cfg.webui_port, log_level="warning", access_log=False, **ssl_kwargs)

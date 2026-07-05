@@ -8,6 +8,7 @@ from datetime import datetime
 import hashlib
 import hmac
 import json
+import gzip
 import html
 import math
 import subprocess
@@ -724,6 +725,49 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     logs = LogStore(db)
     production_logs = ProductionLogManager(db, cfg=cfg, outbox=outbox)
     format_profiles = FormatProfileStore(db)
+    ui_read_cache: Dict[str, Dict[str, Any]] = {}
+    ui_read_cache_lock = threading.Lock()
+
+    def cached_ui_payload(key: str, ttl_s: float, builder, request: Optional[Request] = None):
+        now = time.monotonic()
+        cache_seconds = max(0.0, float(ttl_s))
+
+        def response_from_body(body: bytes, gzip_body: Optional[bytes] = None):
+            headers = {"Cache-Control": f"private, max-age={max(0, int(cache_seconds))}"}
+            accepts_gzip = False
+            if request is not None:
+                accepts_gzip = "gzip" in str(request.headers.get("accept-encoding", "")).lower()
+            if accepts_gzip and gzip_body:
+                headers["Content-Encoding"] = "gzip"
+                return Response(content=gzip_body, media_type="application/json; charset=utf-8", headers=headers)
+            return Response(content=body, media_type="application/json; charset=utf-8", headers=headers)
+
+        with ui_read_cache_lock:
+            cached = ui_read_cache.get(key)
+            if cached and now < float(cached.get("expires_at") or 0.0):
+                return response_from_body(
+                    bytes(cached.get("body") or b"{}"),
+                    bytes(cached.get("gzip_body") or b"") or None,
+                )
+        value = builder()
+        body = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        gzip_body = gzip.compress(body, compresslevel=1) if len(body) > 1024 else None
+        with ui_read_cache_lock:
+            ui_read_cache[key] = {
+                "expires_at": time.monotonic() + cache_seconds,
+                "body": body,
+                "gzip_body": gzip_body,
+            }
+        return response_from_body(body, gzip_body)
+
+    def clear_ui_read_cache(prefix: str = ""):
+        with ui_read_cache_lock:
+            if not prefix:
+                ui_read_cache.clear()
+                return
+            for key in list(ui_read_cache):
+                if key.startswith(prefix):
+                    ui_read_cache.pop(key, None)
     if not os.path.exists(cfg.master_params_xlsx_path) and os.path.exists(REPO_MASTER_PARAMS_XLSX):
         os.makedirs(os.path.dirname(cfg.master_params_xlsx_path), exist_ok=True)
         shutil.copyfile(REPO_MASTER_PARAMS_XLSX, cfg.master_params_xlsx_path)
@@ -3954,19 +3998,22 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     def api_machine_overview(request: Request):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
-        return get_machine_overview()
+        return cached_ui_payload("machine_overview", 1.0, get_machine_overview, request)
 
     @app.get("/api/machine/production-visualization")
     def api_machine_production_visualization(request: Request):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
-        return get_production_visualization_payload()
+        return cached_ui_payload("production_visualization", 2.0, get_production_visualization_payload, request)
 
     @app.post("/api/machine/production-visualization/component")
     def api_machine_production_visualization_component(request: Request, body: ProductionVisualizationComponentReq):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
-        return set_visualization_component_position(cfg2, body)
+        payload = set_visualization_component_position(cfg2, body)
+        clear_ui_read_cache("production_visualization")
+        clear_ui_read_cache("machine_overview")
+        return payload
 
     @app.get("/api/machine/mae0048-diagnostics")
     def api_machine_mae0048_diagnostics(request: Request):
@@ -4020,7 +4067,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         clear_motor_setup_manual_lock(db, reason=f"machine_button:{body.button}")
         runtime = MachineRuntime(cfg2, db, params, io_store, logs, outbox)
         try:
-            return runtime.press_virtual_button(body.button)
+            payload = runtime.press_virtual_button(body.button)
+            clear_ui_read_cache()
+            return payload
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -4038,6 +4087,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         if not bool(payload.get("ok")):
             failed = [item for item in payload.get("results", []) if not item.get("ok")]
             raise HTTPException(status_code=400, detail={"message": "Bypass write failed", "failed": failed})
+        clear_ui_read_cache()
         return payload
 
     @app.get("/api/machine/audit")
@@ -4048,15 +4098,20 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     ):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
-        logs.apply_audit_retention(cfg2)
-        keep_hours = logs.audit_keep_hours_from_settings(cfg2)
-        view_hours = hours if hours is not None else keep_hours
-        return {
-            "ok": True,
-            "keep_hours": keep_hours,
-            "view_hours": view_hours,
-            "entries": logs.list_audit_entries(hours=view_hours, limit=limit),
-        }
+        cache_key = f"machine_audit:{hours if hours is not None else 'default'}:{int(limit)}"
+
+        def build_audit_payload():
+            logs.apply_audit_retention(cfg2)
+            keep_hours = logs.audit_keep_hours_from_settings(cfg2)
+            view_hours = hours if hours is not None else keep_hours
+            return {
+                "ok": True,
+                "keep_hours": keep_hours,
+                "view_hours": view_hours,
+                "entries": logs.list_audit_entries(hours=view_hours, limit=limit),
+            }
+
+        return cached_ui_payload(cache_key, 10.0, build_audit_payload, request)
 
     @app.post("/api/machine/audit/retention")
     def api_machine_audit_retention(request: Request, body: MachineAuditRetentionReq):
@@ -4069,6 +4124,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2.machine_audit_keep_hours = max(1, min(24 * 3650, keep_hours))
         cfg2.save(cfg_path)
         logs.apply_audit_retention(cfg2)
+        clear_ui_read_cache("machine_audit:")
         return {"ok": True, "keep_hours": cfg2.machine_audit_keep_hours}
 
     @app.get("/api/machine/audit/download")
@@ -4448,7 +4504,10 @@ function kv(rootId, pairs){
   const root=document.getElementById(rootId);
   root.innerHTML = pairs.map(([k,v])=>`<div class="muted">${esc(k)}</div><div>${v}</div>`).join("");
 }
+let machineStatusLoadInFlight = null;
 async function loadAll(){
+  if(machineStatusLoadInFlight) return machineStatusLoadInFlight;
+  machineStatusLoadInFlight = (async () => {
   document.getElementById("status").textContent="loading...";
   try{
     const j=await api("/api/machine/overview");
@@ -4483,9 +4542,12 @@ async function loadAll(){
   }catch(err){
     document.getElementById("status").textContent=err.message;
   }
+  })();
+  try{ return await machineStatusLoadInFlight; }
+  finally{ machineStatusLoadInFlight = null; }
 }
 loadAll();
-setInterval(()=>{ if(!document.hidden) loadAll(); }, 1000);
+setInterval(()=>{ if(!document.hidden) loadAll(); }, 3000);
 </script>
 </body>
 </html>

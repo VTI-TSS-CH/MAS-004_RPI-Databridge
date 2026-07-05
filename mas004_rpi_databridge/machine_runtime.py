@@ -998,6 +998,32 @@ class MachineRuntime:
                 production_info.pop("pending_start", None)
 
         setup_info = dict(info.get("setup") or {})
+        removal_request = production_info.get("label_removal_request")
+        removal_request_ts = 0.0
+        if isinstance(removal_request, dict):
+            removal_request_ts = _safe_float(removal_request.get("ts"), 0.0)
+        setup_completed_ts = _safe_float(setup_info.get("completed_ts"), 0.0)
+        stale_removal_after_setup = (
+            str(production_info.get("pause_reason") or "").startswith("label_removal_required:")
+            and removal_request_ts > 0.0
+            and setup_completed_ts > removal_request_ts
+        )
+        if stale_removal_after_setup:
+            cleared_label_removal = self._clear_label_removal_runtime_state(
+                production_info,
+                reason="setup_completed_after_label_removal",
+                detail={
+                    "setup_completed_ts": setup_completed_ts,
+                    "label_removal_request_ts": removal_request_ts,
+                },
+            )
+            if cleared_label_removal:
+                self._record_event(
+                    "label_removal_state_cleared",
+                    "info",
+                    "Alte Label-Entnahmepause nach spaeterem Einrichten verworfen",
+                    cleared_label_removal,
+                )
         setup_command_active = requested_command == 3
         requested_state_override: int | None = None
         setup_direct_pause_complete = False
@@ -1038,6 +1064,17 @@ class MachineRuntime:
                 # while the first setup run is still moving axes and start a
                 # competing setup attempt.  MAS0001=2 keeps the orchestrator's
                 # setup-active guard true while MAS0002 is already idle.
+                cleared_label_removal = self._clear_label_removal_runtime_state(
+                    production_info,
+                    reason="setup_started",
+                )
+                if cleared_label_removal:
+                    self._record_event(
+                        "label_removal_state_cleared",
+                        "info",
+                        "Alte Label-Entnahmepause beim Einrichten verworfen",
+                        cleared_label_removal,
+                    )
                 setup_info.pop("completed_ts", None)
                 setup_info.pop("failed_ts", None)
                 setup_info.pop("pause_pending", None)
@@ -1052,6 +1089,7 @@ class MachineRuntime:
                 self._notify_microtom("MAS0001", "2", dedupe_key="machine:MAS0001")
                 self.params.apply_device_value("MAS0002", "0", promote_default=True)
                 info["setup"] = setup_info
+                info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
                 self._write_state(
                     current_state=2,
                     requested_state=3,
@@ -1071,6 +1109,17 @@ class MachineRuntime:
                         setup_result["ok"] = False
                         setup_result["error"] = laser_setup_reset.get("error") or "Laser safety reset after setup failed"
                 if bool((setup_info.get("last_result") or {}).get("ok")):
+                    cleared_label_removal = self._clear_label_removal_runtime_state(
+                        production_info,
+                        reason="setup_completed",
+                    )
+                    if cleared_label_removal:
+                        self._record_event(
+                            "label_removal_state_cleared",
+                            "info",
+                            "Alte Label-Entnahmepause nach erfolgreichem Einrichten verworfen",
+                            cleared_label_removal,
+                        )
                     format_ready, missing_format = self._format_ready_for_pause(param_map)
                     setup_info["parameters_ready"] = format_ready
                     setup_info["missing_parameters"] = missing_format
@@ -1339,6 +1388,13 @@ class MachineRuntime:
         production_start_due = int(new_state or 0) == 5 and bool(pending_start)
         if production_start_due:
             start_result = self._start_production_motion(param_map, format_plan)
+            cleared_label_removal = start_result.get("cleared_label_removal_state")
+            if isinstance(cleared_label_removal, dict):
+                self._clear_label_removal_runtime_state(
+                    production_info,
+                    reason=str(cleared_label_removal.get("reason") or "production_start"),
+                    detail=cleared_label_removal,
+                )
             production_info["last_start"] = start_result
             production_info.pop("pending_start", None)
             production_state_synced_to_esp = bool(start_result.get("synced_state") == 5)
@@ -1574,7 +1630,7 @@ class MachineRuntime:
             "state_source": state_source,
         }
 
-    def refresh_button_led_outputs(self, *, ts: float | None = None) -> dict[str, Any]:
+    def refresh_button_led_outputs(self, *, ts: float | None = None, force: bool = False) -> dict[str, Any]:
         ts = now_ts() if ts is None else float(ts)
         snapshot = self._state_row()
         state = int(snapshot.get("current_state") or 1)
@@ -1586,7 +1642,7 @@ class MachineRuntime:
         if self._safety_led_override_active(state, safety_info):
             button_leds.update(self._safety_button_led_plan(str(safety_info.get("phase") or ""), ts, button_mask))
 
-        self._apply_button_led_plan(button_leds, force=True, source="button-led-tick")
+        self._apply_button_led_plan(button_leds, force=force, source="button-led-tick")
 
         if dict(info.get("button_leds") or {}) != button_leds:
             info["button_leds"] = button_leds
@@ -2286,6 +2342,39 @@ class MachineRuntime:
         if int(candidate_state or 0) in (4, 5, 6) or bool(snapshot_production.get("active")):
             return latest
         return None
+
+    def _clear_label_removal_runtime_state(
+        self,
+        production_info: dict[str, Any],
+        *,
+        reason: str,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        keys = (
+            "label_removal_request",
+            "label_removal_requests",
+            "label_removal_pending_labels",
+        )
+        pause_reason = str(production_info.get("pause_reason") or "")
+        had_state = any(key in production_info for key in keys) or pause_reason.startswith("label_removal_required:")
+        if not had_state:
+            return None
+        cleared = {
+            "reason": reason,
+            "pause_reason": pause_reason,
+            "labels": self._pending_label_removal_labels(production_info),
+            "detail": dict(detail or {}),
+            "ts": now_ts(),
+        }
+        for key in keys:
+            production_info.pop(key, None)
+        if pause_reason.startswith("label_removal_required:"):
+            production_info.pop("pause_reason", None)
+            production_info.pop("paused", None)
+            production_info.pop("paused_ts", None)
+            production_info.pop("resume_from_state", None)
+        production_info["last_cleared_label_removal_state"] = cleared
+        return cleared
 
     def _first_print_wickler_ready_key(self, *, label_no: int, payload: dict[str, Any] | None) -> str:
         state_info = dict(self._state_row().get("info") or {})
@@ -5419,6 +5508,72 @@ class MachineRuntime:
             return {}
         return parsed if isinstance(parsed, dict) else {}
 
+    def _validate_label_removal_resume_on_esp(self, labels: list[int]) -> dict[str, Any]:
+        expected = sorted({int(label) for label in labels if int(label) > 0})
+        if not expected:
+            return {"ok": True, "valid": False, "stale": True, "reason": "no_labels"}
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            return {"ok": True, "valid": True, "stale": False, "labels": expected, "simulated": True}
+        try:
+            response = self._production_esp_retry(
+                "PROCESS VISUALIZATION?",
+                read_timeout_s=3.0,
+                attempts=2,
+                settle_s=0.1,
+                priority=True,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "valid": False,
+                "stale": False,
+                "reason": "esp_visualization_failed",
+                "error": repr(exc),
+                "labels": expected,
+            }
+        payload = self._parse_esp_json_response(response)
+        if not payload:
+            return {
+                "ok": False,
+                "valid": False,
+                "stale": False,
+                "reason": "esp_visualization_not_json",
+                "response": str(response or "")[:240],
+                "labels": expected,
+            }
+        label_rows = payload.get("labels")
+        if not isinstance(label_rows, list):
+            label_rows = []
+        by_no: dict[int, dict[str, Any]] = {}
+        for item in label_rows:
+            if not isinstance(item, dict):
+                continue
+            label_no = _safe_int(item.get("no"), 0)
+            if label_no > 0:
+                by_no[label_no] = item
+        missing = [label for label in expected if label not in by_no]
+        not_pending = [
+            label
+            for label in expected
+            if label in by_no
+            and not (
+                _truthy(by_no[label].get("removal_pending"))
+                or _truthy(by_no[label].get("needs_removal"))
+                or _truthy(by_no[label].get("expected_removed"))
+            )
+        ]
+        result = {
+            "ok": True,
+            "valid": not missing and not not_pending,
+            "stale": bool(missing or not_pending),
+            "labels": expected,
+            "labels_active": _safe_int(payload.get("labels_active"), len(by_no)),
+            "active_labels": sorted(by_no),
+            "missing": missing,
+            "not_pending": not_pending,
+        }
+        return result
+
     def _production_label_for_audit(self) -> str:
         label = self._current_production_label()
         if label:
@@ -6050,6 +6205,7 @@ class MachineRuntime:
         if not _PRODUCTION_MOTION_LOCK.acquire(blocking=False):
             return {"ok": False, "error": "production_motion_start_already_running", "started_ts": started_ts}
         synced_state = 0
+        cleared_label_removal_state: dict[str, Any] | None = None
         try:
             plan = self._production_motion_plan(param_map, format_plan)
             state_info = dict(self._state_row().get("info") or {})
@@ -6060,6 +6216,35 @@ class MachineRuntime:
             if pending_removal_labels and str(production_info_before_start.get("pause_reason") or "").startswith(
                 "label_removal_required:"
             ):
+                removal_validation = self._validate_label_removal_resume_on_esp(pending_removal_labels)
+                if not bool(removal_validation.get("ok")):
+                    return {
+                        "ok": False,
+                        "started_ts": started_ts,
+                        "finished_ts": now_ts(),
+                        "synced_state": synced_state,
+                        "error": "label_removal_resume_validation_failed: "
+                        + str(removal_validation.get("reason") or "unknown"),
+                        "label_removal_validation": removal_validation,
+                    }
+                if bool(removal_validation.get("stale")):
+                    cleared_label_removal_state = self._clear_label_removal_runtime_state(
+                        production_info_before_start,
+                        reason="esp_register_missing_before_start",
+                        detail=removal_validation,
+                    )
+                    if cleared_label_removal_state:
+                        self._record_event(
+                            "label_removal_state_cleared",
+                            "warning",
+                            "Alte Label-Entnahmepause vor Produktionsstart verworfen: ESP-Register passt nicht mehr",
+                            cleared_label_removal_state,
+                        )
+                    pending_removal_labels = []
+                    pause_reason_before_start = ""
+                else:
+                    production_info_before_start["label_removal_resume_validation"] = removal_validation
+            if pending_removal_labels and pause_reason_before_start.startswith("label_removal_required:"):
                 return self._resume_production_after_label_removal(
                     param_map=param_map,
                     plan=plan,
@@ -6173,6 +6358,8 @@ class MachineRuntime:
                 "command": start_command,
                 "response": response,
             }
+            if cleared_label_removal_state:
+                result["cleared_label_removal_state"] = cleared_label_removal_state
             self._record_event(
                 "production_motion_started",
                 "info",
@@ -6187,6 +6374,7 @@ class MachineRuntime:
                 "finished_ts": now_ts(),
                 "synced_state": synced_state,
                 "error": str(exc),
+                "cleared_label_removal_state": cleared_label_removal_state,
             }
         finally:
             _PRODUCTION_MOTION_LOCK.release()

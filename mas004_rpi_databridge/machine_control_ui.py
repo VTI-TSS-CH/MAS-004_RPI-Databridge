@@ -216,9 +216,13 @@ const bypassCards = [
 ];
 let refreshTimer = null;
 const transitionStates = new Set([2,4,6,8,10,12,14,16,18]);
-const AUTO_REFRESH_MS = 500;
+const AUTO_REFRESH_MS = 1500;
+const AUDIT_AUTO_REFRESH_MS = 10000;
 const FAST_REFRESH_MS = 180;
 const FAST_REFRESH_WINDOW_MS = 5000;
+let machineLoadInFlight = null;
+let auditLoadInFlight = null;
+let lastAuditLoadMs = 0;
 function token(){{ try{{return localStorage.getItem(TOKEN_KEY)||"";}}catch(e){{return"";}} }}
 function loadAuditPrefs(){{
   try{{return JSON.parse(localStorage.getItem(AUDIT_PREF_KEY) || "{{}}") || {{}};}}catch(e){{return {{}};}}
@@ -584,17 +588,26 @@ function num(id, fallback, min, max){{
   return Math.max(min, Math.min(max, Math.round(v)));
 }}
 async function loadAudit(){{
+  if(auditLoadInFlight) return auditLoadInFlight;
   saveAuditPrefs();
   const hours = num("view_hours", 72, 1, 87600);
   const limit = num("entry_limit", 800, 50, 5000);
-  const j = await api(`/api/machine/audit?hours=${{hours}}&limit=${{limit}}`);
-  const prefs = loadAuditPrefs();
-  document.getElementById("keep_hours").value = Number.isFinite(Number(prefs.keep_hours)) ? prefs.keep_hours : (j.keep_hours || hours);
-  document.getElementById("view_hours").value = hours;
-  renderAudit(j.entries || []);
-  document.getElementById("audit_status").textContent = `Fenster: ${{hours}} h, Limit: ${{limit}}, Aufbewahrung: ${{j.keep_hours}} h`;
+  auditLoadInFlight = (async () => {{
+    const j = await api(`/api/machine/audit?hours=${{hours}}&limit=${{limit}}`);
+    const prefs = loadAuditPrefs();
+    document.getElementById("keep_hours").value = Number.isFinite(Number(prefs.keep_hours)) ? prefs.keep_hours : (j.keep_hours || hours);
+    document.getElementById("view_hours").value = hours;
+    renderAudit(j.entries || []);
+    lastAuditLoadMs = Date.now();
+    document.getElementById("audit_status").textContent = `Fenster: ${{hours}} h, Limit: ${{limit}}, Aufbewahrung: ${{j.keep_hours}} h`;
+    return j;
+  }})();
+  try{{ return await auditLoadInFlight; }}
+  finally{{ auditLoadInFlight = null; }}
 }}
 async function loadAll(opts={{}}){{
+  if(machineLoadInFlight) return machineLoadInFlight;
+  machineLoadInFlight = (async () => {{
   try{{
     const machine = await api("/api/machine/overview");
     renderMachine(machine);
@@ -607,6 +620,9 @@ async function loadAll(opts={{}}){{
     document.getElementById("audit_status").textContent = err.message;
     throw err;
   }}
+  }})();
+  try{{ return await machineLoadInFlight; }}
+  finally{{ machineLoadInFlight = null; }}
 }}
 async function saveRetention(){{
   saveAuditPrefs();
@@ -628,7 +644,11 @@ function downloadAudit(){{
 }}
 function schedule(){{
   if(refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(()=>{{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll().catch(()=>{{}}); }}, AUTO_REFRESH_MS);
+  refreshTimer = setInterval(()=>{{
+    if(document.hidden || !document.getElementById("auto_refresh").checked) return;
+    const includeAudit = (Date.now() - lastAuditLoadMs) >= AUDIT_AUTO_REFRESH_MS;
+    loadAll({{audit:includeAudit}}).catch(()=>{{}});
+  }}, AUTO_REFRESH_MS);
 }}
 document.getElementById("auto_refresh").addEventListener("change", schedule);
 document.getElementById("keep_hours").addEventListener("change", saveAuditPrefs);
