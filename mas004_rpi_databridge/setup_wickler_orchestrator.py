@@ -130,12 +130,13 @@ class SetupWicklerOrchestrator:
             return True, summary
         return False, summary
 
-    def _esp(self, line: str, read_timeout_s: float | None = None) -> str:
+    def _esp(self, line: str, read_timeout_s: float | None = None, *, priority: bool = True) -> str:
         try:
             response = self.esp.exchange_line(
                 line,
                 read_timeout_s=read_timeout_s
                 or self.cfg.get_float("esp_command_timeout_s", 8.0),
+                priority=priority,
             )
         except Exception as exc:
             self.logs.log("esp-plc", "warning", f"setup wickler orchestration failed: {line} -> {repr(exc)}")
@@ -154,12 +155,13 @@ class SetupWicklerOrchestrator:
         read_timeout_s: float | None = None,
         attempts: int = 2,
         settle_s: float = 0.25,
+        priority: bool = True,
     ) -> str:
         errors: list[str] = []
         max_attempts = max(1, int(attempts))
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._esp(line, read_timeout_s=read_timeout_s)
+                return self._esp(line, read_timeout_s=read_timeout_s, priority=priority)
             except Exception as exc:
                 errors.append(repr(exc))
                 if attempt >= max_attempts:
@@ -285,7 +287,7 @@ class SetupWicklerOrchestrator:
                 continue
             if self._setup_sync_dedupe.is_duplicate("esp-setup-sync", key, value):
                 continue
-            self._esp(f"SYNC {key}={value}", read_timeout_s=5.0)
+            self._esp_retry(f"SYNC {key}={value}", read_timeout_s=5.0, attempts=3, settle_s=0.35)
             self._setup_sync_dedupe.remember("esp-setup-sync", key, value)
 
     def _configure_motor3(self, speed_mm_s: float, ramp_mm_s2: float) -> None:

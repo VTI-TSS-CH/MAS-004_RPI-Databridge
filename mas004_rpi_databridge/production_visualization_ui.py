@@ -340,7 +340,12 @@ function renderRows(payload){
       <td><span class="pill ${labelClass(l)}">${esc(stageText(l))}</span><br/>Printfehler ${fmt(l.print_error_mm,3)} mm<br/>Korrekturen ${esc(l.print_corrections ?? l.registration_attempts ?? 0)}</td>
       <td>${flags(l)}</td>
     </tr>`).join("") : '<tr><td colspan="4" class="muted">Keine aktiven Labels im ESP-Schieberegister.</td></tr>';
-  const hist = payload.completed_labels || [];
+  const hist = (payload.completed_labels || []).slice().sort((a,b) => {
+    const pa = String(a.production_label || "");
+    const pb = String(b.production_label || "");
+    if (pa !== pb) return pb.localeCompare(pa);
+    return Number(b.label_no || 0) - Number(a.label_no || 0);
+  });
   document.getElementById("history_count").textContent = String(hist.length);
   document.getElementById("history_rows").innerHTML = hist.length ? hist.map(item => {
     const p = item.payload || {};

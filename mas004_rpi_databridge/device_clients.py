@@ -150,7 +150,7 @@ _ESP_COMMAND_CLOSE_AFTER_RESPONSE = True
 _ESP_COMMAND_MIN_SPACING_S = 0.08
 _ESP_COMMAND_BROKER_ENABLED = True
 _ESP_COMMAND_BROKER_QUEUE_MAX = 256
-_ESP_COMMAND_BROKER_KEEPALIVE_S = 5.0
+_ESP_COMMAND_BROKER_KEEPALIVE_S = 2.0
 _ESP_COMMAND_BROKER_MODE_COMMAND = "TCP BROKER=1"
 _ESP_COMMAND_BROKER_SETUP_TIMEOUT_S = 1.0
 _ULTIMATE_ENDPOINTS_GUARD = threading.Lock()
@@ -342,6 +342,7 @@ class _EspCommandBroker:
         self._broker_confirmed_at = 0.0
         self._last_keepalive_at = 0.0
         self._active_line = ""
+        self._active_req: _EspBrokerRequest | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -381,6 +382,8 @@ class _EspCommandBroker:
         remaining = max(0.05, deadline - time.monotonic())
         if not req.event.wait(timeout=remaining):
             req.fail(TimeoutError("ESP command broker request timed out"))
+            if self._active_req is req:
+                self.close_socket()
             raise TimeoutError("ESP command broker request timed out")
         if req.exception is not None:
             raise req.exception
@@ -428,11 +431,16 @@ class _EspCommandBroker:
                     req.fail(TimeoutError("ESP command broker request expired before send"))
                     continue
                 self._active_line = req.line
+                self._active_req = req
                 reply = self._execute_with_retries(req)
-                req.complete(reply)
+                if not req.event.is_set():
+                    req.complete(reply)
             except Exception as exc:
-                req.fail(exc)
+                if not req.event.is_set():
+                    req.fail(exc)
             finally:
+                if self._active_req is req:
+                    self._active_req = None
                 self._active_line = ""
                 self._queue.task_done()
 

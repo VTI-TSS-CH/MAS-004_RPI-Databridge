@@ -72,6 +72,7 @@ class _MachineEventDispatcher:
         if event_type in {
             "label_complete",
             "label_removal_required",
+            "production_rewind_audit_started",
             "production_fault",
             "production_registration_fault",
             "production_registration_late",

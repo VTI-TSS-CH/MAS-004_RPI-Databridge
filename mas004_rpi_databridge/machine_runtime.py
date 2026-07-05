@@ -203,6 +203,9 @@ PRODUCTION_RUNTIME_EVENT_TYPES = {
     "production_print_trigger",
     "production_print_resolved",
     "production_print_position_failed",
+    "production_removal_rewind_started",
+    "production_removal_rewind_done",
+    "production_removal_rewind_fault",
     "label_removal_required",
 }
 PRODUCTION_START_MOTION_ENABLED = True
@@ -230,6 +233,9 @@ PRODUCTION_ESP_MONITOR_INTERVAL_S = 0.5
 PRODUCTION_ESP_MONITOR_COMM_MAX_MISSES = 3
 PRODUCTION_ESP_FIRST_READY_FALLBACK_INTERVAL_S = 0.75
 PRODUCTION_CONTROLLED_PAUSE_TIMEOUT_S = 120.0
+PRODUCTION_REMOVAL_REWIND_BACKOFF_MM = 20.0
+PRODUCTION_REMOVAL_REWIND_TIMEOUT_S = 120.0
+PRODUCTION_REWIND_AUDIT_POSITION_TOLERANCE_MM = 18.0
 PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0001",
     "MAP0002",
@@ -1488,6 +1494,14 @@ class MachineRuntime:
                 )
                 if tto_state_sync.get("queued") or not tto_state_sync.get("skipped"):
                     info["last_tto_printer_state_sync"] = tto_state_sync
+            rewind_audit = self._handle_production_rewind_audit_transition(
+                previous_state=previous_state,
+                new_state=int(new_state or 0),
+                production_info=production_info,
+                param_map=param_map,
+            )
+            if rewind_audit is not None:
+                production_info["last_rewind_audit_transition"] = dict(rewind_audit)
 
         pending_hmi_command = info.get("pending_hmi_command")
         if isinstance(pending_hmi_command, dict):
@@ -2197,7 +2211,7 @@ class MachineRuntime:
             try:
                 recorded_label = self._handle_label_complete(
                     dict(payload or {}),
-                    forward_to_microtom=False,
+                    forward_to_microtom=True,
                     allow_removal_action=False,
                     record_machine_event=False,
                 )
@@ -2759,19 +2773,42 @@ class MachineRuntime:
         production_label = self._current_production_label() or str(snapshot.get("production_label") or "")
         if not production_label:
             production_label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
+        rewind_result: dict[str, Any] = {"ok": True, "skipped": "already_in_label_removal_pause"}
+        existing_requests = production_info.get("label_removal_requests")
+        already_rewound = False
+        if isinstance(existing_requests, list):
+            for item in existing_requests:
+                if not isinstance(item, dict):
+                    continue
+                if _safe_int(item.get("label_no"), 0) == label_no and bool(item.get("rewind_executed")):
+                    already_rewound = True
+                    break
+        if not already_rewound:
+            try:
+                rewind_result = self._execute_label_removal_rewind(label_no=int(label_no))
+            except Exception as exc:
+                rewind_result = {
+                    "ok": False,
+                    "label_no": int(label_no),
+                    "error": repr(exc),
+                    "stage": "exception",
+                    "rewind_executed": False,
+                }
         request = {
             "label_no": int(label_no),
             "production_label": str(production_label or ""),
             "payload": dict(compact_payload),
             "stop": {"ok": True, "skipped": "already_in_label_removal_pause", "target_state": 7},
+            "rewind": dict(rewind_result or {}),
             "target_state": 7,
             "operator_message": f"Label {label_no} entnehmen",
             "rewind_required": True,
-            "rewind_executed": False,
+            "rewind_executed": bool((rewind_result or {}).get("rewind_executed")),
             "ts": now_ts(),
         }
         production_info["active"] = False
         production_info["paused"] = True
+        production_info["last_label_removal_rewind"] = dict(rewind_result or {})
         production_info.pop("pending_start", None)
         merged = self._merge_label_removal_request(production_info, request)
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
@@ -2915,7 +2952,15 @@ class MachineRuntime:
             removed=removed,
             production_ok=production_ok,
         )
+        already_emitted_to_microtom = False
         with self.db._conn() as c:
+            previous = c.execute(
+                """SELECT emitted_to_microtom
+                     FROM label_register
+                    WHERE production_label=? AND label_no=?""",
+                (label, label_no),
+            ).fetchone()
+            already_emitted_to_microtom = bool(previous and int(previous[0] or 0))
             c.execute(
                 """INSERT INTO label_register(
                        production_label,label_no,created_ts,completed_ts,zero_mm,exit_mm,
@@ -2930,6 +2975,7 @@ class MachineRuntime:
                      verify_ok=excluded.verify_ok,
                      removed=excluded.removed,
                      production_ok=excluded.production_ok,
+                     emitted_to_microtom=MAX(label_register.emitted_to_microtom, excluded.emitted_to_microtom),
                      payload_json=excluded.payload_json""",
                 (
                     label,
@@ -2943,7 +2989,7 @@ class MachineRuntime:
                     int(verify_ok),
                     int(removed),
                     int(production_ok),
-                    0,
+                    1 if already_emitted_to_microtom else 0,
                     json.dumps(compact_payload, ensure_ascii=False),
                 ),
             )
@@ -2952,9 +2998,28 @@ class MachineRuntime:
                 (now_ts(), label, label_no, "label_complete", json.dumps(compact_payload, ensure_ascii=False)),
             )
 
-        if forward_to_microtom:
+        emitted_to_microtom = False
+        if forward_to_microtom and not already_emitted_to_microtom:
             self.params.apply_device_value("MAS0003", str(packed), promote_default=True)
             self._notify_microtom("MAS0003", str(packed), dedupe_key=None)
+            emitted_to_microtom = True
+            with self.db._conn() as c:
+                c.execute(
+                    """UPDATE label_register
+                          SET emitted_to_microtom=1
+                        WHERE production_label=? AND label_no=?""",
+                    (label, label_no),
+                )
+                emit_payload = {
+                    "type": "label_microtom_emit",
+                    "label_no": label_no,
+                    "packed": packed,
+                    "pkey": "MAS0003",
+                }
+                c.execute(
+                    "INSERT INTO label_events(ts,production_label,label_no,event_type,payload_json) VALUES(?,?,?,?,?)",
+                    (now_ts(), label, label_no, "label_microtom_emit", json.dumps(emit_payload, ensure_ascii=False)),
+                )
             self.production_logs.append_line(
                 "labels",
                 label,
@@ -3007,7 +3072,8 @@ class MachineRuntime:
                     "production_ok": production_ok,
                     "removal_pending": removal_pending,
                     "removal_action": removal_action,
-                    "forwarded_to_microtom": bool(forward_to_microtom),
+                    "forwarded_to_microtom": bool(emitted_to_microtom or already_emitted_to_microtom),
+                    "microtom_emit_skipped": "already_emitted" if already_emitted_to_microtom else "",
                 },
             )
         return {
@@ -3015,7 +3081,8 @@ class MachineRuntime:
             "label_no": label_no,
             "packed": packed,
             "removal_action": removal_action,
-            "forwarded_to_microtom": bool(forward_to_microtom),
+            "forwarded_to_microtom": bool(emitted_to_microtom or already_emitted_to_microtom),
+            "microtom_emit_skipped": "already_emitted" if already_emitted_to_microtom else "",
         }
 
     def _pause_for_label_removal(
@@ -3047,20 +3114,35 @@ class MachineRuntime:
             self.params.apply_device_value("MAS0028", "1", promote_default=True)
             self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
 
+        rewind_result: dict[str, Any] = {"ok": True, "skipped": f"target_state={target_state}"}
+        if target_state == 7:
+            try:
+                rewind_result = self._execute_label_removal_rewind(label_no=int(label_no))
+            except Exception as exc:
+                rewind_result = {
+                    "ok": False,
+                    "label_no": int(label_no),
+                    "error": repr(exc),
+                    "stage": "exception",
+                    "rewind_executed": False,
+                }
+
         request = {
             "label_no": int(label_no),
             "production_label": str(production_label or ""),
             "payload": dict(compact_payload),
             "stop": dict(stop_result or {}),
+            "rewind": dict(rewind_result or {}),
             "target_state": target_state,
             "operator_message": f"Label {label_no} entnehmen",
             "rewind_required": True,
-            "rewind_executed": False,
+            "rewind_executed": bool((rewind_result or {}).get("rewind_executed")),
             "ts": now_ts(),
         }
         production_info["active"] = False
         production_info["paused"] = target_state == 7
         production_info["last_stop"] = dict(stop_result or {})
+        production_info["last_label_removal_rewind"] = dict(rewind_result or {})
         production_info.pop("pending_start", None)
         merged_request = self._merge_label_removal_request(production_info, request)
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
@@ -4231,7 +4313,27 @@ class MachineRuntime:
         return {
             "indexedModeEnabled": "1",
             "indexedTravelMm": f"{safe_travel_mm:.3f}",
+            "indexedDirection": "1",
             "indexedSpeedMmS": f"{float(plan['speed_mm_s']):.3f}",
+            "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
+        }
+
+    def _production_wickler_reverse_indexed_payload(
+        self,
+        plan: dict[str, Any],
+        travel_mm: float,
+        *,
+        speed_mm_s: float,
+    ) -> dict[str, str]:
+        safe_travel_mm = max(1.0, min(PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM, float(travel_mm)))
+        safe_speed_mm_s = max(5.0, min(float(plan.get("speed_mm_s", 100.0)), float(speed_mm_s)))
+        return {
+            "indexedModeEnabled": "1",
+            "indexedTravelMm": f"{safe_travel_mm:.3f}",
+            "indexedDirection": "-1",
+            "indexedSpeedMmS": f"{safe_speed_mm_s:.3f}",
             "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
             "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
             "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
@@ -4377,6 +4479,74 @@ class MachineRuntime:
             )
             if not verify.get("ok"):
                 raise RuntimeError(f"{client.descriptor.label} nicht produktionsbereit: {verify}")
+        return results
+
+    def _prepare_production_wicklers_reverse(
+        self,
+        plan: dict[str, Any],
+        *,
+        travel_mm: float,
+        speed_mm_s: float,
+        reason: str,
+        timeout_s: float = 5.0,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        master_payload = self._production_wickler_reverse_indexed_payload(
+            plan,
+            travel_mm,
+            speed_mm_s=speed_mm_s,
+        )
+        for role in ("unwinder", "rewinder"):
+            client = SmartWicklerClient(self.cfg, role)
+            if not client.available():
+                if bool(getattr(self.cfg, client.descriptor.simulation_attr, True)):
+                    results.append({"role": role, "ok": True, "simulation": True})
+                    continue
+                raise RuntimeError(f"{client.descriptor.label} endpoint missing")
+            master_reply = client.post_master(master_payload, timeout_s=timeout_s)
+            if not master_reply.get("ok", True):
+                raise RuntimeError(f"{client.descriptor.label} reverse indexed master failed: {master_reply}")
+            state, verify = self._wait_production_wickler_indexed_prepared(
+                client,
+                role,
+                timeout_s=timeout_s,
+            )
+            telemetry = dict((state or {}).get("telemetry") or {})
+            master = dict((state or {}).get("master") or {})
+            indexed_plan = {
+                "base_travel_mm": float(travel_mm),
+                "master_travel_mm": _safe_float(master.get("indexedTravelMm"), travel_mm),
+                "prepared_travel_mm": _safe_float(telemetry.get("indexedTravelMm"), travel_mm),
+                "indexed_direction": _safe_int(telemetry.get("indexedDirection", master.get("indexedDirection")), -1),
+                "prepared_trim_mm": _safe_float(telemetry.get("indexedTrimMm"), 0.0),
+                "wipe_percent": _safe_float(telemetry.get("wipePercent"), 0.0),
+                "command_seq": _safe_int(telemetry.get("indexedCommandSeq"), 0),
+            }
+            result = {
+                "ok": bool(verify.get("ok")),
+                "role": role,
+                "reason": reason,
+                "mode": "reverse_indexed",
+                "travel_mm": float(travel_mm),
+                "speed_mm_s": float(speed_mm_s),
+                "indexed_plan": indexed_plan,
+                "master": master_reply,
+                "verify": verify,
+            }
+            results.append(result)
+            self.logs.log(
+                "machine",
+                "info",
+                (
+                    f"Wickler-Rueckspultakt vorbereitet {client.descriptor.label}: "
+                    f"Basis {float(travel_mm):.3f}mm, Richtung -1, "
+                    f"Wippe {indexed_plan['wipe_percent']:.1f}%, "
+                    f"effektiv {indexed_plan['prepared_travel_mm']:.3f}mm, "
+                    f"Seq {indexed_plan['command_seq']}"
+                ),
+            )
+            if not verify.get("ok"):
+                raise RuntimeError(f"{client.descriptor.label} nicht rueckspulbereit: {verify}")
         return results
 
     def _prepare_next_production_wickler_takt(self, *, label_no: int, reason: str) -> dict[str, Any]:
@@ -5237,6 +5407,449 @@ class MachineRuntime:
             return {"ok": True, "labels": labels, "command": command, "response": response}
         except Exception as exc:
             return {"ok": False, "labels": labels, "command": command, "error": repr(exc)}
+
+    @staticmethod
+    def _parse_esp_json_response(response: Any) -> dict[str, Any]:
+        text = str(response or "").strip()
+        if text.upper().startswith("JSON "):
+            text = text[5:].strip()
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _production_label_for_audit(self) -> str:
+        label = self._current_production_label()
+        if label:
+            return label
+        try:
+            row = self._state_row()
+            label = str(row.get("production_label") or "").strip()
+        except Exception:
+            label = ""
+        if label:
+            return label
+        return sanitize_production_label(self.params.get_effective_value("MAS0029"))
+
+    def _production_rewind_audit_expected(
+        self,
+        *,
+        production_label: str,
+        param_map: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        label = str(production_label or "").strip()
+        control_mm = _safe_float((param_map or {}).get("MAP0021"), 19300.0) / 10.0
+        rows: list[dict[str, Any]] = []
+        if label:
+            with self.db._conn() as c:
+                db_rows = c.execute(
+                    """SELECT label_no,zero_mm,exit_mm,removed,production_ok,payload_json
+                         FROM label_register
+                        WHERE production_label=? AND completed_ts IS NOT NULL
+                        ORDER BY label_no ASC""",
+                    (label,),
+                ).fetchall()
+            for row in db_rows:
+                try:
+                    payload = json.loads(row[5] or "{}")
+                except Exception:
+                    payload = {}
+                label_no = int(row[0] or 0)
+                zero_mm = _safe_float(row[1], 0.0)
+                length_mm = _safe_float(payload.get("measured_length_mm"), 0.0)
+                if length_mm <= 1.0:
+                    length_mm = max(1.0, _safe_float(row[2], zero_mm) - zero_mm)
+                should_remove = _truthy(
+                    payload.get(
+                        "should_remove",
+                        payload.get("needs_removal", payload.get("removal_pending", 0)),
+                    )
+                )
+                removed = bool(row[3]) or _truthy(payload.get("removed", 0)) or _truthy(payload.get("removed_confirmed", 0))
+                expected_present = not should_remove
+                rows.append(
+                    {
+                        "label_no": label_no,
+                        "zero_mm": zero_mm,
+                        "length_mm": length_mm,
+                        "control_edge_mm": zero_mm + control_mm,
+                        "reverse_edge_mm": zero_mm + control_mm + length_mm,
+                        "should_remove": should_remove,
+                        "removed": removed,
+                        "expected_present": expected_present,
+                        "production_ok": bool(row[4]),
+                    }
+                )
+        expected_present_count = sum(1 for item in rows if bool(item.get("expected_present")))
+        expected_removed_count = len(rows) - expected_present_count
+        return {
+            "production_label": label,
+            "control_mm": control_mm,
+            "total_count": len(rows),
+            "present_count": expected_present_count,
+            "removed_count": expected_removed_count,
+            "labels": rows,
+        }
+
+    def _compare_production_rewind_audit(
+        self,
+        *,
+        expected: dict[str, Any],
+        audit_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        samples_raw = audit_payload.get("samples") if isinstance(audit_payload, dict) else []
+        samples = [item for item in samples_raw if isinstance(item, dict)] if isinstance(samples_raw, list) else []
+        expected_labels = list(expected.get("labels") or [])
+        used_labels: set[int] = set()
+        matches: list[dict[str, Any]] = []
+        removed_seen: list[dict[str, Any]] = []
+        unexpected: list[dict[str, Any]] = []
+        for sample in samples:
+            sample_mm = _safe_float(sample.get("infeed_mm"), 0.0)
+            best: tuple[float, int, dict[str, Any], str] | None = None
+            for idx, label in enumerate(expected_labels):
+                if idx in used_labels:
+                    continue
+                length_mm = max(1.0, _safe_float(label.get("length_mm"), 0.0))
+                tolerance_mm = max(PRODUCTION_REWIND_AUDIT_POSITION_TOLERANCE_MM, min(45.0, length_mm * 0.35))
+                candidates = (
+                    ("control_edge", _safe_float(label.get("control_edge_mm"), 0.0)),
+                    ("reverse_edge", _safe_float(label.get("reverse_edge_mm"), 0.0)),
+                )
+                for edge_name, edge_mm in candidates:
+                    delta = abs(sample_mm - edge_mm)
+                    if delta <= tolerance_mm and (best is None or delta < best[0]):
+                        best = (delta, idx, label, edge_name)
+            if best is None:
+                unexpected.append({"sample": sample, "reason": "no_expected_label_near_position"})
+                continue
+            delta, idx, label, edge_name = best
+            used_labels.add(idx)
+            item = {
+                "sample": sample,
+                "label_no": _safe_int(label.get("label_no"), 0),
+                "delta_mm": delta,
+                "edge": edge_name,
+                "expected_present": bool(label.get("expected_present")),
+            }
+            if bool(label.get("expected_present")):
+                matches.append(item)
+            else:
+                removed_seen.append(item)
+
+        missing = [
+            {
+                "label_no": _safe_int(label.get("label_no"), 0),
+                "control_edge_mm": _safe_float(label.get("control_edge_mm"), 0.0),
+                "reverse_edge_mm": _safe_float(label.get("reverse_edge_mm"), 0.0),
+            }
+            for idx, label in enumerate(expected_labels)
+            if idx not in used_labels and bool(label.get("expected_present"))
+        ]
+        observed_count = _safe_int(audit_payload.get("observed_count"), len(samples))
+        expected_present = _safe_int(expected.get("present_count"), 0)
+        overflow = _safe_int(audit_payload.get("overflow"), 0)
+        count_ok = observed_count == expected_present
+        position_ok = not missing and not unexpected and not removed_seen and overflow == 0
+        return {
+            "ok": bool(count_ok and position_ok),
+            "count_ok": bool(count_ok),
+            "position_ok": bool(position_ok),
+            "expected_present": expected_present,
+            "expected_total": _safe_int(expected.get("total_count"), 0),
+            "expected_removed": _safe_int(expected.get("removed_count"), 0),
+            "observed_count": observed_count,
+            "overflow": overflow,
+            "matched": matches,
+            "missing": missing,
+            "unexpected": unexpected,
+            "removed_seen": removed_seen,
+        }
+
+    def _start_production_rewind_audit(
+        self,
+        *,
+        production_info: dict[str, Any],
+        param_map: dict[str, str],
+    ) -> dict[str, Any]:
+        started_ts = now_ts()
+        label = self._production_label_for_audit()
+        expected = self._production_rewind_audit_expected(production_label=label, param_map=param_map)
+        command = (
+            "PROCESS PRODUCTION REWIND_AUDIT START "
+            f"EXPECTED_COUNT={_safe_int(expected.get('present_count'), 0)} "
+            f"EXPECTED_TOTAL={_safe_int(expected.get('total_count'), 0)} "
+            f"EXPECTED_REMOVED={_safe_int(expected.get('removed_count'), 0)}"
+        )
+        try:
+            response = self._production_esp_retry(command, read_timeout_s=2.0, attempts=2, priority=True)
+            payload = self._parse_esp_json_response(response)
+            result = {
+                "ok": bool(payload) and bool(payload.get("ok", False)),
+                "running": bool(payload.get("running", True)),
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "production_label": label,
+                "expected": expected,
+                "command": command,
+                "response": response,
+                "payload": payload,
+            }
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "production_label": label,
+                "expected": expected,
+                "command": command,
+                "error": repr(exc),
+            }
+        production_info["rewind_audit"] = dict(result)
+        self._record_event(
+            "production_rewind_audit_started",
+            "info" if result.get("ok") else "warning",
+            (
+                f"Rueckspul-Endkontrolle gestartet: erwartet {expected.get('present_count')} vorhandene "
+                f"von {expected.get('total_count')} Labels"
+            ),
+            result,
+        )
+        self.production_logs.append_line(
+            "labels",
+            label,
+            (
+                f"[rewind_audit_start] expected_present={expected.get('present_count')} "
+                f"expected_total={expected.get('total_count')} expected_removed={expected.get('removed_count')}\n"
+            ),
+        )
+        return result
+
+    def _stop_production_rewind_audit(
+        self,
+        *,
+        production_info: dict[str, Any],
+        param_map: dict[str, str],
+    ) -> dict[str, Any]:
+        started_ts = now_ts()
+        previous = production_info.get("rewind_audit") if isinstance(production_info.get("rewind_audit"), dict) else {}
+        expected = dict(previous.get("expected") or {})
+        label = str(previous.get("production_label") or "").strip() or self._production_label_for_audit()
+        if not expected:
+            expected = self._production_rewind_audit_expected(production_label=label, param_map=param_map)
+        command = "PROCESS PRODUCTION REWIND_AUDIT STOP"
+        try:
+            response = self._production_esp_retry(command, read_timeout_s=2.0, attempts=2, priority=True)
+            payload = self._parse_esp_json_response(response)
+        except Exception as exc:
+            response = ""
+            payload = {"ok": False, "error": repr(exc)}
+        comparison = self._compare_production_rewind_audit(expected=expected, audit_payload=payload)
+        result = {
+            "ok": bool(payload) and bool(payload.get("ok", False)) and bool(comparison.get("ok")),
+            "started_ts": started_ts,
+            "finished_ts": now_ts(),
+            "production_label": label,
+            "expected": expected,
+            "command": command,
+            "response": response,
+            "payload": payload,
+            "comparison": comparison,
+        }
+        production_info["rewind_audit"] = dict(result)
+        severity = "info" if result["ok"] else "warning"
+        self._record_event(
+            "production_rewind_audit_finished",
+            severity,
+            (
+                f"Rueckspul-Endkontrolle: {comparison.get('observed_count')}/"
+                f"{comparison.get('expected_present')} vorhandene Labels erkannt"
+            ),
+            result,
+        )
+        self.production_logs.append_line(
+            "labels",
+            label,
+            (
+                f"[rewind_audit_finish] ok={int(result['ok'])} "
+                f"observed={comparison.get('observed_count')} expected_present={comparison.get('expected_present')} "
+                f"missing={len(comparison.get('missing') or [])} "
+                f"unexpected={len(comparison.get('unexpected') or [])} "
+                f"removed_seen={len(comparison.get('removed_seen') or [])}\n"
+            ),
+        )
+        return result
+
+    def _handle_production_rewind_audit_transition(
+        self,
+        *,
+        previous_state: int,
+        new_state: int,
+        production_info: dict[str, Any],
+        param_map: dict[str, str],
+    ) -> dict[str, Any] | None:
+        was_rewind = int(previous_state or 0) in (10, 11)
+        is_rewind = int(new_state or 0) in (10, 11)
+        if is_rewind and not was_rewind:
+            return self._start_production_rewind_audit(
+                production_info=production_info,
+                param_map=param_map,
+            )
+        if was_rewind and not is_rewind:
+            return self._stop_production_rewind_audit(
+                production_info=production_info,
+                param_map=param_map,
+            )
+        return None
+
+    def _execute_label_removal_rewind(self, *, label_no: int) -> dict[str, Any]:
+        started_ts = now_ts()
+        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        plan = self._production_motion_plan(param_map, build_format_plan(param_map))
+        rewind_speed_mm_s = abs(_safe_float(param_map.get("MAP0015"), plan["speed_mm_s"]))
+        if rewind_speed_mm_s < 1.0:
+            rewind_speed_mm_s = float(plan["speed_mm_s"])
+        rewind_speed_mm_s = max(5.0, min(250.0, rewind_speed_mm_s))
+        backoff_mm = PRODUCTION_REMOVAL_REWIND_BACKOFF_MM
+        base_command = (
+            "PROCESS PRODUCTION REWIND_REMOVAL "
+            f"LABEL={int(label_no)} "
+            f"SPEED_MM_S={rewind_speed_mm_s:.3f} "
+            f"BACKOFF_MM={backoff_mm:.3f}"
+        )
+
+        plan_response = self._production_esp_retry(
+            base_command + " DRY_RUN=1",
+            read_timeout_s=2.0,
+            attempts=2,
+            priority=True,
+        )
+        plan_payload: dict[str, Any] = {}
+        text = str(plan_response or "").strip()
+        if text.upper().startswith("JSON "):
+            try:
+                plan_payload = json.loads(text.removeprefix("JSON ").strip())
+            except Exception:
+                plan_payload = {}
+        if not bool(plan_payload.get("ok", False)):
+            return {
+                "ok": False,
+                "label_no": int(label_no),
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "stage": "plan",
+                "command": base_command + " DRY_RUN=1",
+                "response": plan_response,
+                "payload": plan_payload,
+            }
+
+        distance_mm = _safe_float(plan_payload.get("distance_mm"), 0.0)
+        if distance_mm < 1.0 or str(plan_payload.get("skipped") or ""):
+            return {
+                "ok": True,
+                "label_no": int(label_no),
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "skipped": str(plan_payload.get("skipped") or "distance_below_minimum"),
+                "plan": plan_payload,
+                "rewind_executed": False,
+            }
+
+        wicklers = self._prepare_production_wicklers_reverse(
+            plan,
+            travel_mm=distance_mm,
+            speed_mm_s=rewind_speed_mm_s,
+            reason=f"label_removal_rewind:{label_no}",
+            timeout_s=3.0,
+        )
+        start_response = self._production_esp_retry(
+            base_command,
+            read_timeout_s=2.0,
+            attempts=2,
+            priority=True,
+        )
+        start_payload: dict[str, Any] = {}
+        text = str(start_response or "").strip()
+        if text.upper().startswith("JSON "):
+            try:
+                start_payload = json.loads(text.removeprefix("JSON ").strip())
+            except Exception:
+                start_payload = {}
+        if start_payload and not bool(start_payload.get("ok", True)):
+            return {
+                "ok": False,
+                "label_no": int(label_no),
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "stage": "start",
+                "plan": plan_payload,
+                "wicklers": wicklers,
+                "command": base_command,
+                "response": start_response,
+                "payload": start_payload,
+            }
+
+        deadline = now_ts() + PRODUCTION_REMOVAL_REWIND_TIMEOUT_S
+        monitor_snapshots: list[dict[str, Any]] = []
+        completed = False
+        last_error = ""
+        while now_ts() < deadline:
+            try:
+                diag = self._read_production_monitor_diag()
+                snapshot = {
+                    "ts": now_ts(),
+                    "ok": True,
+                    "running": bool(diag.get("removal_rewind_running")),
+                    "completed": bool(diag.get("removal_rewind_completed")),
+                    "label_no": diag.get("removal_rewind_label_no"),
+                    "reason": diag.get("reason"),
+                    "last_error": diag.get("removal_rewind_last_error") or diag.get("last_error"),
+                }
+                monitor_snapshots.append(snapshot)
+                if not snapshot["running"]:
+                    completed = bool(snapshot["completed"]) or str(snapshot["last_error"] or "") in {
+                        "complete",
+                        "already_at_removal_position",
+                    }
+                    last_error = str(snapshot["last_error"] or "")
+                    break
+            except Exception as exc:
+                monitor_snapshots.append({"ts": now_ts(), "ok": False, "error": repr(exc)})
+            time.sleep(0.1)
+
+        idle_wicklers = self._set_production_wicklers_idle(target_state=7)
+        result = {
+            "ok": bool(completed),
+            "label_no": int(label_no),
+            "started_ts": started_ts,
+            "finished_ts": now_ts(),
+            "rewind_executed": True,
+            "distance_mm": distance_mm,
+            "speed_mm_s": rewind_speed_mm_s,
+            "backoff_mm": backoff_mm,
+            "plan": plan_payload,
+            "wicklers": wicklers,
+            "command": base_command,
+            "response": start_response,
+            "start_payload": start_payload,
+            "monitor_snapshots": monitor_snapshots[-12:],
+            "last_error": last_error,
+            "idle_wicklers": idle_wicklers,
+        }
+        if not completed:
+            result["error"] = last_error or "removal_rewind_timeout"
+        self._record_event(
+            "label_removal_rewind",
+            "info" if result["ok"] else "warning",
+            (
+                f"Label {label_no} zur Entnahme zurueckgespult ({distance_mm:.1f}mm)"
+                if result["ok"]
+                else f"Rueckspulen fuer Label {label_no} nicht bestaetigt"
+            ),
+            result,
+        )
+        return result
 
     def _resume_production_after_pause(
         self,

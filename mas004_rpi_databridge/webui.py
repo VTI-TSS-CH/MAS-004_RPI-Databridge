@@ -2077,16 +2077,28 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             errors.insert(0, visualization_error)
         return snapshot, errors
 
-    def recent_completed_labels(limit: int = 80) -> list[dict[str, Any]]:
+    def recent_completed_labels(limit: int = 80, production_label: str | None = None) -> list[dict[str, Any]]:
+        label_filter = str(production_label or "").strip()
         with db._conn() as c:
-            rows = c.execute(
-                """SELECT production_label,label_no,created_ts,completed_ts,zero_mm,exit_mm,
-                          material_ok,print_ok,verify_ok,removed,production_ok,payload_json
-                   FROM label_register
-                   ORDER BY COALESCE(completed_ts, created_ts) DESC, label_no DESC
-                   LIMIT ?""",
-                (int(limit),),
-            ).fetchall()
+            if label_filter:
+                rows = c.execute(
+                    """SELECT production_label,label_no,created_ts,completed_ts,zero_mm,exit_mm,
+                              material_ok,print_ok,verify_ok,removed,production_ok,payload_json
+                       FROM label_register
+                      WHERE production_label=?
+                      ORDER BY label_no DESC, COALESCE(completed_ts, created_ts) DESC
+                      LIMIT ?""",
+                    (label_filter, int(limit)),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    """SELECT production_label,label_no,created_ts,completed_ts,zero_mm,exit_mm,
+                              material_ok,print_ok,verify_ok,removed,production_ok,payload_json
+                       FROM label_register
+                      ORDER BY production_label DESC, label_no DESC, COALESCE(completed_ts, created_ts) DESC
+                      LIMIT ?""",
+                    (int(limit),),
+                ).fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
             try:
@@ -2183,7 +2195,10 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             "esp_snapshot": esp_snapshot,
             "esp_error": esp_error,
             "active_labels": active_labels,
-            "completed_labels": recent_completed_labels(limit=80),
+            "completed_labels": recent_completed_labels(
+                limit=80,
+                production_label=str((machine or {}).get("production_label") or ""),
+            ),
             "format": {
                 "label_length_mm": float(label.get("length_tenths_mm") or 0) / 10.0,
                 "label_tolerance_mm": float(label.get("length_tolerance_tenths_mm") or 0) / 10.0,

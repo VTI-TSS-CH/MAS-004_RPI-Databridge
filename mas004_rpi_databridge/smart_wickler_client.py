@@ -79,6 +79,7 @@ def _simulation_payload(role: str, label: str, host: str, port: int, simulation:
             "map0024": 0,
             "map0025": 0.0,
             "map0047": False,
+            "indexedDirection": 1,
         },
         "telemetry": {
             "modeLabel": mode_label,
@@ -89,6 +90,7 @@ def _simulation_payload(role: str, label: str, host: str, port: int, simulation:
             "motorSpeedHz": 0.0,
             "estimatedDiameterMm": 76.0,
             "pauseRequest": False,
+            "indexedDirection": 1,
         },
         "values": {
             "statusMas": 0,
