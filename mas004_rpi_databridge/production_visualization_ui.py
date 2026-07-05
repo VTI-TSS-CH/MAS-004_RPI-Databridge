@@ -152,6 +152,40 @@ function flags(label){
     ${flag("Control", label.control_seen)}${flag("Entnahme", label.removal_pending || label.needs_removal, true)}${flag("Short", label.length_too_short, true)}${flag("Long", label.length_too_long, true)}${flag("Reg late", label.registration_late, true)}
   </div>`;
 }
+function shortStopText(text){
+  const value = String(text || "").trim();
+  return value.length > 120 ? `${value.slice(0, 117)}...` : value;
+}
+function latestStopReason(machine){
+  const m = machine || {};
+  const info = m.info || {};
+  const runtime = info.production_runtime || {};
+  const events = Array.isArray(m.events) ? m.events : [];
+  const important = events.find(ev => {
+    const type = String(ev?.event_type || "");
+    const sev = String(ev?.severity || "");
+    return sev === "error" || sev === "warning" || [
+      "fault_motion_stop",
+      "wickler_hard_endstop_fault",
+      "production_fault",
+      "production_registration_fault",
+      "production_motion_stopped",
+      "state_change"
+    ].includes(type);
+  });
+  if(important){
+    const payload = important.payload || {};
+    if(Array.isArray(payload.critical_reasons) && payload.critical_reasons.length){
+      return `Kritisch: ${payload.critical_reasons.join(", ")}`;
+    }
+    if(important.message) return important.message;
+    if(important.event_type) return important.event_type;
+  }
+  if(runtime.last_error) return String(runtime.last_error);
+  if(runtime.last_stop?.reason && Number(m.current_state) === 21) return String(runtime.last_stop.reason);
+  if(Array.isArray(m.error_keys) && m.error_keys.length) return `Aktive Fehler: ${m.error_keys.join(", ")}`;
+  return "";
+}
 const labelPalette = {
   open:{bg:"#dbeafe", fg:"#08345f", border:"#8dbce8", pill:"open", text:"offen"},
   detected:{bg:"#ffffff", fg:"#334155", border:"#cbd5e1", pill:"warn", text:"erfasst"},
@@ -163,8 +197,15 @@ const labelPalette = {
   verifyBad:{bg:"#ef4444", fg:"#ffffff", border:"#dc2626", pill:"bad", text:"Verify NOK"}
 };
 function labelVisual(label){
+  const bypassAny = bool(label.material_bypass)||bool(label.print_bypass)||bool(label.verify_bypass)||bool(label.control_bypass);
+  if(bool(label.removal_pending)||bool(label.needs_removal)){
+    return {...labelPalette.verifyBad, bypass:bypassAny, text:"Entnehmen"};
+  }
   if(bool(label.length_too_short)||bool(label.length_too_long)||bool(label.registration_late)){
-    return {...labelPalette.verifyBad, bypass:bool(label.material_bypass)||bool(label.print_bypass)||bool(label.verify_bypass), text:"Fehler"};
+    return {...labelPalette.verifyBad, bypass:bypassAny, text:"Fehler"};
+  }
+  if(bool(label.expected_removed) && !bool(label.removal_pending)){
+    return {...labelPalette.detected, bypass:false, text:"entnommen"};
   }
   if(bool(label.open)) return {...labelPalette.open, bypass:false};
   if(!bool(label.material_triggered)) return {...labelPalette.detected, bypass:false};
@@ -251,10 +292,12 @@ function renderTrack(payload){
   track.style.height = `${heightPx}px`;
   track.style.width = `${widthPx}px`;
   document.getElementById("track_scale").textContent = `${fmt(minMm,0)} bis ${fmt(maxMm,0)} mm`;
+  const stopReason = latestStopReason(payload.machine || {});
+  const stopPill = stopReason ? `<span class="pill bad" title="${esc(stopReason)}">Stop: ${esc(shortStopText(stopReason))}</span>` : "";
   document.getElementById("track_note").innerHTML = `
     <span class="pill"><span class="legend-dot" style="color:#005eb8"></span>Druck ${fmt((payload.format||{}).print_distance_mm,1)} mm</span>
     <span class="pill">${labels.length} aktive Labels</span>
-    <span class="pill">${components.length} Komponenten</span>`;
+    <span class="pill">${components.length} Komponenten</span>${stopPill}`;
   let html = `<div class="track-ruler"></div><div class="rail"></div>`;
   for(let mm = minMm; mm <= maxMm + 0.001; mm += step){
     const left = clampPx(toPx(mm));
@@ -371,6 +414,7 @@ function render(payload){
   const ledTest = esp.led_test || {};
   const runtimeInfo = ((machine.info || {}).production_runtime || {});
   const removalRequest = runtimeInfo.label_removal_request || {};
+  const stopReason = latestStopReason(machine);
   const pill = document.getElementById("state_pill");
   pill.className = `pill ${payload.ok ? "ok" : "bad"}`;
   pill.textContent = machine.current_state_label || "unbekannt";
@@ -378,7 +422,8 @@ function render(payload){
     ["Status", `${esc(machine.current_state)} / ${esc(machine.current_state_label)}`],
     ["Auftrag", esc(machine.production_label || "-")],
     ["ESP", payload.esp_error ? `<span class="pill bad">${esc(payload.esp_error)}</span>` : '<span class="pill ok">verbunden</span>'],
-    ["Letztes Label", esc(machine.last_label_no ?? "-")]
+    ["Letztes Label", esc(machine.last_label_no ?? "-")],
+    ["Stoppgrund", stopReason ? `<span class="pill bad" title="${esc(stopReason)}">${esc(shortStopText(stopReason))}</span>` : "-"]
   ]);
   kv("transport_kv", [
     ["Infeed", `${fmt(esp.infeed_mm,3)} mm`],
@@ -469,7 +514,7 @@ document.getElementById("track").addEventListener("dblclick", ev => {
 });
 function schedule(){
   if(timer) clearInterval(timer);
-  timer = setInterval(()=>{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }, 2500);
+  timer = setInterval(()=>{ if(!document.hidden && document.getElementById("auto_refresh").checked) loadAll(); }, 750);
 }
 document.getElementById("auto_refresh").addEventListener("change", schedule);
 schedule();

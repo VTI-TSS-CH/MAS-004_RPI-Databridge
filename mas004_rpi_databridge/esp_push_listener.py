@@ -58,7 +58,7 @@ ESP_PUSH_CONNECTION_LOG = False
 
 
 class _MachineEventDispatcher:
-    def __init__(self, maxsize: int = 512):
+    def __init__(self, maxsize: int = 2048):
         self._seq = itertools.count()
         self._queue: queue_module.PriorityQueue[tuple[int, int, Settings, dict, str]] = (
             queue_module.PriorityQueue(maxsize=maxsize)
@@ -95,13 +95,18 @@ class _MachineEventDispatcher:
     def submit(self, cfg: Settings, event: dict, raw_line: str) -> bool:
         event_copy = dict(event or {})
         priority = self._priority(event_copy)
+        item = (priority, next(self._seq), cfg, event_copy, str(raw_line or ""))
         try:
-            self._queue.put_nowait(
-                (priority, next(self._seq), cfg, event_copy, str(raw_line or ""))
-            )
+            self._queue.put_nowait(item)
             return True
         except queue_module.Full:
-            return priority >= 20
+            if priority < 20:
+                try:
+                    self._queue.put(item, timeout=0.5)
+                    return True
+                except queue_module.Full:
+                    return False
+            return True
 
     def wait_idle(self, timeout_s: float = 5.0) -> bool:
         done = threading.Event()

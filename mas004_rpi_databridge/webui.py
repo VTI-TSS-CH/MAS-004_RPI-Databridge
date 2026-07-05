@@ -4042,7 +4042,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
     def api_machine_production_visualization(request: Request):
         cfg2 = Settings.load(cfg_path)
         require_machine_setup_session(request, cfg2)
-        return cached_ui_payload("production_visualization", 2.0, get_production_visualization_payload, request)
+        return cached_ui_payload("production_visualization", 0.35, get_production_visualization_payload, request)
 
     @app.post("/api/machine/production-visualization/component")
     def api_machine_production_visualization_component(request: Request, body: ProductionVisualizationComponentReq):
