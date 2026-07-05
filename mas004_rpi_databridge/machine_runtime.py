@@ -208,6 +208,22 @@ PRODUCTION_RUNTIME_EVENT_TYPES = {
     "production_removal_rewind_fault",
     "label_removal_required",
 }
+PRODUCTION_REGISTRATION_RUNNER_ERRORS = {
+    "first_print_position_timeout",
+    "first_print_position_move_not_started",
+    "first_print_position_short_move",
+    "first_print_position_early_stop",
+    "first_print_position_reissue_failed",
+    "first_label_missing_at_print_position",
+    "first_print_position_command_failed",
+    "first_print_target_invalid",
+    "print_position_command_failed",
+    "print_position_timeout",
+    "print_registration_failed",
+    "print_registration_timeout",
+    "print_target_already_passed",
+    "registration_fault",
+}
 PRODUCTION_START_MOTION_ENABLED = True
 PRODUCTION_START_BLOCK_CODE = "NAK_ProductionRuntimeNotReleased"
 PRODUCTION_START_BLOCK_REASON = (
@@ -1443,6 +1459,11 @@ class MachineRuntime:
                     requested_state = new_state
                     state_source = "label_removal_required"
                     purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
+                elif bool(esp_monitor.get("registration_fault_pause")):
+                    new_state = int(esp_monitor.get("target_state") or 7)
+                    requested_state = new_state
+                    state_source = "production_registration_fault"
+                    purge_active = bool(new_state == 21 or _truthy(param_map.get("MAS0028", "0")))
                 else:
                     new_state = 21
                     requested_state = 21
@@ -5216,6 +5237,14 @@ class MachineRuntime:
                 last_error=last_error,
                 ts=ts,
             )
+        if active and not running and last_error.lower() in PRODUCTION_REGISTRATION_RUNNER_ERRORS:
+            return self._handle_production_esp_monitor_registration_fault(
+                production_info,
+                diag=diag,
+                monitor=monitor,
+                last_error=last_error,
+                ts=ts,
+            )
         if active and not running and last_error and not last_error_benign:
             monitor["ok"] = False
             monitor["fault"] = last_error
@@ -5242,6 +5271,69 @@ class MachineRuntime:
             monitor["first_wickler_ready_fallback"] = fallback
             production_info["last_esp_monitor"] = monitor
         return None
+
+    def _handle_production_esp_monitor_registration_fault(
+        self,
+        production_info: dict[str, Any],
+        *,
+        diag: dict[str, Any],
+        monitor: dict[str, Any],
+        last_error: str,
+        ts: float,
+    ) -> dict[str, Any]:
+        reason = str(last_error or "registration_fault").strip() or "registration_fault"
+        label_no = _safe_int(diag.get("label_no"), _safe_int(diag.get("current_label_no"), 0))
+        message_parts = [f"ESP-Runner meldet Registrierfehler {reason}"]
+        if label_no > 0:
+            message_parts.append(f"Label {label_no}")
+        if "error_mm" in diag:
+            message_parts.append(f"Fehler {_safe_float(diag.get('error_mm'), 0.0):.4f} mm")
+        message = ": " + ", ".join(message_parts[1:]) if len(message_parts) > 1 else ""
+        message = message_parts[0] + message
+        payload = {
+            "type": "production_esp_monitor_registration_fault",
+            "reason": reason,
+            "label_no": label_no,
+            "diag": dict(diag or {}),
+            "ts": float(ts),
+        }
+        stop_result = self._latch_registration_fault(
+            event_type="production_esp_monitor_registration_fault",
+            reason=reason,
+            message=message,
+            payload=payload,
+            diag=diag,
+        )
+        target_state = _safe_int(stop_result.get("target_state"), 0)
+        if target_state <= 0:
+            target_state = 21 if _truthy(self.params.get_effective_value("MAS0028")) else 7
+
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        stored_production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        if stored_production_info:
+            production_info.update(stored_production_info)
+        production_info["active"] = False
+        production_info["last_stop"] = dict(stop_result or {})
+
+        monitor["ok"] = False
+        monitor["fault"] = reason
+        monitor["registration_fault_pause"] = True
+        monitor["target_state"] = int(target_state)
+        monitor["stop"] = stop_result
+        monitor["production_info"] = dict(production_info)
+        self._record_event(
+            "production_esp_monitor_registration_fault",
+            "warning",
+            message,
+            {
+                "reason": reason,
+                "target_state": int(target_state),
+                "stop": dict(stop_result or {}),
+                "diag": self._production_esp_diag_summary(diag),
+            },
+        )
+        return monitor
 
     def _label_removal_required_labels_from_error(self, last_error: str, diag: dict[str, Any]) -> list[int]:
         raw = str(last_error or "").strip()

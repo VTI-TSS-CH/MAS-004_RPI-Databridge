@@ -4629,6 +4629,51 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("error", row[0])
         self.assertIn("wickler_indexed_ready_timeout", row[2])
 
+    def test_production_esp_monitor_registration_timeout_pauses_without_purge(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True}
+        runtime._production_esp = Mock(
+            return_value=(
+                'JSON {"active":true,"running":false,"phase":4,'
+                '"last_error":"first_print_position_timeout","label_no":1,'
+                '"initial_move_progress_mm":12.9,"position_command_mm":0.0,'
+                '"motor_busy":false,"motor_ready":true}'
+            )
+        )
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "target_state": 7})
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+        runtime._notify_microtom = Mock()
+
+        result = runtime._monitor_active_production_esp(production_info, 100.0)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["registration_fault_pause"])
+        self.assertEqual(7, result["target_state"])
+        runtime._stop_production_motion.assert_called_once_with(
+            reason="registration_fault:first_print_position_timeout",
+            target_state=7,
+        )
+        self.assertEqual("1", self.params.get_effective_value("MAE0048"))
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+        notify_calls = [(call.args[0], call.args[1]) for call in runtime._notify_microtom.call_args_list]
+        self.assertIn(("MAE0048", "1"), notify_calls)
+        self.assertNotIn(("MAS0028", "1"), notify_calls)
+        with self.db._conn() as c:
+            runner_fault = c.execute(
+                "SELECT COUNT(*) FROM machine_events WHERE event_type='production_esp_runner_fault'"
+            ).fetchone()[0]
+            monitor_fault = c.execute(
+                "SELECT severity,message FROM machine_events "
+                "WHERE event_type='production_esp_monitor_registration_fault'"
+            ).fetchone()
+        self.assertEqual(0, runner_fault)
+        self.assertIsNotNone(monitor_fault)
+        self.assertEqual("warning", monitor_fault[0])
+        self.assertIn("first_print_position_timeout", monitor_fault[1])
+
     def test_production_esp_monitor_label_removal_required_pauses_without_purge(self):
         self.cfg.esp_simulation = False
         runtime = self.build_runtime()
