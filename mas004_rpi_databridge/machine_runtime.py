@@ -1045,6 +1045,50 @@ class MachineRuntime:
         setup_direct_pause_complete = False
         setup_command_ts = self._param_updated_ts("MAS0002") if setup_command_active else 0.0
         setup_seen_ts = float(setup_info.get("mas0002_setup_seen_ts") or 0.0)
+        setup_pending_motion_recovery = bool(setup_info.get("motion_recovery_pending"))
+        setup_pending_motion_recovery_command_ts = _safe_float(
+            setup_info.get("motion_recovery_pending_command_ts"),
+            0.0,
+        )
+        setup_pending_motion_recovery_ts = _safe_float(setup_info.get("motion_recovery_pending_ts"), 0.0)
+        setup_safety_info = info.get("safety") if isinstance(info.get("safety"), dict) else {}
+        setup_last_motion_recovery = (
+            setup_safety_info.get("last_motion_recovery")
+            if isinstance(setup_safety_info.get("last_motion_recovery"), dict)
+            else {}
+        )
+        if setup_command_active and setup_command_ts > setup_seen_ts and _RESET_MOTION_RECOVERY_LOCK.locked():
+            setup_seen_ts = setup_command_ts
+            setup_info["mas0002_setup_seen_ts"] = setup_seen_ts
+            setup_info["last_request_ts"] = now_ts()
+            setup_info["motion_recovery_pending"] = True
+            setup_info["motion_recovery_pending_command_ts"] = setup_command_ts
+            setup_info["motion_recovery_pending_ts"] = now_ts()
+            setup_info["last_result"] = {
+                "ok": False,
+                "waiting": True,
+                "skipped": True,
+                "response": "SETUP_WICKLER=WAIT_MOTION_RECOVERY",
+                "reason": "reset_motion_recovery_in_progress",
+                "message": "Einrichten wartet auf laufende Motion-Recovery",
+                "ts": now_ts(),
+            }
+            self.params.apply_device_value("MAS0002", "0", promote_default=True)
+            requested_command = 0
+            setup_command_active = False
+            setup_command_ts = 0.0
+            setup_pending_motion_recovery = True
+            setup_pending_motion_recovery_command_ts = setup_seen_ts
+            self.logs.log("machine", "info", "Einrichten wartet auf laufende Motion-Recovery")
+            self._record_event(
+                "setup_waiting_motion_recovery",
+                "info",
+                "Einrichten wartet auf laufende Motion-Recovery",
+                {
+                    "command_ts": setup_seen_ts,
+                    "reason": "reset_motion_recovery_in_progress",
+                },
+            )
         # On software start/deploy while MAS0002 is already 3, do not start a
         # motion workflow implicitly. The next fresh Einrichten command still
         # has a newer param timestamp and will run the calibration sequence.
@@ -1062,9 +1106,23 @@ class MachineRuntime:
             requested_command = 0
             setup_command_active = False
             self.logs.log("machine", "warning", "Alter Einrichten-Befehl nach Neustart verworfen")
-        setup_rising = setup_command_active and setup_command_ts > setup_seen_ts
+        setup_pending_motion_recovery_ready = (
+            setup_pending_motion_recovery
+            and setup_pending_motion_recovery_command_ts > 0.0
+            and setup_pending_motion_recovery_ts > 0.0
+            and not _RESET_MOTION_RECOVERY_LOCK.locked()
+            and _safe_float(setup_last_motion_recovery.get("finished_ts"), 0.0) >= setup_pending_motion_recovery_ts
+        )
+        setup_rising = (
+            setup_command_active and setup_command_ts > setup_seen_ts
+        ) or setup_pending_motion_recovery_ready
+        setup_rising_command_ts = (
+            setup_pending_motion_recovery_command_ts
+            if setup_pending_motion_recovery_ready
+            else setup_command_ts
+        )
         if setup_rising:
-            setup_info["mas0002_setup_seen_ts"] = setup_command_ts
+            setup_info["mas0002_setup_seen_ts"] = setup_rising_command_ts
             setup_info["last_request_ts"] = now_ts()
             if forced_state is not None or safety_latched or critical_active or _truthy(param_map.get("MAS0028", "0")):
                 setup_info["last_result"] = {
@@ -1073,6 +1131,9 @@ class MachineRuntime:
                     "reason": "safety_or_purge_active",
                     "ts": now_ts(),
                 }
+                setup_info.pop("motion_recovery_pending", None)
+                setup_info.pop("motion_recovery_pending_command_ts", None)
+                setup_info.pop("motion_recovery_pending_ts", None)
                 self.logs.log("machine", "warning", "Einrichten-Wicklerworkflow wegen Safety/Purge nicht gestartet")
             else:
                 # Consume the command before the long-running setup workflow.
@@ -1091,6 +1152,9 @@ class MachineRuntime:
                         "Alte Label-Entnahmepause beim Einrichten verworfen",
                         cleared_label_removal,
                     )
+                setup_info.pop("motion_recovery_pending", None)
+                setup_info.pop("motion_recovery_pending_command_ts", None)
+                setup_info.pop("motion_recovery_pending_ts", None)
                 setup_info.pop("completed_ts", None)
                 setup_info.pop("failed_ts", None)
                 setup_info.pop("pause_pending", None)
@@ -9350,22 +9414,13 @@ class MachineRuntime:
                 except Exception as exc:
                     details["esp_motors"].append({"step": "apply_eto_recovery", "ok": False, "reason": "readback_mismatch", "error": str(exc)})
                     hard_failures.append(f"Motor ETO recovery config apply failed: {exc}")
-            for motor_id in range(1, 10):
-                try:
-                    reply = esp.reset_alarm(motor_id)
-                    details["esp_motors"].append({"step": "reset_alarm", "motor_id": motor_id, **reply})
-                except Exception as exc:
-                    details["esp_motors"].append(
-                        {"step": "reset_alarm", "motor_id": motor_id, "ok": False, "error": str(exc)}
-                    )
-                try:
-                    reply = esp.recover_eto_motor(motor_id)
-                    details["esp_motors"].append({"step": "recover_eto", "motor_id": motor_id, **reply})
-                except Exception as exc:
-                    details["esp_motors"].append(
-                        {"step": "recover_eto", "motor_id": motor_id, "ok": False, "error": str(exc)}
-                    )
-            time.sleep(0.4)
+            details["esp_motors"].append(
+                {
+                    "step": "selective_recovery",
+                    "ok": True,
+                    "reason": "verify_first_then_recover_only_failed_axes",
+                }
+            )
             for motor_id in range(1, 10):
                 verify: dict[str, Any] | None = None
                 for attempt in range(1, 5):
