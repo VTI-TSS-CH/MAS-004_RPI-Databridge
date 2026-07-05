@@ -63,8 +63,9 @@ FALLBACK_REPO_MASTER_IOS_XLSX = os.path.join(
 PANEL_BUTTON_SAMPLE_INTERVAL_S = 0.05
 PANEL_BUTTON_QUEUE_MAX = 100
 PANEL_BUTTON_EVENT_QUEUE: queue.Queue[dict[str, object]] = queue.Queue(maxsize=PANEL_BUTTON_QUEUE_MAX)
-SECONDARY_PEER_FAILURE_COOLDOWN_S = 120.0
-SECONDARY_PEER_COOLDOWN_LOG_S = 120.0
+SECONDARY_PEER_FAILURE_COOLDOWN_S = 300.0
+SECONDARY_PEER_FAILURE_COOLDOWN_MAX_S = 1800.0
+SECONDARY_PEER_COOLDOWN_LOG_S = 300.0
 
 
 def resolve_repo_master_ios_xlsx() -> str:
@@ -217,8 +218,14 @@ def sender_loop(cfg_path: str, lane: SenderLane):
             )
 
         client = HttpClient(timeout_s=cfg.http_timeout_s, source_ip=cfg.eth0_source_ip, verify_tls=cfg.tls_verify)
+        secondary_client = HttpClient(
+            timeout_s=min(float(cfg.http_timeout_s or 10.0), 2.0),
+            source_ip=cfg.eth0_source_ip,
+            verify_tls=cfg.tls_verify,
+        )
         secondary_cooldown_until = 0.0
         secondary_cooldown_last_log = 0.0
+        secondary_failures = 0
 
         while True:
             if watchdog and not watchdog.tick():
@@ -261,20 +268,53 @@ def sender_loop(cfg_path: str, lane: SenderLane):
                 body = json.loads(job.body_json) if job.body_json else None
 
                 print(f"[OUTBOX:{lane.name}] send id={job.id} rc={job.retry_count} {job.method} {job.url}", flush=True)
-                resp = client.request(job.method, job.url, headers, body)
+                request_client = secondary_client if is_secondary_target else client
+                resp = request_client.request(job.method, job.url, headers, body)
                 elapsed_ms = int((time.time() - started_at) * 1000)
                 print(f"[OUTBOX:{lane.name}] ok   id={job.id} elapsed_ms={elapsed_ms} resp={resp}", flush=True)
+                if is_secondary_target:
+                    secondary_failures = 0
 
                 outbox.delete(job.id)
 
             except Exception as e:
                 elapsed_ms = int((time.time() - started_at) * 1000)
                 if is_secondary_target:
-                    secondary_cooldown_until = time.time() + SECONDARY_PEER_FAILURE_COOLDOWN_S
+                    secondary_failures += 1
+                    base_cooldown_s = max(
+                        30.0,
+                        min(
+                            float(
+                                getattr(
+                                    cfg,
+                                    "secondary_peer_failure_cooldown_s",
+                                    SECONDARY_PEER_FAILURE_COOLDOWN_S,
+                                )
+                                or SECONDARY_PEER_FAILURE_COOLDOWN_S
+                            ),
+                            3600.0,
+                        ),
+                    )
+                    max_cooldown_s = max(
+                        base_cooldown_s,
+                        min(
+                            float(
+                                getattr(
+                                    cfg,
+                                    "secondary_peer_failure_cooldown_max_s",
+                                    SECONDARY_PEER_FAILURE_COOLDOWN_MAX_S,
+                                )
+                                or SECONDARY_PEER_FAILURE_COOLDOWN_MAX_S
+                            ),
+                            7200.0,
+                        ),
+                    )
+                    cooldown_s = min(max_cooldown_s, base_cooldown_s * (2 ** min(secondary_failures - 1, 5)))
+                    secondary_cooldown_until = time.time() + cooldown_s
                     secondary_cooldown_last_log = time.time()
                     print(
                         f"[OUTBOX:{lane.name}] drop secondary id={job.id} elapsed_ms={elapsed_ms} "
-                        f"cooldown_s={int(SECONDARY_PEER_FAILURE_COOLDOWN_S)} "
+                        f"failures={secondary_failures} cooldown_s={int(cooldown_s)} "
                         f"err={repr(e)} url={job.url}",
                         flush=True,
                     )

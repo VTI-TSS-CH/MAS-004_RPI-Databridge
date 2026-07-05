@@ -20,6 +20,8 @@ _MOXA_ENDPOINT_LOCKS_GUARD = threading.Lock()
 _MOXA_CLIENTS: dict[tuple[str, int, str, float], Any] = {}
 _MOXA_COOLDOWN_UNTIL: dict[tuple[str, int], float] = {}
 _MOXA_COOLDOWN_ERROR: dict[tuple[str, int], str] = {}
+_ESP_IO_COOLDOWN_UNTIL = 0.0
+_ESP_IO_COOLDOWN_ERROR = ""
 _DEVICE_OFFLINE_FAILURES: dict[str, int] = {}
 _DEVICE_LAST_LIVE_MONOTONIC: dict[str, float] = {}
 _MOXA_DEVICE_CODES = {
@@ -251,21 +253,60 @@ class IoRuntime:
         return self._apply_static_quality(device_code, device_points, "offline", device_code, "Unsupported IO device")
 
     def _refresh_esp(self, device_points: List[Dict[str, Any]]) -> Dict[str, Any]:
+        global _ESP_IO_COOLDOWN_UNTIL, _ESP_IO_COOLDOWN_ERROR
         if bool(self.cfg.esp_simulation):
             return self._apply_static_quality("esp32_plc58", device_points, "simulation", "esp32", "")
         host = (self.cfg.esp_host or "").strip()
         port = int(self.cfg.esp_port or 0)
         if not host or port <= 0:
             return self._apply_static_quality("esp32_plc58", device_points, "offline", "esp32", "ESP endpoint missing")
+        now_m = time.monotonic()
+        if _ESP_IO_COOLDOWN_UNTIL > now_m:
+            result = self._device_result(
+                "esp32_plc58",
+                device_points,
+                False,
+                False,
+                f"ESP IO cooldown active after {_ESP_IO_COOLDOWN_ERROR}",
+                0,
+            )
+            result["debounced"] = True
+            result["cooldown"] = True
+            return result
         try:
             client = EspPlcClient(
                 host,
                 port,
                 timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
             )
+            diag = client.diagnostics()
+            if (
+                int(diag.get("queue_depth") or 0) > 0
+                or str(diag.get("active_line") or "").strip()
+                or float(diag.get("priority_until_at") or 0.0) > time.monotonic()
+            ):
+                result = self._device_result(
+                    "esp32_plc58",
+                    device_points,
+                    False,
+                    False,
+                    "ESP IO snapshot skipped: command broker busy/priority active",
+                    0,
+                )
+                result["debounced"] = True
+                result["skipped"] = "broker_busy"
+                return result
+            snapshot_timeout_s = max(
+                0.25,
+                min(
+                    self.cfg.get_float("esp_io_snapshot_timeout_s", 0.75),
+                    self.cfg.get_float("esp_read_timeout_s", 2.0),
+                    1.0,
+                ),
+            )
             raw = client.exchange_line(
                 "IO SNAPSHOT?",
-                read_timeout_s=max(1.0, self.cfg.get_float("esp_read_timeout_s", 2.0)),
+                read_timeout_s=snapshot_timeout_s,
             )
             payload = json.loads(raw or "{}")
             snapshot = payload.get("points") if isinstance(payload, dict) else {}
@@ -278,9 +319,16 @@ class IoRuntime:
                 )
                 for point in device_points
             )
+            _ESP_IO_COOLDOWN_UNTIL = 0.0
+            _ESP_IO_COOLDOWN_ERROR = ""
             self._record_device_live("esp32_plc58")
             return self._device_result("esp32_plc58", device_points, False, True, "", changed)
         except Exception as exc:
+            _ESP_IO_COOLDOWN_ERROR = str(exc)
+            _ESP_IO_COOLDOWN_UNTIL = time.monotonic() + max(
+                1.0,
+                min(self.cfg.get_float("esp_io_error_cooldown_s", 5.0), 30.0),
+            )
             return self._apply_static_quality("esp32_plc58", device_points, "offline", "esp32", str(exc))
 
     def _refresh_raspi(self, device_points: List[Dict[str, Any]]) -> Dict[str, Any]:

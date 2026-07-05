@@ -511,6 +511,8 @@ class ConfigUpdate(BaseModel):
     # HTTP/tls
     tls_verify: Optional[bool] = None
     http_timeout_s: Optional[float] = None
+    secondary_peer_failure_cooldown_s: Optional[float] = None
+    secondary_peer_failure_cooldown_max_s: Optional[float] = None
     eth0_source_ip: Optional[str] = None
     ntp_server: Optional[str] = None
     ntp_sync_interval_min: Optional[int] = None
@@ -529,6 +531,8 @@ class ConfigUpdate(BaseModel):
     esp_simulation: Optional[bool] = None
     esp_watchdog_host: Optional[str] = None
     esp_io_poll_interval_s: Optional[float] = None
+    esp_io_snapshot_timeout_s: Optional[float] = None
+    esp_io_error_cooldown_s: Optional[float] = None
     raspi_plc_model: Optional[str] = None
     raspi_io_simulation: Optional[bool] = None
     raspi_io_poll_interval_s: Optional[float] = None
@@ -3012,6 +3016,33 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         except Exception:
             cfg2.esp_io_poll_interval_s = 1.0
         cfg2.esp_io_poll_interval_s = max(0.2, min(60.0, cfg2.esp_io_poll_interval_s))
+        try:
+            cfg2.esp_io_snapshot_timeout_s = float(getattr(cfg2, "esp_io_snapshot_timeout_s", 0.75) or 0.75)
+        except Exception:
+            cfg2.esp_io_snapshot_timeout_s = 0.75
+        cfg2.esp_io_snapshot_timeout_s = max(0.25, min(2.0, cfg2.esp_io_snapshot_timeout_s))
+        try:
+            cfg2.esp_io_error_cooldown_s = float(getattr(cfg2, "esp_io_error_cooldown_s", 5.0) or 5.0)
+        except Exception:
+            cfg2.esp_io_error_cooldown_s = 5.0
+        cfg2.esp_io_error_cooldown_s = max(1.0, min(30.0, cfg2.esp_io_error_cooldown_s))
+        try:
+            cfg2.secondary_peer_failure_cooldown_s = float(
+                getattr(cfg2, "secondary_peer_failure_cooldown_s", 300.0) or 300.0
+            )
+        except Exception:
+            cfg2.secondary_peer_failure_cooldown_s = 300.0
+        cfg2.secondary_peer_failure_cooldown_s = max(30.0, min(3600.0, cfg2.secondary_peer_failure_cooldown_s))
+        try:
+            cfg2.secondary_peer_failure_cooldown_max_s = float(
+                getattr(cfg2, "secondary_peer_failure_cooldown_max_s", 1800.0) or 1800.0
+            )
+        except Exception:
+            cfg2.secondary_peer_failure_cooldown_max_s = 1800.0
+        cfg2.secondary_peer_failure_cooldown_max_s = max(
+            cfg2.secondary_peer_failure_cooldown_s,
+            min(7200.0, cfg2.secondary_peer_failure_cooldown_max_s),
+        )
         try:
             cfg2.raspi_io_poll_interval_s = float(getattr(cfg2, "raspi_io_poll_interval_s", 1.0) or 1.0)
         except Exception:

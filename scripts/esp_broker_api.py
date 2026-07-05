@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import sys
 import urllib.request
 from pathlib import Path
@@ -24,7 +25,8 @@ def exchange_via_databridge(
     priority: bool = False,
     request_timeout_s: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    base_url = f"http://127.0.0.1:{int(getattr(cfg, 'webui_port', 8080) or 8080)}"
+    scheme = "https" if bool(getattr(cfg, "webui_https", False)) else "http"
+    base_url = f"{scheme}://127.0.0.1:{int(getattr(cfg, 'webui_port', 8080) or 8080)}"
     payload = {
         "line": str(line or "").strip(),
         "read_timeout_s": float(read_timeout_s or 2.0),
@@ -42,7 +44,10 @@ def exchange_via_databridge(
         method="POST",
     )
     timeout_s = float(request_timeout_s or (max(1.0, read_timeout_s) + 2.0))
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+    context = None
+    if scheme == "https" and not bool(getattr(cfg, "tls_verify", False)):
+        context = ssl._create_unverified_context()
+    with urllib.request.urlopen(req, timeout=timeout_s, context=context) as resp:
         body = json.loads(resp.read().decode("utf-8") or "{}")
     if not bool(body.get("ok")):
         raise RuntimeError(body)

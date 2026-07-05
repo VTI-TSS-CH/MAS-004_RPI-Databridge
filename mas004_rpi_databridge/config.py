@@ -50,6 +50,8 @@ class Settings:
     # HTTP client
     http_timeout_s: float = 10.0
     tls_verify: bool = False
+    secondary_peer_failure_cooldown_s: float = 300.0
+    secondary_peer_failure_cooldown_max_s: float = 1800.0
 
     # NTP sync
     ntp_server: str = ""
@@ -69,6 +71,8 @@ class Settings:
     esp_read_timeout_s: float = 2.0
     esp_command_timeout_s: float = 8.0
     esp_io_poll_interval_s: float = 1.0
+    esp_io_snapshot_timeout_s: float = 0.75
+    esp_io_error_cooldown_s: float = 5.0
     raspi_plc_model: str = "RPIPLC_21"
     raspi_io_simulation: bool = True
     raspi_io_poll_interval_s: float = 1.0
