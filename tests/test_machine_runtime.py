@@ -1079,7 +1079,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("Laser Ready", result["error"])
         sync_state.assert_not_called()
 
-    def test_production_param_sync_skips_confirmed_start_values(self):
+    def test_production_param_sync_forces_confirmed_start_values(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         previous_values = runtime._production_esp_sync_values(param_map)
@@ -1094,8 +1094,7 @@ class MachineRuntimeTests(unittest.TestCase):
             )
 
         commands = [call.args[0] for call in esp.call_args_list]
-        self.assertEqual([], commands)
-        expected_readback_skipped = [
+        expected_forced = [
             "MAP0004",
             "MAP0006",
             "MAP0011",
@@ -1115,9 +1114,11 @@ class MachineRuntimeTests(unittest.TestCase):
             "MAP0075",
             "MAP0079",
         ]
-        self.assertEqual([], result["synced"])
-        self.assertEqual([], result["forced"])
-        self.assertEqual(expected_readback_skipped, result["readback_skipped"])
+        for key in expected_forced:
+            self.assertIn(f"SYNC {key}={previous_values[key]}", commands)
+        self.assertEqual(expected_forced, result["synced"])
+        self.assertEqual(expected_forced, result["forced"])
+        self.assertEqual([], result["readback_skipped"])
         self.assertNotIn("MAP0068", result["values"])
         self.assertNotIn("MAP0068", result["skipped"])
         self.assertEqual(previous_values, result["values"])

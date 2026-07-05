@@ -4412,24 +4412,31 @@ class MachineRuntime:
             force = key in PRODUCTION_ESP_START_READBACK_KEYS
             previous_equal = values_effectively_equal(previous.get(key), value)
             persistent_equal = dedupe.is_duplicate(dedupe_channel, key, value)
-            if persistent_equal or (previous_equal and not force):
+            if force:
+                # Production-critical parameters must survive ESP reboot/flash
+                # and stale Raspi dedupe state. Always write and read them back.
+                self._production_esp_retry(
+                    f"SYNC {key}={value}",
+                    read_timeout_s=5.0,
+                    attempts=3,
+                    priority=True,
+                )
+                synced.append(key)
+                forced.append(key)
+                written_required.append(key)
+                continue
+            if persistent_equal or previous_equal:
                 skipped.append(key)
                 if previous_equal:
                     previous_skipped.append(key)
                 if persistent_equal:
                     dedupe_skipped.append(key)
-                if force:
-                    readback_skipped.append(key)
                 if not persistent_equal:
                     dedupe.remember(dedupe_channel, key, value)
                 continue
             self._production_esp_retry(f"SYNC {key}={value}", read_timeout_s=5.0, attempts=3, priority=force)
             synced.append(key)
-            if force:
-                forced.append(key)
-                written_required.append(key)
-            else:
-                dedupe.remember(dedupe_channel, key, value)
+            dedupe.remember(dedupe_channel, key, value)
         if bool(getattr(self.cfg, "esp_simulation", False)):
             for key in synced:
                 dedupe.remember(dedupe_channel, key, values.get(key, ""))
