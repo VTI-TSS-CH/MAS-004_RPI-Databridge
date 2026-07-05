@@ -2077,7 +2077,7 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             errors.insert(0, visualization_error)
         return snapshot, errors
 
-    def recent_completed_labels(limit: int = 80, production_label: str | None = None) -> list[dict[str, Any]]:
+    def recent_completed_labels(limit: int = 80, production_label: Optional[str] = None) -> list[dict[str, Any]]:
         label_filter = str(production_label or "").strip()
         with db._conn() as c:
             if label_filter:
