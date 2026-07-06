@@ -841,32 +841,59 @@ class MachineRuntime:
                     reset_command_active = False
                     io_map = self._io_values()
                     param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+                    safety_status = self._safety_status(io_map)
+                    blocking_safety_active = self._blocking_safety_active(safety_status)
+                    blocking_safety_reasons = self._blocking_safety_reasons(safety_status)
                     critical_active, critical_reasons = self._critical_state(io_map, param_map)
+                    reset_purge_active = _truthy(param_map.get("MAS0028", "0"))
+                    reset_blocked_by_active_safety = bool(
+                        reset_result.get("blocked_by_safety") or blocking_safety_active
+                    )
+                    reset_still_blocked = bool(critical_active or reset_purge_active or blocking_safety_active)
+                    if reset_result.get("ok"):
+                        reset_phase = SAFETY_PHASE_LATCHED if reset_still_blocked else SAFETY_PHASE_READY
+                    elif reset_blocked_by_active_safety:
+                        reset_phase = SAFETY_PHASE_LATCHED
+                    else:
+                        reset_phase = SAFETY_PHASE_FAILED
                     safety_info = {
-                        "latched": bool(critical_active or _truthy(param_map.get("MAS0028", "0"))),
-                        "phase": SAFETY_PHASE_READY if reset_result.get("ok") else SAFETY_PHASE_FAILED,
-                        "last_reasons": list(safety_status.get("reasons") or []),
+                        "latched": bool(
+                            reset_still_blocked or (not reset_result.get("ok") and reset_blocked_by_active_safety)
+                        ),
+                        "phase": reset_phase,
+                        "last_reasons": list(safety_status.get("reasons") or blocking_safety_reasons or []),
                         "last_reset": reset_result,
                         "mas0002_reset_seen": reset_command_consumed,
                         "mas0002_reset_seen_ts": reset_command_ts if reset_command_consumed else 0.0,
                         "physical_reset_seen_ts": physical_reset_seen_ts,
                     }
                     if reset_result.get("ok"):
-                        safety_latched = False
-                        if critical_active:
+                        safety_latched = bool(reset_still_blocked)
+                        if reset_still_blocked:
                             safety_latched = True
                             safety_info["latched"] = True
                             safety_info["phase"] = SAFETY_PHASE_LATCHED
                             safety_info["post_reset_critical_reasons"] = list(critical_reasons)
+                            safety_info["post_reset_blocking_reasons"] = list(blocking_safety_reasons)
                             forced_state = 21
-                            forced_source = "safety_reset_critical_active"
+                            forced_source = (
+                                "safety_reset_blocking_safety_active"
+                                if blocking_safety_active
+                                else "safety_reset_critical_active"
+                            )
                         else:
                             forced_state = 9
                             forced_source = "safety_reset_ready"
                     else:
-                        safety_latched = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
+                        safety_latched = bool(reset_still_blocked or reset_blocked_by_active_safety)
+                        if reset_blocked_by_active_safety:
+                            safety_info["blocked_reset_reasons"] = list(blocking_safety_reasons or critical_reasons)
                         forced_state = 21
-                        forced_source = "safety_reset_failed"
+                        forced_source = (
+                            "safety_reset_blocked_active_safety"
+                            if reset_blocked_by_active_safety
+                            else "safety_reset_failed"
+                        )
                 finally:
                     _SAFETY_RESET_LOCK.release()
         elif safety_latched:
@@ -9285,6 +9312,28 @@ class MachineRuntime:
                 result,
             )
             return result
+
+        pre_reset_refresh = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
+        result["steps"].append(
+            {
+                "step": "refresh_esp_io_before_reset",
+                "ok": bool(pre_reset_refresh.get("ok", True)),
+                "detail": pre_reset_refresh,
+            }
+        )
+        if not bool(pre_reset_refresh.get("ok", True)):
+            return finish_failure(pre_reset_refresh.get("error") or "ESP safety IO refresh failed before reset")
+
+        live_safety = self._safety_status(self._io_values())
+        live_blocking_reasons = self._blocking_safety_reasons(live_safety)
+        if live_blocking_reasons:
+            result["blocked_by_safety"] = True
+            result["steps"].append(
+                {"step": "verify_safety_inputs_high_ok", "ok": False, "reasons": live_blocking_reasons}
+            )
+            return finish_failure(
+                "ESP safety input still LOW/not OK before reset sequence: " + ",".join(live_blocking_reasons)
+            )
 
         try:
             laser_interlock = self._ensure_laser_reset_interlock_clear(source="safety_reset")

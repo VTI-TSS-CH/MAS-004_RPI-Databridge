@@ -3737,6 +3737,44 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(snapshot["purge_active"])
         self.assertEqual("1", self.params.get_effective_value("MAS0028"))
 
+    def test_safety_reset_does_not_release_state_9_while_estop_is_active(self):
+        runtime = self.build_runtime()
+        self.params.apply_device_value("MAS0001", "21", promote_default=True)
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        ok, msg = self.params.set_value("MAS0002", "2", actor="microtom")
+        self.assertTrue(ok, msg)
+        runtime._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="safety_latched",
+            warning_active=False,
+            purge_active=True,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={"safety": {"latched": True, "phase": "latched", "last_reasons": ["notaus"]}},
+        )
+        self.io_store.upsert_value("esp32_plc58__I0_7", "0", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_8", "1", "live", "test")
+
+        with (
+            patch.object(runtime, "_refresh_single_io_device", return_value={"ok": True}) as refresh_single,
+            patch.object(runtime, "_pulse_esp_reset_output", return_value=None) as pulse,
+        ):
+            snapshot = runtime.refresh()
+
+        refresh_single.assert_called()
+        pulse.assert_not_called()
+        self.assertEqual(21, snapshot["current_state"])
+        self.assertEqual("safety_reset_blocked_active_safety", runtime._state_row()["state_source"])
+        self.assertTrue(snapshot["purge_active"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0002"))
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+        safety = snapshot["info"]["safety"]
+        self.assertTrue(safety["latched"])
+        self.assertEqual("latched", safety["phase"])
+        self.assertEqual(["notaus"], safety["blocked_reset_reasons"])
+        self.assertTrue(safety["last_reset"]["blocked_by_safety"])
+
     def test_virtual_reset_ignores_start_button_mask_in_safety_context(self):
         runtime = self.build_runtime()
         self.params.set_value("MAP0065", "0000000", actor="microtom")
