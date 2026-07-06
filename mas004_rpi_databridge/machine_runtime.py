@@ -251,6 +251,7 @@ PRODUCTION_WICKLER_MONITOR_COMM_MAX_MISSES = 3
 PRODUCTION_ESP_MONITOR_INTERVAL_S = 0.5
 PRODUCTION_ESP_MONITOR_COMM_MAX_MISSES = 3
 PRODUCTION_ESP_FIRST_READY_FALLBACK_INTERVAL_S = 0.75
+PRODUCTION_ESP_NEXT_READY_FALLBACK_GRACE_S = 1.5
 PRODUCTION_CONTROLLED_PAUSE_TIMEOUT_S = 120.0
 PRODUCTION_REMOVAL_REWIND_BACKOFF_MM = 20.0
 PRODUCTION_REMOVAL_REWIND_TIMEOUT_S = 120.0
@@ -6201,6 +6202,34 @@ class MachineRuntime:
                 (
                     f"Folge-Wickler-Fallback Label {label_no} uebersprungen: "
                     f"{in_flight.get('event_type')} bereits verarbeitet"
+                ),
+                result,
+                dedupe_window_s=60.0,
+            )
+            return result
+
+        first_seen_ts = 0.0
+        if str(previous.get("key") or "") == key:
+            first_seen_ts = _safe_float(previous.get("first_seen_ts"), 0.0)
+        if first_seen_ts <= 0.0:
+            first_seen_ts = float(ts)
+        if (float(ts) - first_seen_ts) < PRODUCTION_ESP_NEXT_READY_FALLBACK_GRACE_S:
+            result = {
+                "ok": True,
+                "skipped": "await_push_grace",
+                "key": key,
+                "label_no": label_no,
+                "first_seen_ts": first_seen_ts,
+                "ts": float(ts),
+                "grace_s": PRODUCTION_ESP_NEXT_READY_FALLBACK_GRACE_S,
+            }
+            production_info["esp_next_wickler_ready_fallback"] = dict(result)
+            self._record_production_event_once(
+                "production_next_wickler_ready_fallback_skipped",
+                "info",
+                (
+                    f"Folge-Wickler-Fallback Label {label_no} wartet auf ESP-Push: "
+                    f"{PRODUCTION_ESP_NEXT_READY_FALLBACK_GRACE_S:.1f}s Vorrang"
                 ),
                 result,
                 dedupe_window_s=60.0,

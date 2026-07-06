@@ -4866,6 +4866,13 @@ class MachineRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(result)
         fallback = production_info["esp_next_wickler_ready_fallback"]
+        self.assertEqual("await_push_grace", fallback["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_not_called()
+
+        result = runtime._monitor_active_production_esp(production_info, 102.0)
+
+        self.assertIsNone(result)
+        fallback = production_info["esp_next_wickler_ready_fallback"]
         self.assertTrue(fallback["ok"], fallback)
         runtime._prepare_next_production_wickler_takt.assert_called_once_with(
             label_no=3,
@@ -4874,6 +4881,8 @@ class MachineRuntimeTests(unittest.TestCase):
         commands = [call.args[0] for call in runtime._production_esp.call_args_list]
         self.assertEqual(
             [
+                "OUTBOUND FETCH_EVENTS MAX=16",
+                "PROCESS PRODUCTION MONITOR?",
                 "OUTBOUND FETCH_EVENTS MAX=16",
                 "PROCESS PRODUCTION MONITOR?",
                 "PROCESS PRODUCTION WICKLER_READY LABEL_NO=3",
