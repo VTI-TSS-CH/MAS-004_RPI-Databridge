@@ -5175,6 +5175,153 @@ class MachineRuntime:
         return payload
 
     @staticmethod
+    def _parse_esp_kv_status(reply: str, prefix: str = "") -> dict[str, str]:
+        text = str(reply or "").strip()
+        wanted_prefix = str(prefix or "").strip()
+        if wanted_prefix and text.upper().startswith(wanted_prefix.upper() + " "):
+            text = text[len(wanted_prefix) :].strip()
+        values: dict[str, str] = {}
+        for token in text.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            values[str(key).strip()] = str(value).strip()
+        return values
+
+    def _read_esp_outbound_status(self) -> dict[str, Any]:
+        response = self._production_esp_retry(
+            "OUTBOUND STATUS?",
+            read_timeout_s=1.0,
+            read_limit=4096,
+            attempts=1,
+            priority=True,
+        )
+        values = self._parse_esp_kv_status(response, "OUTBOUND")
+        return {
+            "raw": response,
+            "q": _safe_int(values.get("q"), 0),
+            "hw": _safe_int(values.get("hw"), 0),
+            "overflow": _safe_int(values.get("overflow"), 0),
+            "sent": _safe_int(values.get("sent"), 0),
+            "retries": _safe_int(values.get("retries"), 0),
+            "critical_q": _safe_int(values.get("critical_q"), 0),
+            "critical_overflow": _safe_int(values.get("critical_overflow"), 0),
+            "dropped_noncritical_for_critical": _safe_int(
+                values.get("dropped_noncritical_for_critical"), 0
+            ),
+            "fetched": _safe_int(values.get("fetched"), 0),
+            "busy": _truthy(values.get("busy", "0")),
+        }
+
+    def _drain_esp_outbound_events(
+        self,
+        *,
+        max_batches: int = 2,
+        max_items: int = 16,
+        dispatch: bool = True,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": True,
+            "batches": 0,
+            "fetched": 0,
+            "handled": 0,
+            "ignored": 0,
+            "discarded": 0,
+            "errors": [],
+        }
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            result["skipped"] = "simulation"
+            return result
+        request_items = max(1, min(16, int(max_items)))
+        for _batch in range(max(1, int(max_batches))):
+            try:
+                response = self._production_esp_retry(
+                    f"OUTBOUND FETCH_EVENTS MAX={request_items}",
+                    read_timeout_s=1.0,
+                    read_limit=16384,
+                    attempts=1,
+                    priority=True,
+                )
+                payload = self._parse_esp_json_reply(response)
+            except Exception as exc:
+                result["ok"] = False
+                result["errors"].append(repr(exc))
+                break
+            result["batches"] = int(result["batches"]) + 1
+            lines = payload.get("lines")
+            if not isinstance(lines, list):
+                result["ok"] = False
+                result["errors"].append("ESP outbound fetch reply has no lines list")
+                break
+            result["fetched"] = int(result["fetched"]) + len(lines)
+            if not lines:
+                break
+            for line in lines:
+                raw_line = str(line or "").strip()
+                event = parse_machine_event_line(raw_line)
+                if event is None:
+                    result["ignored"] = int(result["ignored"]) + 1
+                    continue
+                if not dispatch:
+                    result["discarded"] = int(result["discarded"]) + 1
+                    continue
+                try:
+                    handled = self.handle_event(event)
+                    if bool(handled.get("ok")):
+                        result["handled"] = int(result["handled"]) + 1
+                    else:
+                        result["errors"].append(str(handled))
+                except Exception as exc:
+                    result["errors"].append(repr(exc))
+            if len(lines) < request_items:
+                break
+        if result["errors"]:
+            result["ok"] = False
+        return result
+
+    def _ensure_esp_outbound_ready_for_start(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"ok": True}
+        drain = self._drain_esp_outbound_events(max_batches=4, max_items=32, dispatch=False)
+        result["drain"] = drain
+        try:
+            before = self._read_esp_outbound_status()
+        except Exception as exc:
+            result.update({"ok": False, "error": f"outbound_status_failed:{repr(exc)}"})
+            return result
+        result["before"] = before
+        needs_clear = (
+            _safe_int(before.get("q"), 0) > 0
+            or _safe_int(before.get("overflow"), 0) > 0
+            or _safe_int(before.get("critical_overflow"), 0) > 0
+            or _truthy(before.get("busy"))
+        )
+        if needs_clear:
+            try:
+                clear_response = self._production_esp_retry(
+                    "OUTBOUND CLEAR",
+                    read_timeout_s=1.0,
+                    read_limit=1024,
+                    attempts=2,
+                    settle_s=0.05,
+                    priority=True,
+                )
+                result["clear_response"] = clear_response
+                after = self._read_esp_outbound_status()
+            except Exception as exc:
+                result.update({"ok": False, "error": f"outbound_clear_failed:{repr(exc)}"})
+                return result
+            result["after"] = after
+            if (
+                _safe_int(after.get("q"), 0) > 0
+                or _safe_int(after.get("critical_overflow"), 0) > 0
+                or _truthy(after.get("busy"))
+            ):
+                result.update({"ok": False, "error": "outbound_queue_not_empty_after_clear"})
+                return result
+            result["cleared"] = True
+        return result
+
+    @staticmethod
     def _production_esp_diag_summary(diag: dict[str, Any]) -> dict[str, Any]:
         keys = (
             "active",
@@ -5284,6 +5431,7 @@ class MachineRuntime:
         if last_ts > 0.0 and (float(ts) - last_ts) < PRODUCTION_ESP_MONITOR_INTERVAL_S:
             return None
         production_info["last_esp_monitor_ts"] = float(ts)
+        outbound_events = self._drain_esp_outbound_events(max_batches=2, max_items=16)
         try:
             diag = self._read_production_monitor_diag()
         except Exception as exc:
@@ -5294,6 +5442,8 @@ class MachineRuntime:
             "ts": float(ts),
             "diag": self._production_esp_diag_summary(diag),
         }
+        if int(outbound_events.get("fetched") or 0) > 0 or not bool(outbound_events.get("ok", True)):
+            monitor["outbound_events"] = outbound_events
         production_info["last_esp_monitor"] = monitor
         production_info.pop("esp_monitor_pending_fault", None)
 
@@ -6705,6 +6855,12 @@ class MachineRuntime:
             self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2, priority=True)
             self._production_esp_retry("PROCESS PRODUCTION STOP", read_timeout_s=2.0, attempts=2, priority=True)
             self._production_esp_retry("PROCESS PRODUCTION_RESET", read_timeout_s=5.0, attempts=2, priority=True)
+            outbound_ready = self._ensure_esp_outbound_ready_for_start()
+            if not bool(outbound_ready.get("ok")):
+                raise RuntimeError(
+                    "ESP-Outbound-Queue vor Produktionsstart nicht leer/synchron: "
+                    + str(outbound_ready.get("error") or outbound_ready)
+                )
             self._production_esp_retry("MOTOR 3 RESET_ALARM", read_timeout_s=5.0, attempts=2, priority=True)
             self._production_esp_retry("MOTOR 3 RECOVER_ETO", read_timeout_s=5.0, attempts=2, priority=True)
             motor3_zero = self._zero_motor3_for_production_start()
@@ -6775,6 +6931,7 @@ class MachineRuntime:
                 "motor3_zero": motor3_zero,
                 "wicklers": wicklers,
                 "post_start_wicklers": post_start_wicklers,
+                "outbound_ready": outbound_ready,
                 "laser_ready": laser_ready,
                 "tto_printer": tto_printer,
                 "command": start_command,

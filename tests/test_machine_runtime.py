@@ -4633,7 +4633,11 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         commands = [call.args[0] for call in runtime._production_esp.call_args_list]
         self.assertEqual(
-            ["PROCESS PRODUCTION MONITOR?", "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1"],
+            [
+                "OUTBOUND FETCH_EVENTS MAX=16",
+                "PROCESS PRODUCTION MONITOR?",
+                "PROCESS PRODUCTION WICKLER_READY LABEL_NO=1",
+            ],
             commands,
         )
         with self.db._conn() as c:
@@ -4644,6 +4648,69 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual("info", row[0])
         self.assertIn("Label 1", row[2])
+
+    def test_esp_outbound_fetch_dispatches_machine_events(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime.handle_event = Mock(return_value={"ok": True, "accepted": True})
+
+        replies = [
+            'JSON {"ok":true,"count":1,"remaining":0,'
+            '"lines":["EVT {\\"type\\":\\"label_removal_required\\",\\"label_no\\":3}"]}',
+            'JSON {"ok":true,"count":0,"remaining":0,"lines":[]}',
+        ]
+        runtime._production_esp_retry = Mock(side_effect=replies)
+
+        result = runtime._drain_esp_outbound_events(max_batches=2, max_items=16)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(1, result["fetched"])
+        self.assertEqual(1, result["handled"])
+        runtime.handle_event.assert_called_once()
+        self.assertEqual("label_removal_required", runtime.handle_event.call_args.args[0]["type"])
+        self.assertEqual(3, runtime.handle_event.call_args.args[0]["label_no"])
+
+    def test_esp_outbound_ready_for_start_discards_stale_events_and_clears_queue(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime.handle_event = Mock(return_value={"ok": True})
+        status_calls = 0
+
+        def fake_retry(command, **_kwargs):
+            nonlocal status_calls
+            if command.startswith("OUTBOUND FETCH_EVENTS"):
+                return (
+                    'JSON {"ok":true,"count":1,"remaining":0,'
+                    '"lines":["EVT {\\"type\\":\\"label_removal_required\\",\\"label_no\\":9}"]}'
+                )
+            if command == "OUTBOUND STATUS?":
+                status_calls += 1
+                if status_calls == 1:
+                    return (
+                        "OUTBOUND q=3 hw=64 overflow=1 sent=0 retries=12 "
+                        "dropped_moving_actual=0 dropped_noncritical_for_critical=2 "
+                        "critical_overflow=0 fetched=1 critical_q=0 push_timeouts=0 "
+                        "push_max_ms=1 busy=0"
+                    )
+                return (
+                    "OUTBOUND q=0 hw=0 overflow=0 sent=0 retries=0 dropped_moving_actual=0 "
+                    "dropped_noncritical_for_critical=0 critical_overflow=0 fetched=0 "
+                    "critical_q=0 push_timeouts=0 push_max_ms=0 busy=0"
+                )
+            if command == "OUTBOUND CLEAR":
+                return "ACK_OUTBOUND_CLEAR"
+            raise AssertionError(command)
+
+        runtime._production_esp_retry = Mock(side_effect=fake_retry)
+
+        result = runtime._ensure_esp_outbound_ready_for_start()
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["cleared"])
+        self.assertEqual(1, result["drain"]["discarded"])
+        runtime.handle_event.assert_not_called()
+        commands = [call.args[0] for call in runtime._production_esp_retry.call_args_list]
+        self.assertIn("OUTBOUND CLEAR", commands)
 
     def test_production_esp_monitor_stops_on_runner_last_error(self):
         self.cfg.esp_simulation = False
