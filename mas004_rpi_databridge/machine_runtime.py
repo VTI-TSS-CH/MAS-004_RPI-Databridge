@@ -2048,6 +2048,7 @@ class MachineRuntime:
                 dict(payload or {}),
                 dedupe_window_s=30.0,
             )
+            self._remember_production_wickler_gate_event(event_type, payload)
             self._remember_first_print_wickler_ready_attempt(
                 ready_key,
                 label_no=label_no,
@@ -2114,6 +2115,7 @@ class MachineRuntime:
                 remaining_mm=remaining,
                 payload=payload,
             )
+            self._remember_production_wickler_gate_event(event_type, payload)
             return {
                 "ok": True,
                 "accepted": True,
@@ -2136,6 +2138,7 @@ class MachineRuntime:
                 dedupe_window_s=600.0,
             )
             next_wickler_takt = {"ok": True, "skipped": "wait_for_prepare_required", "label_no": label_no}
+            self._remember_production_wickler_gate_event(event_type, payload)
             return {"ok": True, "accepted": True, "event": event_type, "next_wickler_takt": next_wickler_takt, **event_result}
         if event_type == "production_wickler_prepare_required":
             label_no = _safe_int(payload.get("label_no"), 0)
@@ -2194,6 +2197,7 @@ class MachineRuntime:
                 f"Wickler-Takt bereit: Label {label_no}, ID3-Nachpositionierung freigegeben, Restfehler {error_mm:.3f}mm",
                 dict(payload or {}),
             )
+            self._remember_production_wickler_gate_event(event_type, payload)
             return {"ok": True, "accepted": True, "event": event_type, **event_result}
         if event_type == "production_wickler_runline_released":
             label_no = _safe_int(payload.get("label_no"), 0)
@@ -2361,6 +2365,17 @@ class MachineRuntime:
         if label_no <= 0:
             return None
         cutoff = max(0.0, _safe_float(ts, now_ts()) - float(window_s))
+        state_info = dict(self._state_row().get("info") or {})
+        production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        markers = dict(production_info.get("wickler_gate_events") or {})
+        marker = markers.get(str(label_no))
+        if isinstance(marker, dict) and _safe_float(marker.get("ts"), 0.0) >= cutoff:
+            return {
+                "event_type": str(marker.get("event_type") or ""),
+                "event_ts": _safe_float(marker.get("ts"), 0.0),
+                "label_no": label_no,
+                "source": "production_runtime.wickler_gate_events",
+            }
         try:
             with self.db._conn() as c:
                 rows = c.execute(
@@ -2723,6 +2738,48 @@ class MachineRuntime:
             "ts": now_ts(),
             "source": "esp_production_print_position_commanded.remaining_mm",
         }
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=int(state.get("current_state") or 1),
+            requested_state=int(state.get("requested_state") or state.get("current_state") or 1),
+            state_source=str(state.get("state_source") or "runtime"),
+            warning_active=bool(state.get("warning_active")),
+            purge_active=bool(state.get("purge_active")),
+            production_label=str(state.get("production_label") or ""),
+            last_label_no=int(state.get("last_label_no") or 0),
+            info=info,
+        )
+
+    def _remember_production_wickler_gate_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        label_no = _safe_int((payload or {}).get("label_no"), 0)
+        if label_no <= 0:
+            return
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        markers = dict(production_info.get("wickler_gate_events") or {})
+        markers[str(label_no)] = {
+            "label_no": int(label_no),
+            "event_type": str(event_type or ""),
+            "target_abs_mm": _safe_float(
+                (payload or {}).get("target_abs_mm"),
+                _safe_float((payload or {}).get("target_mm"), 0.0),
+            ),
+            "remaining_mm": _safe_float((payload or {}).get("remaining_mm"), 0.0),
+            "ts": now_ts(),
+        }
+        if len(markers) > 32:
+            items = sorted(
+                markers.items(),
+                key=lambda item: _safe_float((item[1] or {}).get("ts"), 0.0),
+                reverse=True,
+            )
+            markers = dict(items[:32])
+        production_info["wickler_gate_events"] = markers
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
         self._write_state(
             current_state=int(state.get("current_state") or 1),
@@ -3775,6 +3832,15 @@ class MachineRuntime:
             )
         if event_type == "production_wickler_indexed_ready":
             return "|".join([event_type, str(label_no)])
+        if event_type == "production_first_print_ready_fallback_skipped":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    str(payload.get("skipped") or ""),
+                    str((payload.get("in_flight") or {}).get("event_type") or ""),
+                ]
+            )
         if event_type == "production_next_wickler_ready_fallback_skipped":
             return "|".join(
                 [
@@ -5941,6 +6007,29 @@ class MachineRuntime:
                 "label_no": label_no,
                 "previous": previous,
             }
+
+        in_flight = self._production_wickler_start_already_in_flight(label_no, ts=ts)
+        if in_flight is not None:
+            result = {
+                "ok": True,
+                "skipped": "wickler_start_already_in_flight",
+                "key": key,
+                "label_no": label_no,
+                "in_flight": in_flight,
+                "ts": float(ts),
+            }
+            production_info["esp_first_wickler_ready_fallback"] = dict(result)
+            self._record_production_event_once(
+                "production_first_print_ready_fallback_skipped",
+                "info",
+                (
+                    f"Erster Wickler-Fallback Label {label_no} uebersprungen: "
+                    f"{in_flight.get('event_type')} bereits verarbeitet"
+                ),
+                result,
+                dedupe_window_s=60.0,
+            )
+            return result
 
         payload = {
             "type": "production_first_print_position_reached",
