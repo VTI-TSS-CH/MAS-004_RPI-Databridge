@@ -1194,6 +1194,19 @@ class MachineRuntimeTests(unittest.TestCase):
         prepare_indexed.assert_called_once()
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
 
+    def test_label_removal_resume_validation_does_not_block_on_large_visualization(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._production_esp_retry = Mock(side_effect=RuntimeError("response too large"))
+
+        result = runtime._validate_label_removal_resume_on_esp([3, 6])
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["validation_unavailable"])
+        self.assertFalse(result["stale"])
+        self.assertEqual("esp_visualization_unavailable", result["reason"])
+        self.assertEqual([3, 6], result["labels"])
+
     def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))

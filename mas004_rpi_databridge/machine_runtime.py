@@ -6685,19 +6685,21 @@ class MachineRuntime:
             )
         except Exception as exc:
             return {
-                "ok": False,
+                "ok": True,
                 "valid": False,
                 "stale": False,
-                "reason": "esp_visualization_failed",
+                "validation_unavailable": True,
+                "reason": "esp_visualization_unavailable",
                 "error": repr(exc),
                 "labels": expected,
             }
         payload = self._parse_esp_json_response(response)
         if not payload:
             return {
-                "ok": False,
+                "ok": True,
                 "valid": False,
                 "stale": False,
+                "validation_unavailable": True,
                 "reason": "esp_visualization_not_json",
                 "response": str(response or "")[:240],
                 "labels": expected,
