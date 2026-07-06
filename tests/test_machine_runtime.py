@@ -4461,7 +4461,7 @@ class MachineRuntimeTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(1, count)
 
-    def test_production_print_position_reached_dedupes_same_label(self):
+    def test_production_print_position_reached_waits_for_prepare_required_event(self):
         runtime = self.build_runtime()
         self.mark_production_active(runtime)
         runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
@@ -4493,11 +4493,10 @@ class MachineRuntimeTests(unittest.TestCase):
 
         self.assertTrue(first["recorded"])
         self.assertTrue(duplicate["deduped"])
-        self.assertEqual("duplicate_print_position_reached", duplicate["next_wickler_takt"]["skipped"])
+        self.assertEqual("wait_for_prepare_required", first["next_wickler_takt"]["skipped"])
+        self.assertEqual("wait_for_prepare_required", duplicate["next_wickler_takt"]["skipped"])
         self.assertTrue(next_label["recorded"])
-        self.assertEqual(2, runtime._prepare_next_production_wickler_takt.call_count)
-        runtime._prepare_next_production_wickler_takt.assert_any_call(label_no=2, reason="after_print_position_reached")
-        runtime._prepare_next_production_wickler_takt.assert_any_call(label_no=3, reason="after_print_position_reached")
+        runtime._prepare_next_production_wickler_takt.assert_not_called()
         with self.db._conn() as c:
             rows = c.execute(
                 "SELECT event_type,payload_json FROM machine_events WHERE event_type='production_print_position_reached' ORDER BY id"
@@ -4505,6 +4504,36 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(2, len(rows))
         payloads = [json.loads(row[1]) for row in rows]
         self.assertEqual([2, 3], [payload["label_no"] for payload in payloads])
+
+    def test_production_wickler_prepare_required_sends_label_bound_ready(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        result = runtime.handle_event(
+            {
+                "type": "production_wickler_prepare_required",
+                "label_no": 3,
+                "after_label_no": 2,
+                "reason": "print_position_reached",
+            }
+        )
+
+        self.assertTrue(result["recorded"])
+        self.assertTrue(result["wickler_takt"]["ok"])
+        self.assertTrue(result["esp_ready"]["ok"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once_with(
+            label_no=3,
+            reason="prepare_required:print_position_reached",
+        )
+        runtime._production_esp_retry.assert_called_once_with(
+            "PROCESS PRODUCTION WICKLER_READY LABEL_NO=3",
+            read_timeout_s=8.0,
+            attempts=5,
+            settle_s=0.15,
+            priority=True,
+        )
 
     def test_first_print_position_prepares_wicklers_before_esp_ready(self):
         runtime = self.build_runtime()
@@ -4685,6 +4714,49 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual("info", row[0])
         self.assertIn("Label 1", row[2])
+
+    def test_production_esp_monitor_fallback_sends_next_wickler_ready(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True, "active_since_ts": 1234.5}
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+
+        def fake_esp(command, **_kwargs):
+            if command == "OUTBOUND FETCH_EVENTS MAX=16":
+                return 'JSON {"ok":true,"count":0,"remaining":0,"lines":[]}'
+            if command == "PROCESS PRODUCTION MONITOR?":
+                return (
+                    'JSON {"active":true,"running":true,"phase":5,'
+                    '"reason":"next_label_wait_wickler",'
+                    '"last_error":"","label_no":3,"wickler_ready_accepted":false,'
+                    '"position_commanded":false,"target_mm":828.650,"error_mm":104.000,'
+                    '"infeed_speed_mm_s":0.0,"drive_speed_mm_s":0.0}'
+                )
+            if command == "PROCESS PRODUCTION WICKLER_READY LABEL_NO=3":
+                return "ACK_PROCESS_PRODUCTION_WICKLER_READY"
+            raise AssertionError(command)
+
+        runtime._production_esp = Mock(side_effect=fake_esp)
+
+        result = runtime._monitor_active_production_esp(production_info, 100.0)
+
+        self.assertIsNone(result)
+        fallback = production_info["esp_next_wickler_ready_fallback"]
+        self.assertTrue(fallback["ok"], fallback)
+        runtime._prepare_next_production_wickler_takt.assert_called_once_with(
+            label_no=3,
+            reason="esp_diag_next_label_wait_fallback",
+        )
+        commands = [call.args[0] for call in runtime._production_esp.call_args_list]
+        self.assertEqual(
+            [
+                "OUTBOUND FETCH_EVENTS MAX=16",
+                "PROCESS PRODUCTION MONITOR?",
+                "PROCESS PRODUCTION WICKLER_READY LABEL_NO=3",
+            ],
+            commands,
+        )
 
     def test_esp_outbound_fetch_dispatches_machine_events(self):
         self.cfg.esp_simulation = False

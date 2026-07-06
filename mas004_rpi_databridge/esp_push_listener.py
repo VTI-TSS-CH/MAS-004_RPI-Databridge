@@ -77,6 +77,7 @@ class _MachineEventDispatcher:
             "production_first_print_position_reached",
             "production_print_position_commanded",
             "production_print_position_reached",
+            "production_wickler_prepare_required",
             "production_wickler_indexed_ready",
         }:
             return 0

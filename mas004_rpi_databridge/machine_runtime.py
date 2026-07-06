@@ -198,6 +198,7 @@ PRODUCTION_RUNTIME_EVENT_TYPES = {
     "production_first_print_position_reached",
     "production_print_position_commanded",
     "production_print_position_reached",
+    "production_wickler_prepare_required",
     "production_wickler_indexed_ready",
     "production_wickler_runline_released",
     "production_print_trigger",
@@ -2069,17 +2070,15 @@ class MachineRuntime:
                 remaining_mm=remaining,
                 payload=payload,
             )
-            wickler_reprepare: dict[str, Any] = {"ok": True, "skipped": "duplicate_or_invalid_commanded_position"}
-            if bool(event_result.get("recorded")) and 10.0 <= remaining <= PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM:
-                wickler_reprepare = self._prepare_next_production_wickler_takt(
-                    label_no=label_no,
-                    reason="print_position_commanded_remaining_mm",
-                )
             return {
                 "ok": True,
                 "accepted": True,
                 "event": event_type,
-                "wickler_reprepare": wickler_reprepare,
+                "wickler_reprepare": {
+                    "ok": True,
+                    "skipped": "position_command_already_started",
+                    "label_no": label_no,
+                },
                 **event_result,
             }
         if event_type == "production_print_position_reached":
@@ -2092,15 +2091,56 @@ class MachineRuntime:
                 dict(payload or {}),
                 dedupe_window_s=600.0,
             )
-            next_wickler_takt = (
-                self._prepare_next_production_wickler_takt(
-                    label_no=label_no,
-                    reason="after_print_position_reached",
-                )
-                if bool(event_result.get("recorded"))
-                else {"ok": True, "skipped": "duplicate_print_position_reached", "label_no": label_no}
-            )
+            next_wickler_takt = {"ok": True, "skipped": "wait_for_prepare_required", "label_no": label_no}
             return {"ok": True, "accepted": True, "event": event_type, "next_wickler_takt": next_wickler_takt, **event_result}
+        if event_type == "production_wickler_prepare_required":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            after_label_no = _safe_int(payload.get("after_label_no"), 0)
+            reason = str(payload.get("reason") or "prepare_required").strip() or "prepare_required"
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Wickler-Takt fuer Label {label_no} vorbereiten: nach Label {after_label_no}, Grund {reason}",
+                dict(payload or {}),
+                dedupe_window_s=30.0,
+            )
+            wickler_takt: dict[str, Any]
+            esp_ready: dict[str, Any] = {"ok": False, "skipped": "wickler_takt_not_ready"}
+            if not bool(event_result.get("recorded")):
+                wickler_takt = {"ok": True, "skipped": "duplicate_prepare_required", "label_no": label_no}
+                esp_ready = {"ok": True, "skipped": "duplicate_prepare_required", "label_no": label_no}
+            elif label_no <= 0:
+                wickler_takt = {"ok": False, "error": "missing_label_no", "label_no": label_no}
+            else:
+                wickler_takt = self._prepare_next_production_wickler_takt(
+                    label_no=label_no,
+                    reason=f"prepare_required:{reason}",
+                )
+                if bool(wickler_takt.get("ok")):
+                    try:
+                        response = self._production_esp_retry(
+                            f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
+                            read_timeout_s=8.0,
+                            attempts=5,
+                            settle_s=0.15,
+                            priority=True,
+                        )
+                        esp_ready = {"ok": True, "response": response}
+                    except Exception as exc:
+                        esp_ready = {"ok": False, "error": repr(exc)}
+                        self.logs.log(
+                            "esp-plc",
+                            "warning",
+                            f"Wickler-Takt bereit, aber ESP-Freigabe fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
+                        )
+            return {
+                "ok": True,
+                "accepted": True,
+                "event": event_type,
+                "wickler_takt": wickler_takt,
+                "esp_ready": esp_ready,
+                **event_result,
+            }
         if event_type == "production_wickler_indexed_ready":
             label_no = _safe_int(payload.get("label_no"), 0)
             error_mm = _safe_float(payload.get("target_error_mm"), 0.0)
@@ -5364,6 +5404,20 @@ class MachineRuntime:
         )
 
     @staticmethod
+    def _production_esp_waits_for_next_wickler_ready(diag: dict[str, Any]) -> bool:
+        reason = str(diag.get("reason") or "").strip()
+        phase = _safe_int(diag.get("phase"), -1)
+        label_no = _safe_int(diag.get("label_no"), 0)
+        ready_accepted = bool(diag.get("wickler_ready_accepted"))
+        last_error = str(diag.get("last_error") or "").strip()
+        return (
+            label_no > 0
+            and not ready_accepted
+            and not last_error
+            and (reason == "next_label_wait_wickler" or phase == 5)
+        )
+
+    @staticmethod
     def _normalize_production_monitor_diag(diag: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(diag or {})
         if "label_no" not in normalized and "current_label_no" in normalized:
@@ -5491,6 +5545,10 @@ class MachineRuntime:
         if active and running and self._production_esp_waits_for_first_wickler_ready(diag):
             fallback = self._production_first_wickler_ready_diag_fallback(production_info, diag, ts)
             monitor["first_wickler_ready_fallback"] = fallback
+            production_info["last_esp_monitor"] = monitor
+        elif active and running and self._production_esp_waits_for_next_wickler_ready(diag):
+            fallback = self._production_next_wickler_ready_diag_fallback(production_info, diag, ts)
+            monitor["next_wickler_ready_fallback"] = fallback
             production_info["last_esp_monitor"] = monitor
         return None
 
@@ -5873,6 +5931,87 @@ class MachineRuntime:
             f"Wickler ok={int(bool(wickler_takt.get('ok')))}, ESP ok={int(bool(esp_ready.get('ok')))}"
         )
         self._record_event("production_first_print_ready_fallback", severity, message, result)
+        return result
+
+    def _production_next_wickler_ready_diag_fallback(
+        self,
+        production_info: dict[str, Any],
+        diag: dict[str, Any],
+        ts: float,
+    ) -> dict[str, Any]:
+        label_no = _safe_int(diag.get("label_no"), 0)
+        target_abs = _safe_float(diag.get("target_mm"), _safe_float(diag.get("position_command_mm"), 0.0))
+        target_error = _safe_float(diag.get("error_mm"), 0.0)
+        key = "|".join(
+            (
+                f"label={label_no}",
+                f"target={target_abs:.3f}",
+                f"error={target_error:.3f}",
+                f"reason={str(diag.get('reason') or '')}",
+            )
+        )
+        previous = dict(production_info.get("esp_next_wickler_ready_fallback") or {})
+        if (
+            str(previous.get("key") or "") == key
+            and (float(ts) - _safe_float(previous.get("ts"), 0.0)) < PRODUCTION_ESP_FIRST_READY_FALLBACK_INTERVAL_S
+        ):
+            return {
+                "ok": True,
+                "skipped": "cooldown",
+                "key": key,
+                "label_no": label_no,
+                "previous": previous,
+            }
+
+        result: dict[str, Any] = {
+            "ok": False,
+            "key": key,
+            "label_no": label_no,
+            "target_abs_mm": target_abs,
+            "target_error_mm": target_error,
+            "ts": float(ts),
+        }
+        production_info["esp_next_wickler_ready_fallback"] = dict(result, status="started")
+        wickler_takt = self._prepare_next_production_wickler_takt(
+            label_no=label_no,
+            reason="esp_diag_next_label_wait_fallback",
+        )
+        esp_ready: dict[str, Any] = {"ok": False, "skipped": "wickler_takt_not_ready"}
+        if bool(wickler_takt.get("ok")):
+            try:
+                response = self._production_esp_retry(
+                    f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
+                    read_timeout_s=8.0,
+                    attempts=4,
+                    settle_s=0.15,
+                    priority=True,
+                )
+                esp_ready = {"ok": True, "response": response}
+            except Exception as exc:
+                esp_ready = {"ok": False, "error": repr(exc)}
+                self.logs.log(
+                    "esp-plc",
+                    "warning",
+                    f"ESP-Diag-Fallback: Wickler-Ready fuer Folge-Label {label_no} fehlgeschlagen: {repr(exc)}",
+                )
+
+        result.update(
+            {
+                "ok": bool(wickler_takt.get("ok")) and bool(esp_ready.get("ok")),
+                "status": "finished",
+                "wickler_takt": wickler_takt,
+                "esp_ready": esp_ready,
+                "wickler_takt_ok": bool(wickler_takt.get("ok")),
+                "esp_ready_ok": bool(esp_ready.get("ok")),
+            }
+        )
+        production_info["esp_next_wickler_ready_fallback"] = dict(result)
+        severity = "info" if result["ok"] else "warning"
+        message = (
+            f"ESP-Diag-Fallback Folge-Wickler-Ready Label {label_no}: "
+            f"Wickler ok={int(bool(wickler_takt.get('ok')))}, ESP ok={int(bool(esp_ready.get('ok')))}"
+        )
+        self._record_event("production_next_wickler_ready_fallback", severity, message, result)
         return result
 
     def _monitor_active_production_wicklers(self, production_info: dict[str, Any], ts: float) -> Optional[dict[str, Any]]:
