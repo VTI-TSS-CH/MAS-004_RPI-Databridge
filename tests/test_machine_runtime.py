@@ -4395,6 +4395,40 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(10, production_info["label_removal_request"]["label_no"])
         self.assertEqual("verify_bypass_nok", production_info["label_removal_request"]["payload"]["reason"])
 
+    def test_label_removal_required_event_merges_visible_label_list(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        runtime._pause_production_motion_after_print = Mock(
+            return_value={"ok": True, "reason": "label_removal_required:10,11", "controlled": True}
+        )
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+
+        result = runtime.handle_event(
+            {
+                "type": "label_removal_required",
+                "label_no": 10,
+                "label_nos": [10, 11],
+                "reason": "verify_camera_nok",
+                "material_ok": 1,
+                "print_ok": 1,
+                "verify_ok": 0,
+                "quality_ok": 0,
+                "verify_triggered": 1,
+                "verify_resolved": 1,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        runtime._pause_production_motion_after_print.assert_called_once_with(
+            reason="label_removal_required:10,11",
+            target_state=7,
+        )
+        snapshot = runtime.snapshot()
+        production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertEqual([10, 11], production_info["label_removal_pending_labels"])
+        self.assertEqual("Labels 10, 11 entnehmen", production_info["label_removal_request"]["operator_message"])
+        self.assertEqual([10, 11], production_info["label_removal_request"]["label_nos"])
+
     def test_label_removal_required_during_pause_extends_removal_list(self):
         runtime = self.build_runtime()
         runtime._write_state(

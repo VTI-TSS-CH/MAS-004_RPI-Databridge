@@ -83,6 +83,21 @@ def _safe_float(raw: Any, default: float = 0.0) -> float:
         return float(default)
 
 
+def _payload_label_nos(payload: dict[str, Any], primary_label_no: int = 0) -> list[int]:
+    labels: list[int] = []
+    raw_labels = payload.get("label_nos", payload.get("labels"))
+    if raw_labels is None and isinstance(payload.get("payload"), dict):
+        nested_payload = payload["payload"]
+        raw_labels = nested_payload.get("label_nos", nested_payload.get("labels"))
+    if isinstance(raw_labels, (list, tuple, set)):
+        labels.extend(_safe_int(item, 0) for item in raw_labels)
+    elif raw_labels is not None:
+        labels.extend(_safe_int(item, 0) for item in re.findall(r"\d+", str(raw_labels)))
+    if primary_label_no > 0:
+        labels.append(int(primary_label_no))
+    return sorted({label for label in labels if label > 0})
+
+
 def _event_float_key(raw: Any, digits: int = 3) -> str:
     try:
         return f"{float(raw):.{int(digits)}f}"
@@ -3068,9 +3083,11 @@ class MachineRuntime:
         label_no = _safe_int(payload.get("label_no"), 0)
         if label_no <= 0:
             raise RuntimeError("label_no missing")
+        label_nos = _payload_label_nos(payload, label_no)
         return {
             "type": "label_removal_required",
             "label_no": label_no,
+            "label_nos": label_nos,
             "reason": str(payload.get("reason") or "quality_nok"),
             "material_ok": _truthy(payload.get("material_ok", 1)),
             "print_ok": _truthy(payload.get("print_ok", 1)),
@@ -3110,9 +3127,19 @@ class MachineRuntime:
                 requests.append(dict(existing_single))
 
         label_no = _safe_int(request.get("label_no"), 0)
-        if label_no > 0:
-            requests = [item for item in requests if _safe_int(item.get("label_no"), 0) != label_no]
-            requests.append(dict(request))
+        incoming_labels = _payload_label_nos(request, label_no)
+        for incoming_label in incoming_labels:
+            item = dict(request)
+            item["label_no"] = int(incoming_label)
+            item["label_nos"] = list(incoming_labels)
+            payload = item.get("payload")
+            if isinstance(payload, dict):
+                item_payload = dict(payload)
+                item_payload["label_no"] = int(incoming_label)
+                item_payload["label_nos"] = list(incoming_labels)
+                item["payload"] = item_payload
+            requests = [existing for existing in requests if _safe_int(existing.get("label_no"), 0) != incoming_label]
+            requests.append(item)
         requests.sort(key=lambda item: _safe_int(item.get("label_no"), 0))
         labels = [_safe_int(item.get("label_no"), 0) for item in requests]
         labels = [label for label in labels if label > 0]
@@ -3471,9 +3498,11 @@ class MachineRuntime:
             "skipped": f"machine_state={current_state}",
             "target_state": 7,
         }
+        pause_labels = _payload_label_nos(compact_payload, label_no)
+        pause_label_text = ",".join(str(item) for item in pause_labels) if pause_labels else str(label_no)
         if current_state in (4, 5, 6) or bool(production_info.get("active")):
             stop_result = self._pause_production_motion_after_print(
-                reason=f"label_removal_required:{label_no}",
+                reason=f"label_removal_required:{pause_label_text}",
                 target_state=7,
             )
 
