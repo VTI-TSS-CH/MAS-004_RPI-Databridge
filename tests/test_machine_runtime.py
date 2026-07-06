@@ -1120,6 +1120,44 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(4, snapshot["current_state"])
         self.assertEqual(5, snapshot["requested_state"])
 
+    def test_label_removal_resume_failure_keeps_tto_online(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=4,
+            requested_state=5,
+            state_source="transition_enter",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=9,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:6,9",
+                    "label_removal_pending_labels": [6, 9],
+                }
+            },
+        )
+
+        with patch.object(runtime, "_production_esp", return_value="ACK"), patch.object(
+            runtime,
+            "_verify_motor3_stopped_after_production_stop",
+            return_value={"ok": True},
+        ), patch.object(
+            runtime,
+            "_set_production_wicklers_idle",
+            return_value=[{"ok": True, "role": "unwinder"}, {"ok": True, "role": "rewinder"}],
+        ), patch.object(runtime, "_sync_esp_machine_state"), patch.object(
+            runtime,
+            "_queue_tto_printer_state_sync",
+            side_effect=AssertionError("label removal resume failure must keep TTO online"),
+        ):
+            result = runtime._stop_production_motion(reason="production_start_failed", target_state=7)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("label_removal_pause_keep_online", result["tto_printer"]["skipped"])
+
     def test_failed_production_stop_forces_fault_state(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -1191,6 +1229,7 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
+        self.io_store.upsert_value("raspi_plc21__I0_0", "0", "live", "test")
 
         with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
             runtime,
@@ -1282,6 +1321,9 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["param_sync"]["resume_reuse"])
         self.assertEqual("hardware_io", result["tto_printer"]["method"])
         self.assertTrue(result["tto_printer"]["zbc_skipped"])
+        self.assertFalse(result["tto_printer"]["ready"])
+        self.assertTrue(result["tto_printer"]["ready_warning"])
+        self.assertTrue(result["tto_printer"]["resume_allowed"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()

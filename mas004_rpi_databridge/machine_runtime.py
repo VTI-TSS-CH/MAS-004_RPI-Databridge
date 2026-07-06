@@ -4751,7 +4751,7 @@ class MachineRuntime:
             )
         return status
 
-    def _ensure_tto_ready_for_label_removal_resume(self, param_map: dict[str, str] | None = None) -> dict[str, Any]:
+    def _observe_tto_ready_for_label_removal_resume(self, param_map: dict[str, str] | None = None) -> dict[str, Any]:
         status = self._tto_ready_status_for_production(
             param_map=param_map,
             refresh=True,
@@ -4759,14 +4759,27 @@ class MachineRuntime:
         )
         if not bool(status.get("ok")):
             message = str(status.get("message") or "TTO Ready fehlt")
-            self.logs.log("machine", "warning", f"production_resume_label_removal: {message}")
+            self.logs.log(
+                "machine",
+                "warning",
+                f"production_resume_label_removal: {message}; Resume wird ohne ZBC-Statusabfrage fortgesetzt",
+            )
             self._record_event(
-                "production_resume_tto_ready_blocked",
+                "production_resume_tto_ready_warning",
                 "warning",
                 message,
                 status,
             )
-            raise RuntimeError(message)
+            return {
+                **status,
+                "ok": True,
+                "resume_allowed": True,
+                "blocked": False,
+                "ready_warning": True,
+                "warning": message,
+            }
+        status["resume_allowed"] = True
+        status["blocked"] = False
         return status
 
     def _tto_printer_state_sync_plan(self, machine_state: int, param_map: dict[str, str]) -> dict[str, Any]:
@@ -7638,7 +7651,7 @@ class MachineRuntime:
         label_text = ",".join(str(label) for label in labels)
         laser_ready = self._ensure_laser_ready_for_production_start(param_map)
         self._sync_esp_machine_state(5, required=True)
-        tto_printer = self._ensure_tto_ready_for_label_removal_resume(param_map)
+        tto_printer = self._observe_tto_ready_for_label_removal_resume(param_map)
         sync_info = self._reuse_production_params_for_resume(
             param_map,
             previous_values=previous_sync_values,
@@ -8237,7 +8250,19 @@ class MachineRuntime:
                 commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
         wicklers = self._set_production_wicklers_idle(target_state=target_state)
         self._sync_esp_machine_state(int(target_state or 0), required=False)
-        if _keep_tto_online_for_pause_reason(int(target_state or 0), reason):
+        state_info = dict(self._state_row().get("info") or {})
+        production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        keep_tto_online_for_label_removal_context = (
+            int(target_state or 0) == 7
+            and (
+                _is_label_removal_pause_reason(str(production_info.get("pause_reason") or ""))
+                or bool(self._pending_label_removal_labels(production_info))
+            )
+        )
+        if _keep_tto_online_for_pause_reason(
+            int(target_state or 0),
+            reason,
+        ) or keep_tto_online_for_label_removal_context:
             tto_printer = {
                 "ok": True,
                 "skipped": "label_removal_pause_keep_online",
