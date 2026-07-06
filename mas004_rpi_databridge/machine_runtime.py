@@ -7120,7 +7120,13 @@ class MachineRuntime:
             attempts=2,
             priority=True,
         )
-        wicklers = self._prepare_production_wicklers_continuous(plan)
+        base_travel_mm, base_source = self._production_wickler_base_travel(plan)
+        wicklers = self._prepare_production_wicklers(
+            plan,
+            travel_mm=base_travel_mm,
+            travel_source=base_source,
+            reason="production_resume_pause",
+        )
         quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
         command = (
             "PROCESS PRODUCTION RESUME "
@@ -7141,7 +7147,7 @@ class MachineRuntime:
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
-            require_indexed_mode=False,
+            require_indexed_mode=True,
         )
         if not post_start_wicklers.get("ok"):
             stop_result = self._stop_production_motion(
@@ -7166,6 +7172,8 @@ class MachineRuntime:
             "plan": plan,
             "band_break_bypass": quick_band_break_bypass,
             "wicklers": wicklers,
+            "wickler_travel_mm": base_travel_mm,
+            "wickler_travel_source": base_source,
             "post_start_wicklers": post_start_wicklers,
             "laser_ready": laser_ready,
             "tto_printer": tto_printer,
@@ -7218,7 +7226,13 @@ class MachineRuntime:
             attempts=2,
             priority=True,
         )
-        wicklers = self._prepare_production_wicklers_continuous(plan)
+        base_travel_mm, base_source = self._production_wickler_base_travel(plan)
+        wicklers = self._prepare_production_wicklers(
+            plan,
+            travel_mm=base_travel_mm,
+            travel_source=base_source,
+            reason="production_resume_label_removal",
+        )
         quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
         command = (
             "PROCESS PRODUCTION RESUME_REMOVED "
@@ -7240,7 +7254,7 @@ class MachineRuntime:
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
-            require_indexed_mode=False,
+            require_indexed_mode=True,
         )
         if not post_start_wicklers.get("ok"):
             stop_result = self._stop_production_motion(
@@ -7265,6 +7279,8 @@ class MachineRuntime:
             "plan": plan,
             "band_break_bypass": quick_band_break_bypass,
             "wicklers": wicklers,
+            "wickler_travel_mm": base_travel_mm,
+            "wickler_travel_source": base_source,
             "post_start_wicklers": post_start_wicklers,
             "laser_ready": laser_ready,
             "tto_printer": tto_printer,

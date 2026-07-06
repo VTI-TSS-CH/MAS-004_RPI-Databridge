@@ -967,13 +967,26 @@ class MachineRuntimeTests(unittest.TestCase):
                     "pause_reason": "operator_pause",
                     "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
                     "last_stop": {"ok": True, "reason": "operator_pause", "finished_ts": now_ts() - 1.0},
+                    "last_wickler_observed_travel": {"label_no": 12, "travel_mm": 103.25},
                 }
             },
         )
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
 
-        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
+            runtime,
+            "_prepare_production_wicklers",
+            return_value=[{"ok": True, "role": "unwinder"}, {"ok": True, "role": "rewinder"}],
+        ) as prepare_indexed, patch.object(
+            runtime,
+            "_prepare_production_wicklers_continuous",
+            side_effect=AssertionError("operator pause resume must stay in indexed wickler mode"),
+        ), patch.object(
+            runtime,
+            "_production_wickler_verifications",
+            return_value={"ok": True, "results": []},
+        ) as verify_wicklers:
             result = runtime._start_production_motion(param_map, format_plan)
 
         self.assertTrue(result["ok"], result)
@@ -981,6 +994,13 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("operator_pause", result["pause_reason"])
         self.assertIn("PROCESS PRODUCTION RESUME SPEED_MM_S=100.000 RAMP_MM_S2=300.000", result["command"])
         self.assertNotIn("motor3_zero", result)
+        prepare_indexed.assert_called_once()
+        self.assertEqual(103.25, prepare_indexed.call_args.kwargs["travel_mm"])
+        self.assertEqual("last_esp_remaining_label_12", prepare_indexed.call_args.kwargs["travel_source"])
+        self.assertEqual("production_resume_pause", prepare_indexed.call_args.kwargs["reason"])
+        self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
+        self.assertEqual(103.25, result["wickler_travel_mm"])
+        self.assertEqual("last_esp_remaining_label_12", result["wickler_travel_source"])
 
     def test_production_start_after_label_removal_uses_resume_without_reset(self):
         runtime = self.build_runtime()
@@ -1001,13 +1021,26 @@ class MachineRuntimeTests(unittest.TestCase):
                     "label_removal_request": {"label_no": 6, "label_nos": [6, 9]},
                     "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
                     "last_stop": {"reason": "label_removal_required:6", "finished_ts": now_ts() - 1.0},
+                    "last_wickler_observed_travel": {"label_no": 9, "travel_mm": 104.07},
                 }
             },
         )
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
 
-        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
+            runtime,
+            "_prepare_production_wicklers",
+            return_value=[{"ok": True, "role": "unwinder"}, {"ok": True, "role": "rewinder"}],
+        ) as prepare_indexed, patch.object(
+            runtime,
+            "_prepare_production_wicklers_continuous",
+            side_effect=AssertionError("label removal resume must stay in indexed wickler mode"),
+        ), patch.object(
+            runtime,
+            "_production_wickler_verifications",
+            return_value={"ok": True, "results": []},
+        ) as verify_wicklers:
             result = runtime._start_production_motion(param_map, format_plan)
 
         self.assertTrue(result["ok"], result)
@@ -1015,6 +1048,13 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual([6, 9], result["labels_expected_removed"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
         self.assertNotIn("motor3_zero", result)
+        prepare_indexed.assert_called_once()
+        self.assertEqual(104.07, prepare_indexed.call_args.kwargs["travel_mm"])
+        self.assertEqual("last_esp_remaining_label_9", prepare_indexed.call_args.kwargs["travel_source"])
+        self.assertEqual("production_resume_label_removal", prepare_indexed.call_args.kwargs["reason"])
+        self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
+        self.assertEqual(104.07, result["wickler_travel_mm"])
+        self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
 
     def test_production_start_clears_stale_label_removal_when_esp_register_is_empty(self):
         runtime = self.build_runtime()
