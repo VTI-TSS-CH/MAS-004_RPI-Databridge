@@ -4978,6 +4978,30 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["MAE0025"], snapshot["info"]["pause_reasons"])
         self.assertEqual("0", self.params.get_effective_value("MAS0028"))
 
+    def test_registration_error_mae0048_pauses_without_purge(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="production_registration_fault",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=1,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": False}},
+        )
+        self.params.apply_device_value("MAS0001", "7", promote_default=True)
+        self.params.apply_device_value("MAS0028", "0", promote_default=True)
+        self.params.apply_device_value("MAE0048", "1", promote_default=True)
+
+        snapshot = runtime.refresh()
+
+        self.assertEqual(7, snapshot["current_state"])
+        self.assertFalse(snapshot["purge_active"])
+        self.assertEqual(["MAE0048"], snapshot["info"]["pause_reasons"])
+        self.assertEqual([], snapshot["info"]["critical_reasons"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0028"))
+
     def test_esp_safety_ok_low_notaus_forces_state_21(self):
         runtime = self.build_runtime()
         self.io_store.upsert_value("esp32_plc58__I0_7", "0", "simulation", "test")

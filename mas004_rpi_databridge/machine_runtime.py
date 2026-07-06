@@ -94,7 +94,7 @@ def _active_mae_keys(param_map: dict[str, str]) -> list[str]:
     return sorted(str(key) for key, value in (param_map or {}).items() if str(key).startswith("MAE") and _truthy(value))
 
 
-PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026"}
+PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026", "MAE0048"}
 POSITION_AXIS_MAE_BY_MOTOR = {
     1: "MAE0004",
     2: "MAE0005",
@@ -213,6 +213,7 @@ PRODUCTION_REGISTRATION_RUNNER_ERRORS = {
     "first_print_position_move_not_started",
     "first_print_position_short_move",
     "first_print_position_early_stop",
+    "first_print_position_no_progress",
     "first_print_position_reissue_failed",
     "first_label_missing_at_print_position",
     "first_print_position_command_failed",
