@@ -4769,6 +4769,32 @@ class MachineRuntimeTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(0, stale_count)
 
+    def test_label_removal_pause_start_transition_is_not_superseded(self):
+        runtime = self.build_runtime()
+        latest_info = {
+            PRODUCTION_RUNTIME_INFO_KEY: {
+                "paused": True,
+                "pause_reason": "label_removal_required:3,6",
+                "label_removal_pending_labels": [3, 6],
+                "label_removal_request": {"label_no": 3, "label_nos": [3, 6]},
+            }
+        }
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=10,
+            info=latest_info,
+        )
+        latest = runtime._state_row()
+        snapshot = dict(latest)
+        snapshot["updated_ts"] = float(latest.get("updated_ts") or 0.0) - 1.0
+
+        self.assertIsNone(runtime._label_removal_state_superseded_snapshot(snapshot, 4))
+
     def test_stale_label_complete_after_removal_pause_is_local_only(self):
         runtime = self.build_runtime()
         runtime._write_state(

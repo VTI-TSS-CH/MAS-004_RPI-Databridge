@@ -1067,6 +1067,7 @@ class MachineRuntime:
                                 "from_state": int(snapshot["current_state"] or 0),
                                 "cleared_pause_errors": cleared_pause_errors,
                             }
+                            pending_start = dict(production_info["pending_start"])
                             self._record_event(
                                 "production_start_accepted",
                                 "info",
@@ -2639,6 +2640,18 @@ class MachineRuntime:
         ):
             return None
         snapshot_production = dict((snapshot.get("info") or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        snapshot_pause_reason = str(snapshot_production.get("pause_reason") or "")
+        snapshot_removal_request = snapshot_production.get("label_removal_request")
+        snapshot_is_label_removal_pause = (
+            _safe_int(snapshot.get("current_state"), 0) == 7
+            and (
+                snapshot_pause_reason.startswith("label_removal_required:")
+                or isinstance(snapshot_removal_request, dict)
+                or bool(snapshot_production.get("label_removal_pending_labels"))
+            )
+        )
+        if snapshot_is_label_removal_pause and int(candidate_state or 0) in (4, 5):
+            return None
         if int(candidate_state or 0) in (4, 5, 6) or bool(snapshot_production.get("active")):
             return latest
         return None
