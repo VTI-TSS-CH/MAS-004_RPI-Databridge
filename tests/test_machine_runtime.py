@@ -1122,6 +1122,12 @@ class MachineRuntimeTests(unittest.TestCase):
         sync_state.assert_not_called()
 
     def test_production_param_sync_forces_confirmed_start_values(self):
+        _insert_param(self.db, "MAP0007", "MAP", "0007", "2", "W", "R", "uint16")
+        with self.db._conn() as c:
+            c.execute(
+                "UPDATE params SET format_relevant='YES' WHERE pkey IN (?,?,?,?)",
+                ("MAP0001", "MAP0003", "MAP0007", "MAP0014"),
+            )
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         previous_values = runtime._production_esp_sync_values(param_map)
@@ -1137,10 +1143,14 @@ class MachineRuntimeTests(unittest.TestCase):
 
         commands = [call.args[0] for call in esp.call_args_list]
         expected_forced = [
+            "MAP0001",
+            "MAP0002",
+            "MAP0003",
             "MAP0004",
             "MAP0006",
             "MAP0011",
             "MAP0012",
+            "MAP0014",
             "MAP0016",
             "MAP0017",
             "MAP0018",
@@ -1151,10 +1161,13 @@ class MachineRuntimeTests(unittest.TestCase):
             "MAP0036",
             "MAP0037",
             "MAP0038",
+            "MAP0040",
             "MAP0066",
             "MAP0071",
             "MAP0075",
+            "MAP0076",
             "MAP0079",
+            "MAP0007",
         ]
         for key in expected_forced:
             self.assertIn(f"SYNC {key}={previous_values[key]}", commands)

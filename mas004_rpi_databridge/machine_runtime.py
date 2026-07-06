@@ -315,6 +315,7 @@ PRODUCTION_ESP_SYNC_KEYS = (
 )
 PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0016",
+    "MAP0002",
     "MAP0004",
     "MAP0006",
     "MAP0011",
@@ -328,6 +329,7 @@ PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0036",
     "MAP0037",
     "MAP0038",
+    "MAP0040",
     "MAP0067",
     "MAP0068",
     "MAP0069",
@@ -335,6 +337,7 @@ PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0066",
     "MAP0071",
     "MAP0075",
+    "MAP0076",
     "MAP0079",
     "MAP0080",
     "MAP0081",
@@ -4643,7 +4646,16 @@ class MachineRuntime:
 
     def _production_esp_sync_values(self, param_map: dict[str, str]) -> dict[str, str]:
         values: dict[str, str] = {}
-        for key in PRODUCTION_ESP_SYNC_KEYS:
+        keys = list(PRODUCTION_ESP_SYNC_KEYS)
+        with self.params.db._conn() as c:
+            rows = c.execute(
+                "SELECT pkey,format_relevant FROM params WHERE ptype='MAP' ORDER BY pkey"
+            ).fetchall()
+        for key, format_relevant in rows:
+            key = str(key or "").strip()
+            if key and key not in keys and _truthy(format_relevant):
+                keys.append(key)
+        for key in keys:
             if key == "MAP0067" and not _truthy(param_map.get("MAP0036", "0")):
                 continue
             if key == "MAP0068" and not _truthy(param_map.get("MAP0037", "0")):
@@ -4659,6 +4671,14 @@ class MachineRuntime:
                 continue
             values[key] = value
         return values
+
+    def _production_esp_start_readback_keys(self, values: dict[str, str]) -> set[str]:
+        keys = set(PRODUCTION_ESP_START_READBACK_KEYS)
+        for key in values:
+            meta = self.params.get_meta(key) or {}
+            if _truthy(meta.get("format_relevant")):
+                keys.add(key)
+        return keys
 
     def _production_esp_sync_reference(self, state_info: dict[str, Any]) -> dict[str, str]:
         setup_info = dict((state_info or {}).get("setup") or {})
@@ -4720,10 +4740,11 @@ class MachineRuntime:
         readback_skipped: list[str] = []
         readback: dict[str, str] = {}
         readback_errors: dict[str, str] = {}
-        required = tuple(key for key in PRODUCTION_ESP_START_READBACK_KEYS if key in values)
+        forced_keys = self._production_esp_start_readback_keys(values)
+        required = tuple(key for key in values if key in forced_keys)
         written_required: list[str] = []
         for key, value in values.items():
-            force = key in PRODUCTION_ESP_START_READBACK_KEYS
+            force = key in forced_keys
             previous_equal = values_effectively_equal(previous.get(key), value)
             persistent_equal = dedupe.is_duplicate(dedupe_channel, key, value)
             if force:
