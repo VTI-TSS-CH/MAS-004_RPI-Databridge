@@ -146,6 +146,7 @@ _ESP_ENDPOINTS_GUARD = threading.Lock()
 _ESP_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
 _ESP_COMMAND_IDLE_REUSE_S = 0.75
 _ESP_COMMAND_MAX_ATTEMPTS = 5
+_ESP_COMMAND_MAX_CONNECT_REFUSED_ATTEMPTS = 80
 _ESP_COMMAND_CLOSE_AFTER_RESPONSE = True
 _ESP_COMMAND_MIN_SPACING_S = 0.08
 _ESP_COMMAND_BROKER_ENABLED = True
@@ -446,16 +447,23 @@ class _EspCommandBroker:
 
     def _execute_with_retries(self, req: _EspBrokerRequest) -> str:
         last_error: Exception | None = None
-        for attempt in range(_ESP_COMMAND_MAX_ATTEMPTS):
+        command_attempt = 0
+        refused_attempt = 0
+        while time.monotonic() < req.deadline:
             if time.monotonic() >= req.deadline:
                 break
             try:
                 reply = self._exchange_once(req.line, req.read_timeout_s, req.read_limit, req.deadline)
-                if reply.strip().upper() == "NAK_BUSY" and attempt < (_ESP_COMMAND_MAX_ATTEMPTS - 1):
+                if reply.strip().upper() == "NAK_BUSY" and command_attempt < (_ESP_COMMAND_MAX_ATTEMPTS - 1):
                     raise RuntimeError("ESP endpoint busy")
                 return reply
             except Exception as exc:
                 last_error = exc
+                connect_refused = isinstance(exc, ConnectionRefusedError)
+                if connect_refused:
+                    refused_attempt += 1
+                else:
+                    command_attempt += 1
                 with self.state.lock:
                     self.state.last_error = repr(exc)
                     self.state.fail_count += 1
@@ -464,7 +472,13 @@ class _EspCommandBroker:
                         0.15 * (2 ** min(self.state.fail_count, 3)),
                     )
                 self.close_socket()
-                time.sleep(min(0.15, max(0.0, req.deadline - time.monotonic())))
+                if connect_refused:
+                    if refused_attempt >= _ESP_COMMAND_MAX_CONNECT_REFUSED_ATTEMPTS:
+                        break
+                elif command_attempt >= _ESP_COMMAND_MAX_ATTEMPTS:
+                    break
+                delay_s = 0.15 if connect_refused else min(0.15, 0.04 * max(1, command_attempt))
+                time.sleep(min(delay_s, max(0.0, req.deadline - time.monotonic())))
         if last_error is not None:
             raise last_error
         raise TimeoutError("ESP endpoint command deadline exceeded")

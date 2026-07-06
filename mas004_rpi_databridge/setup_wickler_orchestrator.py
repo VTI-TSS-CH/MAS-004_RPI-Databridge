@@ -36,6 +36,7 @@ SETUP_MEASURE_STATUS_READ_TIMEOUT_S = 4.0
 SETUP_MEASURE_STATUS_POLL_S = 1.0
 SETUP_MEASURE_STATUS_LOG_INTERVAL_S = 5.0
 SETUP_MEASURE_STATUS_MAX_CONSECUTIVE_ERRORS = 8
+SETUP_MEASURE_STATUS_RUNNING_COMM_GRACE_S = 30.0
 WICKLER_DIAMETER_FINALIZE_ATTEMPTS = 5
 WICKLER_DIAMETER_FINALIZE_RETRY_BASE_S = 0.4
 INFEED_TEACH_MOXA_TIMEOUT_S = 3.0
@@ -1566,6 +1567,7 @@ class SetupWicklerOrchestrator:
     def _wait_setup_measurement_complete(self, timeout_s: float = 180.0) -> dict[str, Any]:
         deadline = time.time() + float(timeout_s)
         last_status: dict[str, Any] = {}
+        last_status_ok_at = 0.0
         consecutive_status_errors = 0
         while time.time() < deadline:
             self._abort_if_not_setup_active()
@@ -1574,23 +1576,41 @@ class SetupWicklerOrchestrator:
                 status = self._setup_measure_status()
             except Exception as exc:
                 consecutive_status_errors += 1
-                if consecutive_status_errors >= SETUP_MEASURE_STATUS_MAX_CONSECUTIVE_ERRORS:
+                now = time.time()
+                last_status_running = bool(last_status.get("running")) and not bool(last_status.get("completed"))
+                comm_gap_s = (now - last_status_ok_at) if last_status_ok_at > 0.0 else 999.0
+                max_consecutive_errors = (
+                    max(
+                        SETUP_MEASURE_STATUS_MAX_CONSECUTIVE_ERRORS,
+                        int(SETUP_MEASURE_STATUS_RUNNING_COMM_GRACE_S / max(0.1, SETUP_MEASURE_STATUS_POLL_S)),
+                    )
+                    if last_status_running
+                    else SETUP_MEASURE_STATUS_MAX_CONSECUTIVE_ERRORS
+                )
+                grace_expired = (
+                    not last_status_running
+                    or comm_gap_s >= SETUP_MEASURE_STATUS_RUNNING_COMM_GRACE_S
+                )
+                if consecutive_status_errors >= max_consecutive_errors and grace_expired:
                     raise RuntimeError(
                         "ESP setup measurement status communication failed after "
                         f"{consecutive_status_errors} consecutive attempts: {exc!r}; "
+                        f"comm_gap_s={comm_gap_s:.1f}; "
                         f"last_status={last_status}"
                     ) from exc
                 self.logs.log(
                     "esp-plc",
                     "warning",
                     "setup measurement status read failed "
-                    f"({consecutive_status_errors}/{SETUP_MEASURE_STATUS_MAX_CONSECUTIVE_ERRORS}), "
+                    f"({consecutive_status_errors}/{max_consecutive_errors}, "
+                    f"gap={comm_gap_s:.1f}s), "
                     f"retrying: {exc!r}",
                 )
                 time.sleep(SETUP_MEASURE_STATUS_POLL_S)
                 continue
             consecutive_status_errors = 0
             last_status = status
+            last_status_ok_at = time.time()
             if status.get("completed") and not status.get("running"):
                 last_error = str(status.get("last_error") or "").strip()
                 if last_error and last_error != "stopped":

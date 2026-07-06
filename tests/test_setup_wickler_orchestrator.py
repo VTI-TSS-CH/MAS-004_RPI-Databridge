@@ -533,6 +533,28 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertTrue(result["completed"])
         self.assertEqual(23, result["labels_measured"])
 
+    def test_setup_measurement_tolerates_running_esp_reconnect_window(self):
+        self.controller._setup_measure_status = Mock(
+            side_effect=[
+                {"running": True, "completed": False, "phase": 5, "labels_measured": 23},
+                *[ConnectionRefusedError(111, "Connection refused") for _ in range(12)],
+                {
+                    "running": False,
+                    "completed": True,
+                    "phase": 6,
+                    "labels_measured": 23,
+                    "last_error": "",
+                },
+            ]
+        )
+        self.controller._abort_motor3_if_wickler_faulted = Mock()
+
+        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep"):
+            result = self.controller._wait_setup_measurement_complete(timeout_s=20.0)
+
+        self.assertTrue(result["completed"])
+        self.assertEqual(23, result["labels_measured"])
+
     def test_setup_measurement_aborts_after_repeated_esp_status_timeouts(self):
         self.controller._setup_measure_status = Mock(side_effect=TimeoutError("timed out"))
         self.controller._abort_motor3_if_wickler_faulted = Mock()

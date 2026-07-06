@@ -6,12 +6,19 @@ from mas004_rpi_databridge.device_clients import EspPlcClient, motor_setup_write
 
 
 class _LineServer:
-    def __init__(self, response: str, *, keep_open: bool = True, support_broker: bool = True):
+    def __init__(
+        self,
+        response: str,
+        *,
+        keep_open: bool = True,
+        support_broker: bool = True,
+        port: int = 0,
+    ):
         self.response = response.encode("utf-8")
         self.keep_open = bool(keep_open)
         self.support_broker = bool(support_broker)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock.bind(("127.0.0.1", int(port or 0)))
         self.sock.listen(8)
         self.host, self.port = self.sock.getsockname()
         self._closed = threading.Event()
@@ -119,6 +126,30 @@ class EspPlcClientTests(unittest.TestCase):
         finally:
             client.close()
             server.close()
+
+    def test_exchange_line_waits_through_short_connection_refused_window(self):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+        probe.close()
+
+        holder: dict[str, _LineServer] = {}
+
+        def start_server_later():
+            threading.Event().wait(0.25)
+            holder["server"] = _LineServer("PONG\n", port=port)
+
+        thread = threading.Thread(target=start_server_later, daemon=True)
+        thread.start()
+        client = EspPlcClient(host, port, timeout_s=0.1)
+        try:
+            self.assertEqual("PONG", client.exchange_line("PING", read_timeout_s=0.3))
+        finally:
+            client.close()
+            thread.join(timeout=1.0)
+            server = holder.get("server")
+            if server is not None:
+                server.close()
 
     def test_position_axis_setup_writes_are_blocked_without_motor_setup_context(self):
         server = _LineServer("ACK\n")
