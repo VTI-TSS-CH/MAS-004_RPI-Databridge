@@ -48,6 +48,9 @@ def build_machine_control_ui_html(nav_html: str) -> str:
     .bypass-card.active{{background:#fff9e6;border-color:#e3c66c}}
     .bypass-card h3{{display:flex;justify-content:space-between;gap:8px;align-items:center}}
     .bypass-fields{{display:grid;grid-template-columns:1fr 120px;gap:8px;align-items:center;margin-top:10px}}
+    .bypass-toggles{{display:grid;gap:6px;margin-top:10px}}
+    .bypass-toggle{{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#243b53}}
+    .bypass-toggle input{{margin-top:2px}}
     .audit-view{{height:64vh;min-height:520px;overflow:auto;border:1px solid var(--line);border-radius:14px;background:#fbfdff}}
     .entry{{display:grid;grid-template-columns:168px 112px 1fr;gap:10px;padding:10px 12px;border-bottom:1px solid #e7edf6;align-items:start}}
     .entry:last-child{{border-bottom:none}}
@@ -186,8 +189,9 @@ const bypassCards = [
   {{
     key:"MAP0036",
     title:"Material-Kontrollkamera",
-    note:"Trigger bleibt aktiv, Kamera-IOs werden ignoriert und die Rueckmeldung wird simuliert.",
-    fields:[["MAP0067", "Simulation", "0=alle gut, 1=alle schlecht, n=jede n-te schlecht"]]
+    note:"Kamera-IOs werden ignoriert und die Rueckmeldung wird simuliert.",
+    fields:[["MAP0067", "Simulation", "0=alle gut, 1=alle schlecht, n=jede n-te schlecht"]],
+    toggles:[["MAP0080", "Trigger im Bypass senden", "Q2.6 Kamera-Trigger wird auch im Bypass gepulst"]]
   }},
   {{
     key:"MAP0035",
@@ -204,8 +208,9 @@ const bypassCards = [
   {{
     key:"MAP0037",
     title:"Druck-Verifikationskamera",
-    note:"Trigger bleibt aktiv, OCR-IOs werden ignoriert und die Rueckmeldung wird simuliert.",
-    fields:[["MAP0068", "Simulation", "0=alle gut, 1=alle schlecht, n=jede n-te schlecht"]]
+    note:"OCR-IOs werden ignoriert und die Rueckmeldung wird simuliert.",
+    fields:[["MAP0068", "Simulation", "0=alle gut, 1=alle schlecht, n=jede n-te schlecht"]],
+    toggles:[["MAP0081", "Trigger im Bypass senden", "Q2.7 Verifikationskamera-Trigger wird auch im Bypass gepulst"]]
   }},
   {{
     key:"MAP0038",
@@ -384,10 +389,15 @@ function renderBypass(payload){{
       return `<div class="muted small">${{esc(label)}}<br/><span class="small">${{esc(hint)}}</span></div>
         <input id="bypass_${{key}}" type="number" min="${{esc(min)}}" max="${{esc(max)}}" value="${{esc(paramNumber(map,key,0))}}"/>`;
     }}).join("");
+    const toggles = (card.toggles || []).map(([key,label,hint]) => {{
+      const checked = paramNumber(map, key, 1) ? "checked" : "";
+      return `<label class="bypass-toggle"><input id="bypass_${{key}}" type="checkbox" ${{checked}}><span><strong>${{esc(label)}}</strong><br/><span class="muted small">${{esc(hint)}}</span></span></label>`;
+    }}).join("");
     return `<div class="bypass-card ${{active?"active":""}}">
       <h3><span>${{esc(card.title)}}</span><label class="check"><input id="bypass_${{card.key}}" type="checkbox" ${{active?"checked":""}}>Bypass</label></h3>
       <div class="muted small" style="margin-top:6px">${{esc(card.note)}}</div>
       <div class="bypass-fields">${{fields}}</div>
+      <div class="bypass-toggles">${{toggles}}</div>
     </div>`;
   }}).join("");
   document.getElementById("bypass_status").className = "pill ok";
@@ -411,6 +421,9 @@ async function saveBypass(){{
     card.fields.forEach(([key]) => {{
       const input = document.getElementById(`bypass_${{key}}`);
       values[key] = input ? Number(input.value || 0) : 0;
+    }});
+    (card.toggles || []).forEach(([key]) => {{
+      values[key] = document.getElementById(`bypass_${{key}}`)?.checked ? 1 : 0;
     }});
   }});
   const el = document.getElementById("bypass_status");

@@ -295,6 +295,8 @@ PRODUCTION_ESP_SYNC_KEYS = (
     "MAP0075",
     "MAP0076",
     "MAP0079",
+    "MAP0080",
+    "MAP0081",
 )
 PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0016",
@@ -319,6 +321,8 @@ PRODUCTION_ESP_START_READBACK_KEYS = (
     "MAP0071",
     "MAP0075",
     "MAP0079",
+    "MAP0080",
+    "MAP0081",
 )
 TTO_PRINTER_STATE_PKEY = "TTS0001"
 TTO_PRINTER_OFFLINE_CODE = "0"
@@ -4559,6 +4563,10 @@ class MachineRuntime:
             if key == "MAP0067" and not _truthy(param_map.get("MAP0036", "0")):
                 continue
             if key == "MAP0068" and not _truthy(param_map.get("MAP0037", "0")):
+                continue
+            if key == "MAP0080" and not _truthy(param_map.get("MAP0036", "0")):
+                continue
+            if key == "MAP0081" and not _truthy(param_map.get("MAP0037", "0")):
                 continue
             if key in {"MAP0069", "MAP0070"} and not _truthy(param_map.get("MAP0035", "0")):
                 continue

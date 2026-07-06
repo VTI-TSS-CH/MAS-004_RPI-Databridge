@@ -289,6 +289,7 @@ class MachineSetupAuthTests(unittest.TestCase):
         self.assertEqual(200, bypass_api.status_code)
         self.assertIn("parameters", bypass_api.json())
         self.assertTrue(any(item["pkey"] == "MAP0067" for item in bypass_api.json()["parameters"]))
+        self.assertTrue(any(item["pkey"] == "MAP0080" for item in bypass_api.json()["parameters"]))
 
         audit_retention = client.post("/api/machine/audit/retention", json={"keep_hours": 24})
         self.assertEqual(200, audit_retention.status_code)

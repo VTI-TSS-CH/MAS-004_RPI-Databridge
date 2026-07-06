@@ -108,6 +108,8 @@ def build_format_plan(values: dict[str, Any]) -> dict[str, Any]:
             "label_control_sensor": _safe_bool(values, "MAP0038", False),
             "material_camera_sim_bad_every_n": _safe_int(values, "MAP0067", 0),
             "ocr_camera_sim_bad_every_n": _safe_int(values, "MAP0068", 0),
+            "material_camera_trigger_in_bypass": _safe_bool(values, "MAP0080", True),
+            "ocr_camera_trigger_in_bypass": _safe_bool(values, "MAP0081", True),
             "laser_sim_print_ms": _safe_int(values, "MAP0069", 2000),
             "tto_sim_print_ms": _safe_int(values, "MAP0070", 2000),
             "laser_parallel_tto": _safe_bool(values, "MAP0079", False),

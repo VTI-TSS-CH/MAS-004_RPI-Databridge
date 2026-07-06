@@ -180,6 +180,8 @@ class MachineRuntimeTests(unittest.TestCase):
             ("MAP0071", "MAP", "0071", "5200", "W", "R", "uint16"),
             ("MAP0075", "MAP", "0075", "100", "W", "R", "uint16"),
             ("MAP0079", "MAP", "0079", "0", "W", "R", "bool"),
+            ("MAP0080", "MAP", "0080", "1", "W", "R", "bool"),
+            ("MAP0081", "MAP", "0081", "1", "W", "R", "bool"),
             ("MAE0004", "MAE", "0004", "0", "R", "W", "bool"),
             ("MAE0005", "MAE", "0005", "0", "R", "W", "bool"),
             ("MAE0006", "MAE", "0006", "0", "R", "W", "bool"),
@@ -1238,12 +1240,16 @@ class MachineRuntimeTests(unittest.TestCase):
                 "MAP0068": "4",
                 "MAP0069": "1500",
                 "MAP0070": "2000",
+                "MAP0080": "0",
+                "MAP0081": "0",
             }
         )
 
         inactive = runtime._production_esp_sync_values(param_map)
         self.assertNotIn("MAP0067", inactive)
         self.assertNotIn("MAP0068", inactive)
+        self.assertNotIn("MAP0080", inactive)
+        self.assertNotIn("MAP0081", inactive)
         self.assertNotIn("MAP0069", inactive)
         self.assertNotIn("MAP0070", inactive)
         self.assertEqual("0", inactive["MAP0079"])
@@ -1252,6 +1258,8 @@ class MachineRuntimeTests(unittest.TestCase):
         active = runtime._production_esp_sync_values(param_map)
         self.assertEqual("3", active["MAP0067"])
         self.assertEqual("4", active["MAP0068"])
+        self.assertEqual("0", active["MAP0080"])
+        self.assertEqual("0", active["MAP0081"])
         self.assertEqual("1500", active["MAP0069"])
         self.assertEqual("2000", active["MAP0070"])
         self.assertEqual("0", active["MAP0079"])
