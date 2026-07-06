@@ -1679,6 +1679,43 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("Wippe nicht eingemessen", result["errors"])
         self.assertIn("MAE0028", result["mae_keys"])
 
+    def test_production_wickler_accepts_extended_dancer_window(self):
+        runtime = self.build_runtime()
+
+        def state(wipe_percent: float) -> dict[str, object]:
+            return {
+                "telemetry": {
+                    "modeLabel": "Bereit",
+                    "modeCss": "ready",
+                    "wipePercent": wipe_percent,
+                    "calibrated": True,
+                    "requiresCalibration": False,
+                    "indexedModeEnabled": True,
+                    "indexedCommandSeq": 12,
+                },
+                "drive": {
+                    "alarm": False,
+                    "online": True,
+                    "ready": True,
+                    "move": False,
+                    "continuousModeReady": True,
+                    "lastCommandOk": True,
+                },
+                "values": {},
+                "master": {"indexedModeEnabled": True},
+            }
+
+        self.assertTrue(
+            runtime._verify_wickler_production_state("unwinder", state(94.9), require_indexed_mode=True)["ok"]
+        )
+        high = runtime._verify_wickler_production_state("unwinder", state(95.1), require_indexed_mode=True)
+        low = runtime._verify_wickler_production_state("rewinder", state(4.9), require_indexed_mode=True)
+
+        self.assertFalse(high["ok"])
+        self.assertIn("MAE0029", high["mae_keys"])
+        self.assertFalse(low["ok"])
+        self.assertIn("MAE0034", low["mae_keys"])
+
     def test_production_wickler_http_failure_is_only_communication_error(self):
         runtime = self.build_runtime()
 
