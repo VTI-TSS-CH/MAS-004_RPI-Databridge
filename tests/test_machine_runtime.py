@@ -1056,7 +1056,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(104.07, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
 
-    def test_production_start_clears_stale_label_removal_when_esp_register_is_empty(self):
+    def test_production_start_after_label_removal_resumes_when_esp_register_is_empty(self):
         runtime = self.build_runtime()
         runtime._write_state(
             current_state=7,
@@ -1094,16 +1094,29 @@ class MachineRuntimeTests(unittest.TestCase):
                 "missing": [3],
                 "not_pending": [],
             },
-        ), patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+        ), patch.object(
+            runtime,
+            "_prepare_production_wicklers",
+            return_value=[{"ok": True, "role": "unwinder"}, {"ok": True, "role": "rewinder"}],
+        ) as prepare_indexed, patch.object(
+            runtime,
+            "_prepare_production_wicklers_continuous",
+            side_effect=AssertionError("label removal resume must not fall back to fresh continuous start"),
+        ), patch.object(
+            runtime,
+            "_production_wickler_verifications",
+            return_value={"ok": True, "results": []},
+        ) as verify_wicklers, patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
             result = runtime._start_production_motion(param_map, format_plan)
 
         self.assertTrue(result["ok"], result)
-        self.assertIn("PROCESS PRODUCTION START", result["command"])
-        self.assertNotIn("RESUME_REMOVED", result["command"])
-        self.assertIn("motor3_zero", result)
-        cleared = result.get("cleared_label_removal_state") or {}
-        self.assertEqual("esp_register_missing_before_start", cleared.get("reason"))
-        self.assertEqual([3], cleared.get("labels"))
+        self.assertEqual("label_removal", result["resume"])
+        self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=3", result["command"])
+        self.assertNotIn("motor3_zero", result)
+        self.assertNotIn("cleared_label_removal_state", result)
+        self.assertTrue(result["label_removal_resume_validation"]["stale"])
+        prepare_indexed.assert_called_once()
+        self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
 
     def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
         runtime = self.build_runtime()

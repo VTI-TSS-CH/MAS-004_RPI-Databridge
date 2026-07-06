@@ -7335,6 +7335,8 @@ class MachineRuntime:
             "command": command,
             "response": response,
         }
+        if isinstance(production_info.get("label_removal_resume_validation"), dict):
+            result["label_removal_resume_validation"] = dict(production_info["label_removal_resume_validation"])
         self._record_event(
             "production_motion_resumed",
             "info",
@@ -7370,23 +7372,14 @@ class MachineRuntime:
                         + str(removal_validation.get("reason") or "unknown"),
                         "label_removal_validation": removal_validation,
                     }
+                production_info_before_start["label_removal_resume_validation"] = removal_validation
                 if bool(removal_validation.get("stale")):
-                    cleared_label_removal_state = self._clear_label_removal_runtime_state(
-                        production_info_before_start,
-                        reason="esp_register_missing_before_start",
-                        detail=removal_validation,
+                    self._record_event(
+                        "label_removal_resume_register_stale",
+                        "warning",
+                        "Label-Entnahme-Resume trotz leerer ESP-Visualisierung: Raspi-Pausenzustand bleibt fuehrend",
+                        removal_validation,
                     )
-                    if cleared_label_removal_state:
-                        self._record_event(
-                            "label_removal_state_cleared",
-                            "warning",
-                            "Alte Label-Entnahmepause vor Produktionsstart verworfen: ESP-Register passt nicht mehr",
-                            cleared_label_removal_state,
-                        )
-                    pending_removal_labels = []
-                    pause_reason_before_start = ""
-                else:
-                    production_info_before_start["label_removal_resume_validation"] = removal_validation
             if pending_removal_labels and pause_reason_before_start.startswith("label_removal_required:"):
                 return self._resume_production_after_label_removal(
                     param_map=param_map,
