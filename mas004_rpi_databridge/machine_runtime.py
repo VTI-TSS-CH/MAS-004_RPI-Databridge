@@ -184,6 +184,7 @@ _TTO_PRINTER_STATE_LOCK = threading.Lock()
 _MACHINE_REFRESH_LOCK = threading.RLock()
 
 _SETUP_PAUSE_RECOVERY_WINDOW_S = 2 * 60 * 60
+_SETUP_MOTION_RECOVERY_PENDING_MAX_AGE_S = 20.0
 MACHINE_STATE_HEARTBEAT_WRITE_INTERVAL_S = 5.0
 PRODUCTION_RUNTIME_INFO_KEY = "production_runtime"
 PRODUCTION_RUNTIME_EVENT_TYPES = {
@@ -1059,6 +1060,10 @@ class MachineRuntime:
             if isinstance(setup_safety_info.get("last_motion_recovery"), dict)
             else {}
         )
+        setup_last_motion_recovery_ts = max(
+            _safe_float(setup_last_motion_recovery.get("finished_ts"), 0.0),
+            self._latest_successful_machine_event_ts("reset_motion_recovery"),
+        )
         if setup_command_active and setup_command_ts > setup_seen_ts and _RESET_MOTION_RECOVERY_LOCK.locked():
             setup_seen_ts = setup_command_ts
             setup_info["mas0002_setup_seen_ts"] = setup_seen_ts
@@ -1081,6 +1086,7 @@ class MachineRuntime:
             setup_command_ts = 0.0
             setup_pending_motion_recovery = True
             setup_pending_motion_recovery_command_ts = setup_seen_ts
+            setup_pending_motion_recovery_ts = _safe_float(setup_info.get("motion_recovery_pending_ts"), 0.0)
             self.logs.log("machine", "info", "Einrichten wartet auf laufende Motion-Recovery")
             self._record_event(
                 "setup_waiting_motion_recovery",
@@ -1113,8 +1119,46 @@ class MachineRuntime:
             and setup_pending_motion_recovery_command_ts > 0.0
             and setup_pending_motion_recovery_ts > 0.0
             and not _RESET_MOTION_RECOVERY_LOCK.locked()
-            and _safe_float(setup_last_motion_recovery.get("finished_ts"), 0.0) >= setup_pending_motion_recovery_ts
+            and (ts - setup_pending_motion_recovery_ts) <= _SETUP_MOTION_RECOVERY_PENDING_MAX_AGE_S
+            and setup_last_motion_recovery_ts >= setup_pending_motion_recovery_ts
         )
+        setup_pending_motion_recovery_stale = (
+            setup_pending_motion_recovery
+            and not setup_pending_motion_recovery_ready
+            and setup_pending_motion_recovery_ts > 0.0
+            and not _RESET_MOTION_RECOVERY_LOCK.locked()
+            and (ts - setup_pending_motion_recovery_ts) > _SETUP_MOTION_RECOVERY_PENDING_MAX_AGE_S
+        )
+        if setup_pending_motion_recovery_stale:
+            age_s = round(max(0.0, ts - setup_pending_motion_recovery_ts), 3)
+            stale_pending_ts = setup_pending_motion_recovery_ts
+            setup_info["last_result"] = {
+                "ok": False,
+                "skipped": True,
+                "stale": True,
+                "reason": "stale_motion_recovery_pending",
+                "age_s": age_s,
+                "message": "Alter Einrichten-Wartezustand verworfen; Einrichten bitte neu starten",
+                "ts": now_ts(),
+            }
+            setup_info.pop("motion_recovery_pending", None)
+            setup_info.pop("motion_recovery_pending_command_ts", None)
+            setup_info.pop("motion_recovery_pending_ts", None)
+            setup_pending_motion_recovery = False
+            setup_pending_motion_recovery_command_ts = 0.0
+            setup_pending_motion_recovery_ts = 0.0
+            if int(snapshot["current_state"] or 0) in (2, 3):
+                requested_state_override = 9
+            self._record_event(
+                "setup_motion_recovery_pending_stale",
+                "warning",
+                "Alter Einrichten-Wartezustand verworfen; Einrichten bitte neu starten",
+                {
+                    "age_s": age_s,
+                    "pending_ts": stale_pending_ts,
+                    "latest_recovery_ts": setup_last_motion_recovery_ts,
+                },
+            )
         setup_rising = (
             setup_command_active and setup_command_ts > setup_seen_ts
         ) or setup_pending_motion_recovery_ready
@@ -3740,6 +3784,27 @@ class MachineRuntime:
         if not row:
             return 0.0
         return _safe_float(row[0], 0.0)
+
+    def _latest_successful_machine_event_ts(self, event_type: str) -> float:
+        try:
+            with self.db._conn() as c:
+                rows = c.execute(
+                    """SELECT ts,payload_json
+                         FROM machine_events
+                        WHERE event_type=?
+                        ORDER BY ts DESC LIMIT 10""",
+                    (str(event_type),),
+                ).fetchall()
+        except Exception:
+            return 0.0
+        for ts, payload_json in rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except Exception:
+                payload = {}
+            if bool(payload.get("ok")):
+                return _safe_float(ts, 0.0)
+        return 0.0
 
     def _latest_motor_setup_master_ts(self, motor_id: int) -> float:
         try:

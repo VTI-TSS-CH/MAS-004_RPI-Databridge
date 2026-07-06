@@ -2510,6 +2510,91 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertNotIn("motion_recovery_pending", finished["info"]["setup"])
         self.assertEqual("0", self.params.get_effective_value("MAS0002"))
 
+    def test_setup_resumes_from_motion_recovery_event_when_state_field_was_overwritten(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=9,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        ok, msg = self.params.set_value("MAS0002", "3", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        self.assertTrue(machine_runtime_module._RESET_MOTION_RECOVERY_LOCK.acquire(blocking=False))
+        try:
+            with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
+                waiting = runtime.refresh()
+                controller_cls.return_value.run.assert_not_called()
+        finally:
+            machine_runtime_module._RESET_MOTION_RECOVERY_LOCK.release()
+
+        info = dict(waiting["info"])
+        self.assertTrue(info["setup"]["motion_recovery_pending"])
+        # Simulate the real race seen on the machine: the recovery completion
+        # survived in machine_events, but a parallel refresh overwrote
+        # info.safety.last_motion_recovery.
+        info.pop("safety", None)
+        runtime._write_state(
+            current_state=9,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info=info,
+        )
+        runtime._record_event(
+            "reset_motion_recovery",
+            "info",
+            "Safety-Reset Motion-Recovery abgeschlossen",
+            {"ok": True, "finished_ts": now_ts()},
+        )
+
+        with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
+            controller_cls.return_value.run.return_value = {"ok": True}
+            finished = runtime.refresh()
+
+        controller_cls.return_value.run.assert_called_once()
+        self.assertEqual(7, finished["current_state"])
+        self.assertNotIn("motion_recovery_pending", finished["info"]["setup"])
+
+    def test_stale_setup_motion_recovery_pending_is_dropped_without_motion(self):
+        runtime = self.build_runtime()
+        stale_ts = now_ts() - (machine_runtime_module._SETUP_MOTION_RECOVERY_PENDING_MAX_AGE_S + 5.0)
+        runtime._write_state(
+            current_state=3,
+            requested_state=3,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "setup": {
+                    "mas0002_setup_seen_ts": stale_ts,
+                    "motion_recovery_pending": True,
+                    "motion_recovery_pending_command_ts": stale_ts,
+                    "motion_recovery_pending_ts": stale_ts,
+                    "last_result": {"waiting": True, "reason": "reset_motion_recovery_in_progress"},
+                }
+            },
+        )
+
+        with patch("mas004_rpi_databridge.machine_runtime.SetupWicklerOrchestrator") as controller_cls:
+            snapshot = runtime.refresh()
+
+        controller_cls.return_value.run.assert_not_called()
+        setup = snapshot["info"]["setup"]
+        self.assertNotIn("motion_recovery_pending", setup)
+        self.assertEqual("stale_motion_recovery_pending", setup["last_result"]["reason"])
+        self.assertEqual(9, snapshot["requested_state"])
+
     def test_stop_axis_positions_are_not_ok_when_drive_accepts_but_does_not_move(self):
         self.cfg.esp_simulation = False
         runtime = self.build_runtime()
