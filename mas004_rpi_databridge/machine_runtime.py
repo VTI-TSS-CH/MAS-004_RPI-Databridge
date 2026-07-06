@@ -2351,6 +2351,46 @@ class MachineRuntime:
                 return True
         return False
 
+    def _production_wickler_start_already_in_flight(
+        self,
+        label_no: int,
+        *,
+        ts: float | None = None,
+        window_s: float = 20.0,
+    ) -> dict[str, Any] | None:
+        if label_no <= 0:
+            return None
+        cutoff = max(0.0, _safe_float(ts, now_ts()) - float(window_s))
+        try:
+            with self.db._conn() as c:
+                rows = c.execute(
+                    """SELECT ts,event_type,payload_json
+                         FROM machine_events
+                        WHERE event_type IN (
+                              'production_wickler_indexed_ready',
+                              'production_print_position_commanded',
+                              'production_print_position_reached'
+                        )
+                          AND ts>=?
+                        ORDER BY id DESC LIMIT 16""",
+                    (cutoff,),
+                ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            try:
+                payload = json.loads(row[2] or "{}")
+            except Exception:
+                payload = {}
+            if _safe_int(payload.get("label_no"), 0) != label_no:
+                continue
+            return {
+                "event_type": str(row[1] or ""),
+                "event_ts": _safe_float(row[0], 0.0),
+                "label_no": label_no,
+            }
+        return None
+
     def _handle_registration_diagnostic_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         diag = dict((payload or {}).get("diag") or {})
         reason = str((payload or {}).get("reason") or diag.get("reason") or "").strip() or "unknown"
@@ -3735,6 +3775,15 @@ class MachineRuntime:
             )
         if event_type == "production_wickler_indexed_ready":
             return "|".join([event_type, str(label_no)])
+        if event_type == "production_next_wickler_ready_fallback_skipped":
+            return "|".join(
+                [
+                    event_type,
+                    str(label_no),
+                    str(payload.get("skipped") or ""),
+                    str((payload.get("in_flight") or {}).get("event_type") or ""),
+                ]
+            )
         if event_type == "production_wickler_runline_released":
             return "|".join([event_type, str(label_no)])
         if event_type == "production_registration_correction":
@@ -6027,6 +6076,47 @@ class MachineRuntime:
                 "label_no": label_no,
                 "previous": previous,
             }
+
+        if bool(diag.get("position_commanded")):
+            result = {
+                "ok": True,
+                "skipped": "position_already_commanded",
+                "key": key,
+                "label_no": label_no,
+                "ts": float(ts),
+            }
+            production_info["esp_next_wickler_ready_fallback"] = dict(result)
+            self._record_production_event_once(
+                "production_next_wickler_ready_fallback_skipped",
+                "info",
+                f"Folge-Wickler-Fallback Label {label_no} uebersprungen: ID3-Position bereits befohlen",
+                result,
+                dedupe_window_s=60.0,
+            )
+            return result
+
+        in_flight = self._production_wickler_start_already_in_flight(label_no, ts=ts)
+        if in_flight is not None:
+            result = {
+                "ok": True,
+                "skipped": "wickler_start_already_in_flight",
+                "key": key,
+                "label_no": label_no,
+                "in_flight": in_flight,
+                "ts": float(ts),
+            }
+            production_info["esp_next_wickler_ready_fallback"] = dict(result)
+            self._record_production_event_once(
+                "production_next_wickler_ready_fallback_skipped",
+                "info",
+                (
+                    f"Folge-Wickler-Fallback Label {label_no} uebersprungen: "
+                    f"{in_flight.get('event_type')} bereits verarbeitet"
+                ),
+                result,
+                dedupe_window_s=60.0,
+            )
+            return result
 
         result: dict[str, Any] = {
             "ok": False,

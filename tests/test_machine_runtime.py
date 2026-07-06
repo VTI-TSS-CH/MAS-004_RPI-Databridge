@@ -4843,6 +4843,43 @@ class MachineRuntimeTests(unittest.TestCase):
             commands,
         )
 
+    def test_production_esp_monitor_fallback_skips_next_wickler_when_position_already_commanded(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        production_info = {"active": True, "active_since_ts": now_ts()}
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._record_event(
+            "production_print_position_commanded",
+            "info",
+            "Druckposition befohlen: Label 3",
+            {"label_no": 3, "target_abs_mm": 828.650, "remaining_mm": 104.0},
+        )
+
+        def fake_esp(command, **_kwargs):
+            if command == "OUTBOUND FETCH_EVENTS MAX=16":
+                return 'JSON {"ok":true,"count":0,"remaining":0,"lines":[]}'
+            if command == "PROCESS PRODUCTION MONITOR?":
+                return (
+                    'JSON {"active":true,"running":true,"phase":5,'
+                    '"reason":"next_label_wait_wickler",'
+                    '"last_error":"","label_no":3,"wickler_ready_accepted":false,'
+                    '"position_commanded":false,"target_mm":828.650,"error_mm":104.000,'
+                    '"infeed_speed_mm_s":0.0,"drive_speed_mm_s":0.0}'
+                )
+            raise AssertionError(command)
+
+        runtime._production_esp = Mock(side_effect=fake_esp)
+
+        result = runtime._monitor_active_production_esp(production_info, now_ts())
+
+        self.assertIsNone(result)
+        fallback = production_info["esp_next_wickler_ready_fallback"]
+        self.assertEqual("wickler_start_already_in_flight", fallback["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_not_called()
+        commands = [call.args[0] for call in runtime._production_esp.call_args_list]
+        self.assertEqual(["OUTBOUND FETCH_EVENTS MAX=16", "PROCESS PRODUCTION MONITOR?"], commands)
+
     def test_esp_outbound_fetch_dispatches_machine_events(self):
         self.cfg.esp_simulation = False
         runtime = self.build_runtime()
