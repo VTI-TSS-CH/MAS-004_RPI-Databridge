@@ -113,6 +113,17 @@ def _is_label_removal_pause_reason(reason: Any) -> bool:
     return str(reason or "").strip().startswith("label_removal_required:")
 
 
+def _keep_tto_online_for_pause_reason(machine_state: int, reason: Any) -> bool:
+    text = str(reason or "").strip()
+    if int(machine_state or 0) != 7:
+        return False
+    return (
+        _is_label_removal_pause_reason(text)
+        or "label_removal_required:" in text
+        or "label_removal_resume" in text
+    )
+
+
 PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026", "MAE0048"}
 POSITION_AXIS_MAE_BY_MOTOR = {
     1: "MAE0004",
@@ -1762,7 +1773,10 @@ class MachineRuntime:
             )
             self.logs.log("machine", "info", f"state {previous_state} -> {new_state} ({state_source})")
             if int(new_state or 0) != 5:
-                if int(new_state or 0) == 7 and str(state_source or "") == "label_removal_required":
+                if _keep_tto_online_for_pause_reason(
+                    int(new_state or 0),
+                    f"{state_source}:{production_info.get('pause_reason') or ''}",
+                ):
                     tto_state_sync = {
                         "ok": True,
                         "skipped": "label_removal_pause_keep_online",
@@ -1912,6 +1926,20 @@ class MachineRuntime:
         )
 
     def process_physical_button_inputs(
+        self,
+        *,
+        current_inputs: dict[str, Any],
+        previous_inputs: dict[str, Any] | None = None,
+        ts: float | None = None,
+    ) -> dict[str, Any]:
+        with _MACHINE_REFRESH_LOCK:
+            return self._process_physical_button_inputs_unlocked(
+                current_inputs=current_inputs,
+                previous_inputs=previous_inputs,
+                ts=ts,
+            )
+
+    def _process_physical_button_inputs_unlocked(
         self,
         *,
         current_inputs: dict[str, Any],
@@ -3109,6 +3137,10 @@ class MachineRuntime:
         }
 
     def press_virtual_button(self, button: str, *, actor: str = "machine-ui") -> dict[str, Any]:
+        with _MACHINE_REFRESH_LOCK:
+            return self._press_virtual_button_unlocked(button, actor=actor)
+
+    def _press_virtual_button_unlocked(self, button: str, *, actor: str = "machine-ui") -> dict[str, Any]:
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
         try:
@@ -6263,13 +6295,14 @@ class MachineRuntime:
                 )
             except Exception as exc:
                 commands.append({"command": command, "ok": False, "error": repr(exc)})
-        wicklers = self._set_production_wicklers_idle(target_state=7)
+        wicklers = self._set_production_wicklers_idle(target_state=7, neutralize_indexed_start=True)
         self._sync_esp_machine_state(7, required=False)
-        tto_printer = self._queue_tto_printer_state_sync(
-            7,
-            self._param_values_by_prefix(("MAP", "TTS")),
-            reason=f"label_removal_required:{','.join(str(label) for label in labels)}",
-        )
+        tto_printer = {
+            "ok": True,
+            "skipped": "label_removal_pause_keep_online",
+            "machine_state": 7,
+            "reason": f"label_removal_required:{','.join(str(label) for label in labels)}",
+        }
 
         production_info["active"] = False
         production_info["paused"] = True
@@ -6743,7 +6776,7 @@ class MachineRuntime:
         neutralize_indexed_start: bool = False,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        keep_ready = int(target_state or 0) in (6, 7) and not bool(neutralize_indexed_start)
+        keep_ready = int(target_state or 0) in (6, 7)
         for role in ("unwinder", "rewinder"):
             client = SmartWicklerClient(self.cfg, role)
             if not client.available():
@@ -6778,7 +6811,13 @@ class MachineRuntime:
                         errors.append(f"{mode}_error={repr(exc)}")
             try:
                 if neutralize_indexed_start:
-                    item["mode"] = client.post_mode("stop", timeout_s=1.0)
+                    item["neutralize_mode"] = client.post_mode("stop", timeout_s=1.0)
+                    if not item["neutralize_mode"].get("ok", True):
+                        errors.append(f"neutralize mode rejected: {item['neutralize_mode']}")
+                    if keep_ready:
+                        item["mode"] = client.release_for_continuous_motion(timeout_s=1.0)
+                    else:
+                        item["mode"] = item["neutralize_mode"]
                 elif keep_ready:
                     item["mode"] = client.release_for_continuous_motion(timeout_s=1.0)
                 else:
@@ -8122,11 +8161,19 @@ class MachineRuntime:
                 commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
         wicklers = self._set_production_wicklers_idle(target_state=target_state)
         self._sync_esp_machine_state(int(target_state or 0), required=False)
-        tto_printer = self._queue_tto_printer_state_sync(
-            int(target_state or 0),
-            self._param_values_by_prefix(("MAP", "TTS")),
-            reason=f"production_stop:{reason}",
-        )
+        if _keep_tto_online_for_pause_reason(int(target_state or 0), reason):
+            tto_printer = {
+                "ok": True,
+                "skipped": "label_removal_pause_keep_online",
+                "machine_state": int(target_state or 0),
+                "reason": f"production_stop:{reason}",
+            }
+        else:
+            tto_printer = self._queue_tto_printer_state_sync(
+                int(target_state or 0),
+                self._param_values_by_prefix(("MAP", "TTS")),
+                reason=f"production_stop:{reason}",
+            )
         critical_commands_ok = all(item.get("ok") for item in commands if item.get("critical"))
         wicklers_ok = all(item.get("ok") for item in wicklers)
         motion_safe = critical_commands_ok and bool(motor3_stop.get("ok"))

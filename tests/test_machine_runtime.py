@@ -490,6 +490,67 @@ class MachineRuntimeTests(unittest.TestCase):
             calls,
         )
 
+    def test_label_removal_idle_neutralizes_start_then_returns_ready(self):
+        runtime = self.build_runtime()
+        calls: list[tuple[str, str, object]] = []
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s=None):
+                calls.append((self.role, "master", dict(payload)))
+                return {"ok": True}
+
+            def post_mode(self, mode, timeout_s=None):
+                calls.append((self.role, "mode", mode))
+                return {"ok": True}
+
+            def release_for_continuous_motion(self, timeout_s=None):
+                calls.append((self.role, "ready", bool(timeout_s)))
+                return {"ok": True, "readyMotion": True}
+
+            def fetch_state(self, timeout_s=None):
+                return {
+                    "master": {"indexedModeEnabled": False},
+                    "telemetry": {
+                        "modeLabel": "Bereit",
+                        "modeCss": "ready",
+                        "externalStopActive": False,
+                        "indexedModeEnabled": False,
+                        "wipePercent": 50.0,
+                    },
+                    "drive": {
+                        "online": True,
+                        "ready": True,
+                        "move": False,
+                        "alarm": False,
+                        "continuousModeReady": True,
+                        "lastCommandOk": True,
+                    },
+                    "values": {},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient):
+            result = runtime._set_production_wicklers_idle(target_state=7, neutralize_indexed_start=True)
+
+        self.assertTrue(all(item["ok"] for item in result), result)
+        self.assertTrue(all(item.get("neutralize_indexed_start") for item in result), result)
+        self.assertEqual(
+            [
+                ("unwinder", "master", {"indexedModeEnabled": "0", "map0023": "5", "map0024": "95", "map0025": "1.0"}),
+                ("unwinder", "mode", "stop"),
+                ("unwinder", "ready", True),
+                ("rewinder", "master", {"indexedModeEnabled": "0", "map0023": "5", "map0024": "95", "map0025": "1.0"}),
+                ("rewinder", "mode", "stop"),
+                ("rewinder", "ready", True),
+            ],
+            calls,
+        )
+
     def test_pause_idle_retries_transient_wickler_offline_after_release(self):
         runtime = self.build_runtime()
 
@@ -5673,6 +5734,9 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("label_removal_required:3", production_info["pause_reason"])
         self.assertEqual("0", self.params.get_effective_value("MAS0028"))
         runtime._stop_production_motion.assert_not_called()
+        runtime._set_production_wicklers_idle.assert_called_once_with(target_state=7, neutralize_indexed_start=True)
+        runtime._queue_tto_printer_state_sync.assert_not_called()
+        self.assertEqual("label_removal_pause_keep_online", production_info["last_stop"]["tto_printer"]["skipped"])
         runtime._notify_microtom.assert_not_called()
 
     def test_production_esp_monitor_falls_back_to_status_for_old_firmware(self):
