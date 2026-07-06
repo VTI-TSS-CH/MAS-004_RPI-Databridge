@@ -10,10 +10,8 @@
 - Core app package: `mas004_rpi_databridge/`
 - Web/API: `mas004_rpi_databridge/webui.py`
 - Message reliability: `inbox.py`, `outbox.py`, `router.py`, `service.py`, `http_client.py`, `watchdog.py`
-- Background ops: `ntp_sync.py` (periodic time sync), `service.py` background loops for sender lanes, ESP push, VJ6530 async sync and IO runtime refresh
-- Device-state sync:
-  - `vj6530_async_listener.py` (primary async status/error ingestion from the 6530)
-  - `vj6530_poller.py` (slow fallback sync when the async channel is not healthy)
+- Background ops: `ntp_sync.py` (periodic time sync), `service.py` background loops for sender lanes, ESP push and IO runtime refresh
+- TTO VJ6530: no background async listener or poller is used; printer ready/state is monitored by machine IO, while explicit ZBC writes remain available for controlled online/offline commands.
 - Device-initiated ESP push path: `esp_push_listener.py` (eth1 listener for active ESP->Raspi messages)
 - Production batch logging:
   - `production_logs.py` manages start/stop state from `MAS0002`, batch label from `MAS0029` and ready flag `MAS0030`

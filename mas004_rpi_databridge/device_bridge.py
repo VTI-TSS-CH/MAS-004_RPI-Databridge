@@ -12,7 +12,6 @@ from mas004_rpi_databridge.device_clients import DeviceWatchdog, EspPlcClient, U
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.params import ParamStore
 from mas004_rpi_databridge.state_dedupe import ValueDedupeStore
-from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 READONLY_TYPES = {"TTE", "TTW", "LSE", "LSW", "MAE", "MAW"}  # push-only from device perspective
 ZBC_ERR_MESSAGE_ID = 0x500D
@@ -88,18 +87,7 @@ class DeviceBridge:
             return f"{pkey}=NAK_DeviceComm"
 
     def warm_device_caches(self):
-        if bool(getattr(self.cfg, "vj6530_async_enabled", True)):
-            return
-        if self._is_simulation("vj6530"):
-            return
-        if not (self.cfg.vj6530_host or "").strip() or int(self.cfg.vj6530_port or 0) <= 0:
-            return
-        try:
-            self._zbc_bridge.summary_dict(force_refresh=True)
-            self._zbc_bridge.request_current_parameters()
-            self.logs.log("vj6530", "info", "6530 cache warmup complete")
-        except Exception as exc:
-            self.logs.log("vj6530", "info", f"6530 cache warmup skipped: {repr(exc)}")
+        return
 
     def _call_zbc_bridge(self, fn, pkey: str, op: str):
         last_exc: Optional[Exception] = None
@@ -188,14 +176,7 @@ class DeviceBridge:
                 if zbc_upper.startswith("STATUS[") or zbc_upper.startswith("STS[") or zbc_upper.startswith("IRQ{"):
                     return f"{pkey}={self.params.get_effective_value(pkey)}"
                 try:
-                    if self._use_vj6530_runtime_session():
-                        resolved = self._submit_vj6530_runtime_request(
-                            "read_mapped_value",
-                            zbc_mapping,
-                            timeout_s=max(3.0, float(self.cfg.http_timeout_s or 5.0) + 2.0),
-                        )
-                    else:
-                        resolved = self._call_zbc_bridge(lambda: self._zbc_bridge.read_mapped_value(zbc_mapping), pkey, "read")
+                    resolved = self._call_zbc_bridge(lambda: self._zbc_bridge.read_mapped_value(zbc_mapping), pkey, "read")
                 except Exception as exc:
                     cached_value = self.params.get_effective_value(pkey)
                     self.logs.log("vj6530", "info", f"live read fallback for {pkey}: {repr(exc)}")
@@ -208,41 +189,17 @@ class DeviceBridge:
                 return f"{pkey}={resolved}"
 
             try:
-                if self._use_vj6530_runtime_session():
-                    message_id, verified = self._submit_vj6530_runtime_request(
-                        "write_mapped_value",
-                        zbc_mapping,
-                        value,
-                        verify_readback=True,
-                        timeout_s=max(20.0, float(self.cfg.http_timeout_s or 5.0) + 70.0),
-                        retry_pkey=pkey if _is_printer_state_code_mapping(zbc_mapping) else None,
-                        retry_expected_values=_settled_printer_state_codes(value) if _is_printer_state_code_mapping(zbc_mapping) else None,
-                    )
-                else:
-                    message_id, verified = self._call_zbc_bridge(
-                        lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
-                        pkey,
-                        "write",
-                    )
+                message_id, verified = self._call_zbc_bridge(
+                    lambda: self._zbc_bridge.write_mapped_value(zbc_mapping, value, verify_readback=True),
+                    pkey,
+                    "write",
+                )
             except ValueError as exc:
                 self.logs.log("vj6530", "info", f"live write rejected for {pkey}: {repr(exc)}")
                 return f"{pkey}=NAK_DeviceRejected"
             if int(message_id) != 0:
                 return f"{pkey}=NAK_ZBC_{int(message_id):04X}"
             stored_value = verified if verified is not None else str(value)
-            if self._use_vj6530_runtime_session() and _is_printer_state_code_mapping(zbc_mapping):
-                allowed = _settled_printer_state_codes(value)
-                if str(stored_value) not in allowed:
-                    observed = self._await_vj6530_state_confirmation(pkey, value, zbc_mapping=zbc_mapping)
-                    if observed is not None and observed in allowed:
-                        stored_value = observed
-                    elif stored_value is None or str(stored_value) not in allowed:
-                        self.logs.log(
-                            "vj6530",
-                            "info",
-                            f"live state confirmation pending for {pkey}: verified={verified!r} observed={observed!r} target={value!r}",
-                        )
-                        return f"{pkey}=NAK_DeviceComm"
             ok, msg = self.params.apply_device_value(pkey, stored_value, promote_default=True)
             if not ok:
                 return f"{pkey}={msg}"
@@ -314,77 +271,6 @@ class DeviceBridge:
         if not ok:
             return f"{pkey}={msg}"
         return f"{pkey}={parsed}"
-
-    def _use_vj6530_runtime_session(self) -> bool:
-        return bool(getattr(self.cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.session_active()
-
-    def _await_vj6530_state_confirmation(
-        self,
-        pkey: str,
-        target_value: str | int | float | bool,
-        zbc_mapping: str | None = None,
-    ) -> str | None:
-        allowed = _settled_printer_state_codes(target_value)
-        timeout_s = max(20.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0) + 15.0)
-        deadline = time.monotonic() + timeout_s
-        last_value = str(self.params.get_effective_value(pkey) or "")
-        mapping = str(zbc_mapping or "").strip()
-        while time.monotonic() < deadline:
-            if mapping and self._use_vj6530_runtime_session():
-                try:
-                    observed = self._submit_vj6530_runtime_request(
-                        "read_mapped_value",
-                        mapping,
-                        timeout_s=max(3.0, float(getattr(self.cfg, "http_timeout_s", 5.0) or 5.0) + 2.0),
-                    )
-                    observed_text = str(observed or "").strip()
-                    if observed_text in allowed:
-                        return observed_text
-                    if observed_text:
-                        last_value = observed_text
-                except Exception:
-                    pass
-            current = str(self.params.get_effective_value(pkey) or "")
-            if current:
-                last_value = current
-            if current in allowed:
-                return current
-            time.sleep(0.2)
-        return last_value or None
-
-    def _submit_vj6530_runtime_request(
-        self,
-        operation: str,
-        *args,
-        timeout_s: float,
-        retry_pkey: str | None = None,
-        retry_expected_values: set[str] | None = None,
-        **kwargs,
-    ):
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, 3):
-            try:
-                if attempt == 1 and not VJ6530_RUNTIME.async_recent(2.5):
-                    self._wait_for_vj6530_runtime_recovery()
-                return VJ6530_RUNTIME.submit_session_request(operation, *args, timeout_s=timeout_s, **kwargs)
-            except Exception as exc:
-                last_exc = exc
-                if attempt >= 2 or not _is_retryable_vj6530_runtime_error(exc):
-                    raise
-                self.logs.log("vj6530", "info", f"retry runtime {operation} after {repr(exc)}")
-                self._wait_for_vj6530_runtime_recovery()
-                if retry_pkey and retry_expected_values:
-                    observed = str(self.params.get_effective_value(retry_pkey) or "")
-                    if observed in retry_expected_values:
-                        return 0, observed
-        raise last_exc  # pragma: no cover
-
-    def _wait_for_vj6530_runtime_recovery(self):
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if VJ6530_RUNTIME.session_active() and VJ6530_RUNTIME.async_recent(2.0):
-                return
-            time.sleep(0.1)
 
     def mirror_to_esp(self, pkey: str, value: str) -> tuple[bool, str]:
         if self._is_simulation("esp-plc"):
@@ -491,46 +377,3 @@ def _decode_codec(data: bytes, codec: str, scale: float, offset: float) -> str:
     if math.isfinite(value) and abs(value - round(value)) < 1e-9:
         return str(int(round(value)))
     return f"{value:.6f}".rstrip("0").rstrip(".")
-
-
-def _is_printer_state_code_mapping(mapping: str) -> bool:
-    return str(mapping or "").strip().upper() in {"STATUS[PRINTER_STATE_CODE]", "STS[PRINTER_STATE_CODE]"}
-
-
-def _settled_printer_state_codes(value: str | int | float | bool) -> set[str]:
-    text = str(value).strip().upper()
-    normalized = {
-        "STOP": "0",
-        "OFFLINE": "0",
-        "ONLINE": "3",
-        "START": "3",
-        "STARTUP": "3",
-        "SHUTDOWN": "6",
-    }.get(text, text)
-    if normalized == "0":
-        return {"0", "1", "2"}
-    if normalized == "3":
-        return {"3", "4", "5"}
-    if normalized == "6":
-        return {"6"}
-    return {normalized}
-
-
-def _is_retryable_vj6530_runtime_error(exc: Exception) -> bool:
-    if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
-        return True
-    if isinstance(exc, OSError):
-        return True
-    text = repr(exc).lower()
-    return any(
-        needle in text
-        for needle in (
-            "broken pipe",
-            "socket closed",
-            "connection reset",
-            "connection aborted",
-            "timed out",
-            "vj6530 async request timed out",
-            "async session unavailable",
-        )
-    )

@@ -25,8 +25,6 @@ from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 from mas004_rpi_databridge.state_dedupe import ValueDedupeStore, stored_value_equals
 from mas004_rpi_databridge.peers import peer_urls
-from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
-from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 
 RPI_AUTHORITATIVE_MA_KEYS = {
@@ -299,7 +297,6 @@ class Router:
                 self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
         self._enqueue_to_microtom(resp, correlation=correlation)
         self._mirror_success_to_esp(pkey, resp)
-        self._refresh_vj6530_state_after_success(dev, op, pkey)
         return resp
 
     def handle_device_line(self, line: str, source: Optional[str], correlation: Optional[str]) -> Optional[str]:
@@ -425,20 +422,6 @@ class Router:
             self.logs.log("raspi", "info", f"skip esp mirror for {pkey}: {detail}")
         else:
             pass
-
-    def _refresh_vj6530_state_after_success(self, device: str, op: str, pkey: str):
-        if device != "vj6530" or op != "write":
-            return
-        try:
-            result = Vj6530Poller(self.cfg, self.params, self.logs, self.outbox).poll_once(force=True)
-            if int(result.get("changed", 0) or 0) > 0:
-                self.logs.log(
-                    "raspi",
-                    "info",
-                    f"vj6530 post-write sync for {pkey}: changed={result.get('changed', 0)} forwarded={result.get('forwarded', 0)}",
-                )
-        except Exception as exc:
-            self.logs.log("raspi", "error", f"vj6530 post-write sync failed for {pkey}: {repr(exc)}")
 
     def tick_once(self) -> bool:
         msg = self.inbox.claim_next_pending()

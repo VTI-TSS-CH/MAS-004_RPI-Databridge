@@ -553,8 +553,6 @@ class ConfigUpdate(BaseModel):
     vj6530_host: Optional[str] = None
     vj6530_port: Optional[int] = None
     vj6530_simulation: Optional[bool] = None
-    vj6530_poll_interval_s: Optional[float] = None
-    vj6530_async_enabled: Optional[bool] = None
     smart_unwinder_host: Optional[str] = None
     smart_unwinder_port: Optional[int] = None
     smart_unwinder_simulation: Optional[bool] = None
@@ -2916,8 +2914,6 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     "host": cfg2.vj6530_host,
                     "port": cfg2.vj6530_port,
                     "simulation": cfg2.vj6530_simulation,
-                    "poll_interval_s": getattr(cfg2, "vj6530_poll_interval_s", 15.0),
-                    "async_enabled": bool(getattr(cfg2, "vj6530_async_enabled", True)),
                 },
                 "smart_unwinder": {
                     "host": getattr(cfg2, "smart_unwinder_host", ""),
@@ -3006,11 +3002,6 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             cfg2.ntp_sync_interval_min = 60
         cfg2.ntp_sync_interval_min = max(1, min(24 * 60, cfg2.ntp_sync_interval_min))
 
-        try:
-            cfg2.vj6530_poll_interval_s = float(getattr(cfg2, "vj6530_poll_interval_s", 15.0) or 15.0)
-        except Exception:
-            cfg2.vj6530_poll_interval_s = 15.0
-        cfg2.vj6530_poll_interval_s = max(0.5, min(300.0, cfg2.vj6530_poll_interval_s))
         try:
             cfg2.esp_io_poll_interval_s = float(getattr(cfg2, "esp_io_poll_interval_s", 1.0) or 1.0)
         except Exception:
@@ -6023,13 +6014,8 @@ reloadAll().catch(err => { setStatus(err.message); });
     <div class="grid cols-device">
       <div class="field"><label>VJ6530 host</label><input id="vj6530_host"/></div>
       <div class="field"><label>VJ6530 port</label><input id="vj6530_port"/></div>
-      <div class="field"><label>VJ6530 poll interval (s)</label><input id="vj6530_poll_interval_s" type="number" min="0.5" max="300" step="0.5"/></div>
       <div class="field empty"><label>&nbsp;</label><input disabled placeholder="direkt auf ETH0"/></div>
       <label class="checkline"><input type="checkbox" id="vj6530_simulation"/>Simulation</label>
-    </div>
-    <div class="actions">
-      <label class="checkline"><input type="checkbox" id="vj6530_async_enabled"/>VJ6530 async ZBC Events aktiv</label>
-      <span class="muted">Async ist der Primaerpfad fuer Online/Offline/Warning/Fault/Buzy/Print-Events. Polling bleibt als Fallback.</span>
     </div>
     <div class="grid cols-device">
       <div class="field"><label>Abwickler host</label><input id="smart_unwinder_host"/></div>
@@ -6300,9 +6286,7 @@ async function reloadAll(){
   document.getElementById("vj3350_simulation").checked = !!c.vj3350_simulation;
   document.getElementById("vj6530_host").value = c.vj6530_host || "";
   document.getElementById("vj6530_port").value = c.vj6530_port ?? "";
-  document.getElementById("vj6530_poll_interval_s").value = c.vj6530_poll_interval_s ?? 15.0;
   document.getElementById("vj6530_simulation").checked = !!c.vj6530_simulation;
-  document.getElementById("vj6530_async_enabled").checked = !!(c.vj6530_async_enabled ?? true);
   document.getElementById("smart_unwinder_host").value = c.smart_unwinder_host || "";
   document.getElementById("smart_unwinder_port").value = c.smart_unwinder_port ?? "";
   document.getElementById("smart_unwinder_simulation").checked = !!(c.smart_unwinder_simulation ?? true);
@@ -6469,9 +6453,7 @@ async function saveDevices(){
     vj3350_simulation: document.getElementById("vj3350_simulation").checked,
     vj6530_host: document.getElementById("vj6530_host").value.trim(),
     vj6530_port: Number(document.getElementById("vj6530_port").value.trim()),
-    vj6530_poll_interval_s: Number(document.getElementById("vj6530_poll_interval_s").value.trim()),
     vj6530_simulation: document.getElementById("vj6530_simulation").checked,
-    vj6530_async_enabled: document.getElementById("vj6530_async_enabled").checked,
     smart_unwinder_host: document.getElementById("smart_unwinder_host").value.trim(),
     smart_unwinder_port: Number(document.getElementById("smart_unwinder_port").value.trim()),
     smart_unwinder_simulation: document.getElementById("smart_unwinder_simulation").checked,

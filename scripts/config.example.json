@@ -68,8 +68,6 @@
   "vj6530_host": "192.168.210.22",
   "vj6530_port": 3002,
   "vj6530_simulation": true,
-  "vj6530_poll_interval_s": 15.0,
-  "vj6530_async_enabled": true,
 
   "smart_unwinder_host": "192.168.210.23",
   "smart_unwinder_port": 3011,

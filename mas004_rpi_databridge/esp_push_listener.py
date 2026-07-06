@@ -28,8 +28,6 @@ from mas004_rpi_databridge.production_logs import ProductionLogManager
 from mas004_rpi_databridge.peers import peer_urls
 from mas004_rpi_databridge.protocol import parse_operation_line, parse_param_line
 from mas004_rpi_databridge.state_dedupe import ValueDedupeStore, stored_value_equals
-from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
-from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 
 RPI_AUTHORITATIVE_MA_KEYS = {
@@ -458,18 +456,6 @@ class EspPushListener:
                     replace_existing=replace_existing,
                 )
             logs.log("raspi", "out", f"forward to microtom: {forwarded_line}")
-
-        if dev == "vj6530" and op == "write":
-            try:
-                result = Vj6530Poller(self.cfg, params, logs, outbox).poll_once(force=True)
-                if int(result.get("changed", 0) or 0) > 0:
-                    logs.log(
-                        "raspi",
-                        "info",
-                        f"vj6530 post-write sync for {pkey}: changed={result.get('changed', 0)} forwarded={result.get('forwarded', 0)}",
-                    )
-            except Exception as exc:
-                logs.log("raspi", "error", f"vj6530 post-write sync failed for {pkey}: {repr(exc)}")
 
         resp = f"ACK_{pkey}={value}"
         logs.log("esp-plc", "out", f"raspi->esp: {resp}")

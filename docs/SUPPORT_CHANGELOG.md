@@ -1,5 +1,11 @@
 # SUPPORT_CHANGELOG - MAS-004_RPI-Databridge
 
+## 2026-07-06 (VJ6530 Hintergrundkommunikation entfernt)
+- Die Databridge startet keinen VJ6530-Async-Listener und keinen VJ6530-Poller mehr.
+- Erzwungene VJ6530-Post-Write-Polls aus Router und ESP-Push-Pfad wurden entfernt, damit TTO-Kommunikation den produktiven ESP-/Labelpfad nicht mehr belastet.
+- Alte Async-/Poller-Module, Runtime-State und zugehoerige Tests wurden entfernt; explizite ZBC-Einzelbefehle fuer kontrolliertes Online/Offline-Schalten bleiben erhalten.
+- Die VJ6530-Async-/Polling-Einstellungen wurden aus Defaults und Settings-UI entfernt. Drucker-Ready/Status wird produktiv ueber Hardware-IO bewertet.
+
 ## 2026-07-01 (ESP command broker)
 - Der `EspPlcClient` laeuft wieder zentral ueber einen pro Endpoint eindeutigen ESP-Command-Broker im Databridge-Prozess. Der Broker haelt eine persistente Verbindung offen, serialisiert alle Kommandos ueber eine priorisierte Queue und macht Reconnect/Retry/Keepalive an einer Stelle.
 - WebUI, MachineRuntime, Setup-Orchestrator, IO/Motor-Diagnose und separate Wartungsscripts gehen ueber denselben Brokerpfad. Separate Scripts koennen `POST /api/esp/command` beziehungsweise `scripts/esp_broker_api.py` nutzen, statt einen eigenen ESP-TCP-Client zu starten.

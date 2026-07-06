@@ -39,15 +39,6 @@ from mas004_rpi_databridge.ntp_sync import ntp_loop
 from mas004_rpi_databridge.device_clients import start_esp_command_broker
 from mas004_rpi_databridge.esp_push_listener import EspPushListenerManager
 from mas004_rpi_databridge.esp_motors import EspMotorClient
-from mas004_rpi_databridge._vj6530_bridge import ZbcBridgeClient
-from mas004_rpi_databridge.vj6530_async_policy import (
-    VJ6530_ASYNC_RECONNECT_MIN_S,
-    VJ6530_ASYNC_SESSION_S,
-    vj6530_async_reconnect_delay_s,
-)
-from mas004_rpi_databridge.vj6530_async_listener import Vj6530AsyncListener
-from mas004_rpi_databridge.vj6530_poller import Vj6530Poller
-from mas004_rpi_databridge.vj6530_runtime import RUNTIME as VJ6530_RUNTIME
 
 REPO_MASTER_IOS_XLSX = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
@@ -627,86 +618,6 @@ def button_led_loop(cfg_path: str):
         time.sleep(max(0.0, delay))
 
 
-def vj6530_poll_loop(cfg_path: str):
-    cached_client = None
-    cached_sig = None
-    while True:
-        cfg = Settings.load(cfg_path)
-        interval_s = max(0.5, float(getattr(cfg, "vj6530_poll_interval_s", 2.0) or 2.0))
-
-        if bool(cfg.vj6530_simulation) or not (cfg.vj6530_host or "").strip() or int(cfg.vj6530_port or 0) <= 0:
-            cached_client = None
-            cached_sig = None
-            time.sleep(interval_s)
-            continue
-
-        if bool(getattr(cfg, "vj6530_async_enabled", True)) and VJ6530_RUNTIME.async_recent(max(interval_s * 2.0, 5.0)):
-            time.sleep(interval_s)
-            continue
-
-        client_sig = ((cfg.vj6530_host or "").strip(), int(cfg.vj6530_port or 0), float(cfg.http_timeout_s or 0.0))
-        if cached_client is None or client_sig != cached_sig:
-            cached_client = ZbcBridgeClient(cfg.vj6530_host, cfg.vj6530_port, timeout_s=cfg.http_timeout_s)
-            cached_sig = client_sig
-
-        try:
-            db = DB(cfg.db_path)
-            params = ParamStore(db)
-            logs = LogStore(db)
-            outbox = Outbox(db)
-            poller = Vj6530Poller(cfg, params, logs, outbox, client_factory=lambda *_args, **_kwargs: cached_client)
-            result = poller.poll_once()
-            if result.get("changed"):
-                print(
-                    f"[VJ6530-POLL] checked={result.get('checked', 0)} changed={result.get('changed', 0)} "
-                    f"forwarded={result.get('forwarded', 0)}",
-                    flush=True,
-                )
-        except Exception as e:
-            cached_client = None
-            cached_sig = None
-            print(f"[VJ6530-POLL] error: {repr(e)}", flush=True)
-            time.sleep(min(interval_s, 2.0))
-            continue
-
-        time.sleep(interval_s)
-
-
-def vj6530_async_loop(cfg_path: str):
-    error_backoff_s = 2.0
-    while True:
-        cfg = Settings.load(cfg_path)
-        if (
-            not bool(getattr(cfg, "vj6530_async_enabled", True))
-            or bool(cfg.vj6530_simulation)
-            or not (cfg.vj6530_host or "").strip()
-            or int(cfg.vj6530_port or 0) <= 0
-        ):
-            error_backoff_s = 2.0
-            time.sleep(1.0)
-            continue
-
-        try:
-            db = DB(cfg.db_path)
-            params = ParamStore(db)
-            logs = LogStore(db)
-            outbox = Outbox(db)
-            listener = Vj6530AsyncListener(cfg, params, logs, outbox)
-            listener.run_session(session_s=VJ6530_ASYNC_SESSION_S)
-            error_backoff_s = 2.0
-        except Exception as e:
-            detail = repr(e)
-            reconnect_delay_s = vj6530_async_reconnect_delay_s(e, error_backoff_s)
-            VJ6530_RUNTIME.mark_async_error(detail)
-            if reconnect_delay_s <= VJ6530_ASYNC_RECONNECT_MIN_S:
-                print(f"[VJ6530-ASYNC] reconnect: {detail}", flush=True)
-                error_backoff_s = 2.0
-            else:
-                print(f"[VJ6530-ASYNC] error: {detail}", flush=True)
-                error_backoff_s = min(error_backoff_s * 1.8, 30.0)
-            time.sleep(reconnect_delay_s)
-
-
 def main():
     install_thread_dump_signal()
     cfg_path = DEFAULT_CFG_PATH
@@ -742,19 +653,6 @@ def main():
     push_t = threading.Thread(target=esp_push_listener_loop, args=(cfg_path, push_mgr), daemon=True, name="esp-push-reconcile")
     push_t.start()
 
-    vj6530_async_t = threading.Thread(target=vj6530_async_loop, args=(cfg_path,), daemon=True, name="vj6530-async")
-    vj6530_async_t.start()
-    if (
-        bool(getattr(cfg, "vj6530_async_enabled", True))
-        and not bool(cfg.vj6530_simulation)
-        and (cfg.vj6530_host or "").strip()
-        and int(cfg.vj6530_port or 0) > 0
-    ):
-        # Give the async subscriber a short head start so the fallback poller
-        # does not race the first live 3002 session during service startup.
-        time.sleep(1.0)
-    vj6530_poll_t = threading.Thread(target=vj6530_poll_loop, args=(cfg_path,), daemon=True, name="vj6530-poll")
-    vj6530_poll_t.start()
     io_t = threading.Thread(target=io_runtime_loop, args=(cfg_path,), daemon=True, name="io-runtime")
     io_t.start()
     machine_t = threading.Thread(target=machine_runtime_loop, args=(cfg_path,), daemon=True, name="machine-runtime")

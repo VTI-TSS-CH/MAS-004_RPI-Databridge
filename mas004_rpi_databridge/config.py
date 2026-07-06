@@ -100,8 +100,6 @@ class Settings:
     vj6530_host: str = "192.168.210.22"
     vj6530_port: int = 3002
     vj6530_simulation: bool = True
-    vj6530_poll_interval_s: float = 15.0
-    vj6530_async_enabled: bool = True
     smart_unwinder_host: str = "192.168.210.23"
     smart_unwinder_port: int = 3011
     smart_unwinder_simulation: bool = True

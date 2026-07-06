@@ -17,7 +17,6 @@ from mas004_rpi_databridge.machine_runtime import PRODUCTION_START_BLOCK_CODE, m
 
 sys.modules.setdefault("ping3", SimpleNamespace(ping=lambda *_args, **_kwargs: 1.0))
 
-from mas004_rpi_databridge import router as router_module
 from mas004_rpi_databridge.router import Router
 
 
@@ -224,7 +223,7 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertEqual("550", router.params.get_effective_value("MAP0001"))
             self.assertEqual([("MAP0001", "550")], mirrored)
 
-    def test_vj6530_write_triggers_forced_follow_up_sync(self):
+    def test_vj6530_write_does_not_trigger_forced_follow_up_sync(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             router = self._make_router(base)
@@ -251,28 +250,14 @@ class RouterEspAccessTests(unittest.TestCase):
                     ),
                 )
 
-            calls = []
-
-            class _ForcedPoller:
-                def __init__(self, *args, **kwargs):
-                    calls.append(("init", args, kwargs))
-
-                def poll_once(self, force: bool = False):
-                    calls.append(("poll_once", force))
-                    return {"checked": 1, "changed": 1, "forwarded": 1}
-
-            original_poller = router_module.Vj6530Poller
             original_execute = router.device_bridge.execute
-            router_module.Vj6530Poller = _ForcedPoller
             router.device_bridge.execute = lambda *args, **kwargs: "ACK_TTS0001=3"
             try:
                 resp = router.handle_microtom_line("TTS0001=3", correlation="corr-3")
             finally:
-                router_module.Vj6530Poller = original_poller
                 router.device_bridge.execute = original_execute
 
             self.assertEqual("ACK_TTS0001=3", resp)
-            self.assertIn(("poll_once", True), calls)
 
     def test_mirror_to_esp_uses_sync_for_esp_read_only_values(self):
         with tempfile.TemporaryDirectory() as tmpdir:
