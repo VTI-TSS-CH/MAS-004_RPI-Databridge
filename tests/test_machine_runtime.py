@@ -902,6 +902,44 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
         sync_state.assert_called_once_with(7, required=False)
 
+    def test_controlled_label_removal_pause_accepts_completed_active_runner(self):
+        runtime = self.build_runtime()
+        calls: list[str] = []
+
+        def fake_esp(command, read_timeout_s=None, **_kwargs):
+            calls.append(command)
+            if command.startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"):
+                return 'JSON {"ok":true,"pause_requested":true}'
+            return "ACK"
+
+        with patch.object(runtime, "_production_esp", side_effect=fake_esp), patch.object(
+            runtime,
+            "_read_production_monitor_diag",
+            return_value={
+                "active": True,
+                "running": False,
+                "completed": True,
+                "phase": 0,
+                "reason": "completed",
+                "last_error": "label_removal_required:3_6",
+                "label_no": 10,
+                "labels_printed": 10,
+            },
+        ), patch.object(runtime, "_stop_production_motion") as hard_stop, patch.object(
+            runtime, "_set_production_wicklers_idle", return_value=[{"ok": True}]
+        ), patch.object(runtime, "_sync_esp_machine_state"), patch.object(
+            runtime, "_queue_tto_printer_state_sync", return_value={"ok": True, "skipped": "test"}
+        ), patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+            result = runtime._pause_production_motion_after_print(reason="label_removal_required:3,6", target_state=7)
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["monitor_ok"])
+        self.assertEqual("runner_completed_requested_pause", result["pause_acceptance"])
+        self.assertTrue(calls[0].startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"))
+        self.assertNotIn("PROCESS PRODUCTION STOP", calls)
+        self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
+        hard_stop.assert_not_called()
+
     def test_failed_production_stop_forces_fault_state(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -4582,6 +4620,7 @@ class MachineRuntimeTests(unittest.TestCase):
         runtime._pause_production_motion_after_print = Mock(
             return_value={"ok": True, "reason": "label_removal_required:10", "controlled": True}
         )
+        runtime._execute_label_removal_rewind = Mock()
         runtime._sync_esp_machine_state = Mock(return_value=True)
 
         result = runtime.handle_event(
@@ -4610,6 +4649,9 @@ class MachineRuntimeTests(unittest.TestCase):
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertEqual(10, production_info["label_removal_request"]["label_no"])
         self.assertEqual("verify_bypass_nok", production_info["label_removal_request"]["payload"]["reason"])
+        self.assertFalse(production_info["label_removal_request"]["rewind_required"])
+        self.assertEqual("operator_removal_pause", production_info["label_removal_request"]["rewind"]["skipped"])
+        runtime._execute_label_removal_rewind.assert_not_called()
 
     def test_label_removal_required_event_merges_visible_label_list(self):
         runtime = self.build_runtime()

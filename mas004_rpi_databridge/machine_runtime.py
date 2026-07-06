@@ -3543,8 +3543,13 @@ class MachineRuntime:
             self.params.apply_device_value("MAS0028", "1", promote_default=True)
             self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
 
-        rewind_result: dict[str, Any] = {"ok": True, "skipped": f"target_state={target_state}"}
-        if target_state == 7:
+        rewind_required = target_state == 7
+        if target_state == 7 and str(compact_payload.get("type") or "") == "label_removal_required":
+            rewind_required = False
+            rewind_result: dict[str, Any] = {"ok": True, "skipped": "operator_removal_pause"}
+        else:
+            rewind_result = {"ok": True, "skipped": f"target_state={target_state}"}
+        if target_state == 7 and rewind_required:
             try:
                 rewind_result = self._execute_label_removal_rewind(label_no=int(label_no))
             except Exception as exc:
@@ -3564,7 +3569,7 @@ class MachineRuntime:
             "rewind": dict(rewind_result or {}),
             "target_state": target_state,
             "operator_message": f"Label {label_no} entnehmen",
-            "rewind_required": True,
+            "rewind_required": rewind_required,
             "rewind_executed": bool((rewind_result or {}).get("rewind_executed")),
             "ts": now_ts(),
         }
@@ -7611,11 +7616,45 @@ class MachineRuntime:
         token = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(reason or "pause_after_print").strip())
         return (token or "pause_after_print")[:80]
 
+    def _controlled_pause_monitor_acceptance(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        reason: str,
+        token: str,
+    ) -> str | None:
+        if bool(snapshot.get("running")):
+            return None
+        if not bool(snapshot.get("active")):
+            return "runner_idle"
+
+        monitor_reason = str(snapshot.get("reason") or "").strip()
+        last_error = str(snapshot.get("last_error") or "").strip()
+        completed = bool(snapshot.get("completed")) or monitor_reason.lower() == "completed"
+        if not completed:
+            return None
+
+        expected_tokens = {
+            self._controlled_pause_reason_token(reason),
+            self._controlled_pause_reason_token(token),
+        }
+        normalized_last_error = self._controlled_pause_reason_token(last_error)
+        if last_error in expected_tokens or normalized_last_error in expected_tokens:
+            return "runner_completed_requested_pause"
+        if str(reason or "").startswith("label_removal_required:") and last_error.startswith("label_removal_required:"):
+            return "runner_completed_label_removal_pause"
+        if str(reason or "").startswith("operator_pause") and (
+            last_error.startswith("operator_pause") or monitor_reason.startswith("operator_pause")
+        ):
+            return "runner_completed_operator_pause"
+        return None
+
     def _pause_production_motion_after_print(self, *, reason: str, target_state: int) -> dict[str, Any]:
         started_ts = now_ts()
         token = self._controlled_pause_reason_token(reason)
         commands: list[dict[str, Any]] = []
         monitor_snapshots: list[dict[str, Any]] = []
+        pause_acceptance: str | None = None
         try:
             response = self._production_esp(
                 f"PROCESS PRODUCTION PAUSE_AFTER_PRINT REASON={token}",
@@ -7654,6 +7693,7 @@ class MachineRuntime:
                     "ok": True,
                     "active": bool(diag.get("active")),
                     "running": bool(diag.get("running")),
+                    "completed": bool(diag.get("completed")),
                     "phase": diag.get("phase"),
                     "reason": diag.get("reason"),
                     "last_error": diag.get("last_error"),
@@ -7661,7 +7701,9 @@ class MachineRuntime:
                     "labels_printed": diag.get("labels_printed"),
                 }
                 monitor_snapshots.append(snapshot)
-                if not snapshot["active"] and not snapshot["running"]:
+                pause_acceptance = self._controlled_pause_monitor_acceptance(snapshot, reason=reason, token=token)
+                if pause_acceptance is not None:
+                    snapshot["accepted_pause"] = pause_acceptance
                     monitor_ok = True
                     break
             except Exception as exc:
@@ -7712,6 +7754,7 @@ class MachineRuntime:
             "finished_ts": now_ts(),
             "timeout_s": PRODUCTION_CONTROLLED_PAUSE_TIMEOUT_S,
             "monitor_ok": monitor_ok,
+            "pause_acceptance": pause_acceptance,
             "monitor_snapshots": monitor_snapshots[-12:],
             "commands": commands,
             "wicklers_ok": wicklers_ok,
