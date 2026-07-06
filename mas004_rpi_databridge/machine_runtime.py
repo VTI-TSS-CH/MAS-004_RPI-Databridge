@@ -1592,6 +1592,14 @@ class MachineRuntime:
             production_info.pop("pending_start", None)
             production_state_synced_to_esp = bool(start_result.get("synced_state") == 5)
             if bool(start_result.get("ok")):
+                new_state = 5
+                requested_state = 5
+                if bool(start_result.get("duplicate_start_ignored")):
+                    state_source = "production_already_running"
+                elif start_result.get("resume"):
+                    state_source = f"production_resume_{start_result.get('resume')}"
+                else:
+                    state_source = "production_start"
                 production_info["active"] = True
                 production_info["active_since_ts"] = now_ts()
                 production_info["plan"] = dict(start_result.get("plan") or {})
@@ -3794,6 +3802,21 @@ class MachineRuntime:
         latest_row = _machine_state_row_from_db(self.db)
         latest_info = dict(latest_row.get("info") or {})
         info = _merge_newer_purge_info(info, latest_info)
+        latest_production = dict(latest_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        incoming_production = dict((info or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        latest_running = bool(latest_production.get("active")) and int(latest_row.get("current_state") or 0) in (4, 5)
+        stale_start_transition = (
+            int(current_state or 0) == 4
+            and int(requested_state or 0) == 5
+            and isinstance(incoming_production.get("pending_start"), dict)
+        )
+        stale_start_failure = (
+            int(current_state or 0) == 7
+            and str(state_source or "") == "production_start_failed"
+            and not bool(incoming_production.get("active"))
+        )
+        if latest_running and (stale_start_transition or stale_start_failure):
+            return
         ts = now_ts()
         if (
             int(latest_row.get("current_state") or 0) == int(current_state)
@@ -4877,6 +4900,105 @@ class MachineRuntime:
             "values": values,
             "dedupe_channel": dedupe_channel,
         }
+
+    def _reuse_production_params_for_resume(
+        self,
+        param_map: dict[str, str],
+        *,
+        previous_values: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        values = self._production_esp_sync_values(param_map)
+        previous = {str(key): str(value) for key, value in (previous_values or {}).items()}
+        esp_values = dict(previous) if previous else dict(values)
+        for key, value in values.items():
+            esp_values.setdefault(key, value)
+        ignored_changes = {
+            key: {"esp_value": previous[key], "current_value": value}
+            for key, value in values.items()
+            if key in previous and not values_effectively_equal(previous[key], value)
+        }
+        return {
+            "synced": [],
+            "skipped": list(values.keys()),
+            "forced": [],
+            "dedupe_skipped": [],
+            "previous_skipped": [key for key in values if key in previous],
+            "readback_skipped": list(values.keys()),
+            "readback": {},
+            "readback_errors": {},
+            "values": esp_values,
+            "resume_reuse": True,
+            "skipped_reason": "resume_reuses_existing_esp_params",
+            "changed_current_values_ignored": ignored_changes,
+        }
+
+    def _commit_successful_production_resume_state(
+        self,
+        *,
+        result: dict[str, Any],
+        state_info: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        row = self._state_row()
+        current_state = _safe_int(row.get("current_state"), 0)
+        requested_state = _safe_int(row.get("requested_state"), current_state)
+        if current_state not in (4, 5, 7):
+            return {"ok": False, "skipped": f"state_{current_state}"}
+        if bool(row.get("purge_active")) or current_state == 21:
+            return {"ok": False, "skipped": "purge_active"}
+
+        info = dict(row.get("info") or state_info or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_info["last_start"] = dict(result)
+        production_info["active"] = True
+        production_info["active_since_ts"] = now_ts()
+        production_info["plan"] = dict(result.get("plan") or production_info.get("plan") or {})
+        for key in (
+            "pending_start",
+            "paused",
+            "paused_ts",
+            "pause_reason",
+            "resume_from_state",
+            "label_removal_request",
+            "label_removal_requests",
+            "label_removal_pending_labels",
+        ):
+            production_info.pop(key, None)
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        info["esp_machine_state_sync"] = {"state": 5, "ts": now_ts()}
+        info["requested_command"] = 0
+        info["allowed_actions"] = state_actions(5)
+        info["status_lamp"] = lamp_outputs_for_state(5, warning_active=bool(row.get("warning_active")), ts=now_ts())
+
+        if current_state != 5 or requested_state != 5:
+            self.params.apply_device_value("MAS0001", "5", promote_default=True)
+            self._notify_microtom("MAS0001", "5", dedupe_key="machine:MAS0001")
+
+        self._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source=source,
+            warning_active=bool(row.get("warning_active")),
+            purge_active=False,
+            production_label=str(row.get("production_label") or ""),
+            last_label_no=int(row.get("last_label_no") or 0),
+            info=info,
+        )
+        if current_state != 5:
+            self._record_event(
+                "state_change",
+                "info",
+                f"Maschinenstatus gewechselt: {current_state} -> 5 ({state_label(5)})",
+                {
+                    "from_state": current_state,
+                    "to_state": 5,
+                    "source": source,
+                    "purge_active": False,
+                    "requested_state": 5,
+                    "resume_fast_commit": True,
+                },
+            )
+        return {"ok": True, "from_state": current_state, "requested_state": requested_state}
 
     def _verify_wickler_production_state(
         self,
@@ -7188,7 +7310,7 @@ class MachineRuntime:
             reason="production_resume_pause",
             required=True,
         )
-        sync_info = self._sync_production_params_to_esp(
+        sync_info = self._reuse_production_params_for_resume(
             param_map,
             previous_values=previous_sync_values,
         )
@@ -7253,6 +7375,7 @@ class MachineRuntime:
             "synced_params": list(sync_info.get("synced") or []),
             "skipped_synced_params": list(sync_info.get("skipped") or []),
             "synced_param_values": dict(sync_info.get("values") or {}),
+            "param_sync": dict(sync_info),
             "plan": plan,
             "band_break_bypass": quick_band_break_bypass,
             "wicklers": wicklers,
@@ -7264,6 +7387,11 @@ class MachineRuntime:
             "command": command,
             "response": response,
         }
+        result["resume_state_commit"] = self._commit_successful_production_resume_state(
+            result=result,
+            state_info=state_info,
+            source="production_resume_pause",
+        )
         self._record_event(
             "production_motion_resumed",
             "info",
@@ -7294,7 +7422,7 @@ class MachineRuntime:
             reason="production_resume_label_removal",
             required=True,
         )
-        sync_info = self._sync_production_params_to_esp(
+        sync_info = self._reuse_production_params_for_resume(
             param_map,
             previous_values=previous_sync_values,
         )
@@ -7360,6 +7488,7 @@ class MachineRuntime:
             "synced_params": list(sync_info.get("synced") or []),
             "skipped_synced_params": list(sync_info.get("skipped") or []),
             "synced_param_values": dict(sync_info.get("values") or {}),
+            "param_sync": dict(sync_info),
             "plan": plan,
             "band_break_bypass": quick_band_break_bypass,
             "wicklers": wicklers,
@@ -7373,6 +7502,11 @@ class MachineRuntime:
         }
         if isinstance(production_info.get("label_removal_resume_validation"), dict):
             result["label_removal_resume_validation"] = dict(production_info["label_removal_resume_validation"])
+        result["resume_state_commit"] = self._commit_successful_production_resume_state(
+            result=result,
+            state_info=state_info,
+            source="production_resume_label_removal",
+        )
         self._record_event(
             "production_motion_resumed",
             "info",
@@ -7389,8 +7523,36 @@ class MachineRuntime:
         cleared_label_removal_state: dict[str, Any] | None = None
         try:
             plan = self._production_motion_plan(param_map, format_plan)
-            state_info = dict(self._state_row().get("info") or {})
+            state_row = self._state_row()
+            state_info = dict(state_row.get("info") or {})
             production_info_before_start = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+            if (
+                bool(production_info_before_start.get("active"))
+                and _safe_int(state_row.get("current_state"), 0) in (4, 5)
+            ):
+                last_start = dict(production_info_before_start.get("last_start") or {})
+                result = {
+                    **last_start,
+                    "ok": True,
+                    "duplicate_start_ignored": True,
+                    "duplicate_request_ts": started_ts,
+                    "finished_ts": now_ts(),
+                    "synced_state": 5,
+                    "plan": dict(production_info_before_start.get("plan") or plan),
+                    "command": last_start.get("command") or "duplicate_start_already_running",
+                }
+                self._record_event(
+                    "production_start_duplicate_ignored",
+                    "info",
+                    "Doppelter Produktionsstart ignoriert: Runner laeuft bereits",
+                    {
+                        "current_state": _safe_int(state_row.get("current_state"), 0),
+                        "requested_state": _safe_int(state_row.get("requested_state"), 0),
+                        "active_since_ts": production_info_before_start.get("active_since_ts"),
+                        "last_start_started_ts": last_start.get("started_ts"),
+                    },
+                )
+                return result
             previous_sync_values = self._production_esp_sync_reference(state_info)
             pending_removal_labels = self._pending_label_removal_labels(production_info_before_start)
             pause_reason_before_start = str(production_info_before_start.get("pause_reason") or "")

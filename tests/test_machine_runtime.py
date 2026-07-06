@@ -1062,12 +1062,18 @@ class MachineRuntimeTests(unittest.TestCase):
             runtime,
             "_production_wickler_verifications",
             return_value={"ok": True, "results": []},
-        ) as verify_wicklers:
+        ) as verify_wicklers, patch.object(
+            runtime,
+            "_sync_production_params_to_esp",
+            side_effect=AssertionError("operator pause resume must reuse existing ESP params"),
+        ):
             result = runtime._start_production_motion(param_map, format_plan)
 
         self.assertTrue(result["ok"], result)
         self.assertEqual("pause", result["resume"])
         self.assertEqual("operator_pause", result["pause_reason"])
+        self.assertEqual([], result["synced_params"])
+        self.assertTrue(result["param_sync"]["resume_reuse"])
         self.assertIn("PROCESS PRODUCTION RESUME SPEED_MM_S=100.000 RAMP_MM_S2=300.000", result["command"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
@@ -1116,12 +1122,18 @@ class MachineRuntimeTests(unittest.TestCase):
             runtime,
             "_production_wickler_verifications",
             return_value={"ok": True, "results": []},
-        ) as verify_wicklers:
+        ) as verify_wicklers, patch.object(
+            runtime,
+            "_sync_production_params_to_esp",
+            side_effect=AssertionError("label removal resume must reuse existing ESP params"),
+        ):
             result = runtime._start_production_motion(param_map, format_plan)
 
         self.assertTrue(result["ok"], result)
         self.assertEqual("label_removal", result["resume"])
         self.assertEqual([6, 9], result["labels_expected_removed"])
+        self.assertEqual([], result["synced_params"])
+        self.assertTrue(result["param_sync"]["resume_reuse"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
@@ -1131,6 +1143,48 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
         self.assertEqual(104.07, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
+
+    def test_production_start_duplicate_is_ignored_when_runner_already_active(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="production_resume_label_removal",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=10,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": True,
+                    "active_since_ts": now_ts() - 1.0,
+                    "plan": {"travel_mm": 104.5, "speed_mm_s": 100.0},
+                    "last_start": {
+                        "ok": True,
+                        "resume": "label_removal",
+                        "command": "PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9",
+                        "started_ts": now_ts() - 2.0,
+                    },
+                }
+            },
+        )
+        param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+
+        with patch.object(
+            runtime,
+            "_production_esp",
+            side_effect=AssertionError("duplicate start must not command ESP"),
+        ), patch.object(
+            runtime,
+            "_sync_production_params_to_esp",
+            side_effect=AssertionError("duplicate start must not sync params"),
+        ):
+            result = runtime._start_production_motion(param_map, {"label": {"length_tenths_mm": 1045}})
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["duplicate_start_ignored"])
+        self.assertEqual(5, result["synced_state"])
+        self.assertEqual("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
 
     def test_production_start_after_label_removal_resumes_when_esp_register_is_empty(self):
         runtime = self.build_runtime()
