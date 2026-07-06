@@ -9313,28 +9313,6 @@ class MachineRuntime:
             )
             return result
 
-        pre_reset_refresh = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
-        result["steps"].append(
-            {
-                "step": "refresh_esp_io_before_reset",
-                "ok": bool(pre_reset_refresh.get("ok", True)),
-                "detail": pre_reset_refresh,
-            }
-        )
-        if not bool(pre_reset_refresh.get("ok", True)):
-            return finish_failure(pre_reset_refresh.get("error") or "ESP safety IO refresh failed before reset")
-
-        live_safety = self._safety_status(self._io_values())
-        live_blocking_reasons = self._blocking_safety_reasons(live_safety)
-        if live_blocking_reasons:
-            result["blocked_by_safety"] = True
-            result["steps"].append(
-                {"step": "verify_safety_inputs_high_ok", "ok": False, "reasons": live_blocking_reasons}
-            )
-            return finish_failure(
-                "ESP safety input still LOW/not OK before reset sequence: " + ",".join(live_blocking_reasons)
-            )
-
         try:
             laser_interlock = self._ensure_laser_reset_interlock_clear(source="safety_reset")
             result["laser_reset_interlock"] = laser_interlock
@@ -9408,10 +9386,13 @@ class MachineRuntime:
 
         refreshed = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
         result["steps"].append({"step": "refresh_esp_io", "ok": bool(refreshed.get("ok", True)), "detail": refreshed})
+        if not bool(refreshed.get("ok", True)):
+            return finish_failure(refreshed.get("error") or "ESP safety IO refresh failed after reset sequence")
         refreshed_io = self._io_values()
         refreshed_safety = self._safety_status(refreshed_io)
         refreshed_blocking_reasons = self._blocking_safety_reasons(refreshed_safety)
         if refreshed_blocking_reasons:
+            result["blocked_by_safety"] = True
             result["steps"].append(
                 {"step": "verify_safety_inputs_high_ok", "ok": False, "reasons": refreshed_blocking_reasons}
             )
