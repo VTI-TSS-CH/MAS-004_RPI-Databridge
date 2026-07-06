@@ -109,6 +109,10 @@ def _active_mae_keys(param_map: dict[str, str]) -> list[str]:
     return sorted(str(key) for key, value in (param_map or {}).items() if str(key).startswith("MAE") and _truthy(value))
 
 
+def _is_label_removal_pause_reason(reason: Any) -> bool:
+    return str(reason or "").strip().startswith("label_removal_required:")
+
+
 PAUSE_ERROR_KEYS = {"MAE0025", "MAE0026", "MAE0048"}
 POSITION_AXIS_MAE_BY_MOTOR = {
     1: "MAE0004",
@@ -1758,11 +1762,19 @@ class MachineRuntime:
             )
             self.logs.log("machine", "info", f"state {previous_state} -> {new_state} ({state_source})")
             if int(new_state or 0) != 5:
-                tto_state_sync = self._queue_tto_printer_state_sync(
-                    int(new_state or 0),
-                    param_map,
-                    reason=f"state_change:{state_source}",
-                )
+                if int(new_state or 0) == 7 and str(state_source or "") == "label_removal_required":
+                    tto_state_sync = {
+                        "ok": True,
+                        "skipped": "label_removal_pause_keep_online",
+                        "machine_state": int(new_state or 0),
+                        "reason": f"state_change:{state_source}",
+                    }
+                else:
+                    tto_state_sync = self._queue_tto_printer_state_sync(
+                        int(new_state or 0),
+                        param_map,
+                        reason=f"state_change:{state_source}",
+                    )
                 if tto_state_sync.get("queued") or not tto_state_sync.get("skipped"):
                     info["last_tto_printer_state_sync"] = tto_state_sync
             rewind_audit = self._handle_production_rewind_audit_transition(
@@ -4593,6 +4605,8 @@ class MachineRuntime:
             return {**result, "ok": True, "skipped": "tts0001_zbc_mapping_missing"}
         cached = str(self.params.get_effective_value(TTO_PRINTER_STATE_PKEY) or "").strip()
         result["cached_code"] = cached
+        if target_code == TTO_PRINTER_ONLINE_CODE and cached in self._tto_printer_settled_codes(target_code):
+            return {**result, "ok": True, "skipped": "already_online"}
         if target_code == TTO_PRINTER_OFFLINE_CODE and cached in self._tto_printer_settled_codes(target_code):
             return {**result, "ok": True, "skipped": "already_offline"}
         return result
@@ -5226,6 +5240,7 @@ class MachineRuntime:
         travel_source: str = "explicit",
         reason: str = "production_start",
         timeout_s: float = 5.0,
+        ensure_ready: bool = False,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         planned_travel_mm = float(travel_mm if travel_mm is not None else plan.get("first_wickler_travel_mm", plan["travel_mm"]))
@@ -5237,6 +5252,11 @@ class MachineRuntime:
                     results.append({"role": role, "ok": True, "simulation": True})
                     continue
                 raise RuntimeError(f"{client.descriptor.label} endpoint missing")
+            ready_reply: dict[str, Any] = {"ok": True, "unchanged": True, "source": "already_ready_assumed"}
+            if ensure_ready:
+                ready_reply = client.release_for_continuous_motion(timeout_s=timeout_s)
+                if not ready_reply.get("ok", True):
+                    raise RuntimeError(f"{client.descriptor.label} ready failed before indexed prepare: {ready_reply}")
             master_reply = client.post_master(master_payload, timeout_s=timeout_s)
             if not master_reply.get("ok", True):
                 raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
@@ -5272,7 +5292,7 @@ class MachineRuntime:
                 "travel_mm": planned_travel_mm,
                 "travel_source": travel_source,
                 "indexed_plan": indexed_plan,
-                "ready": {"ok": True, "unchanged": True, "source": "hardware_start_only"},
+                "ready": ready_reply,
                 "master": master_reply,
                 "verify": verify,
             }
@@ -6643,9 +6663,10 @@ class MachineRuntime:
         *,
         target_state: int,
         recover_after_safety: bool = False,
+        neutralize_indexed_start: bool = False,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        keep_ready = int(target_state or 0) in (6, 7)
+        keep_ready = int(target_state or 0) in (6, 7) and not bool(neutralize_indexed_start)
         for role in ("unwinder", "rewinder"):
             client = SmartWicklerClient(self.cfg, role)
             if not client.available():
@@ -6666,6 +6687,8 @@ class MachineRuntime:
             except Exception as exc:
                 item["indexed_disable_error"] = repr(exc)
                 errors.append(f"indexed_disable_error={repr(exc)}")
+            if neutralize_indexed_start:
+                item["neutralize_indexed_start"] = True
             if keep_ready and recover_after_safety:
                 for mode in ("resetAlarm", "etoRecovery"):
                     try:
@@ -6677,11 +6700,12 @@ class MachineRuntime:
                         item[f"{mode}_error"] = repr(exc)
                         errors.append(f"{mode}_error={repr(exc)}")
             try:
-                item["mode"] = (
-                    client.release_for_continuous_motion(timeout_s=1.0)
-                    if keep_ready
-                    else client.post_mode("stop", timeout_s=1.0)
-                )
+                if neutralize_indexed_start:
+                    item["mode"] = client.post_mode("stop", timeout_s=1.0)
+                elif keep_ready:
+                    item["mode"] = client.release_for_continuous_motion(timeout_s=1.0)
+                else:
+                    item["mode"] = client.post_mode("stop", timeout_s=1.0)
                 if not item["mode"].get("ok", True):
                     errors.append(f"mode rejected: {item['mode']}")
             except Exception as exc:
@@ -7332,6 +7356,7 @@ class MachineRuntime:
             travel_mm=base_travel_mm,
             travel_source=base_source,
             reason="production_resume_pause",
+            ensure_ready=True,
         )
         quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
         command = (
@@ -7444,6 +7469,7 @@ class MachineRuntime:
             travel_mm=base_travel_mm,
             travel_source=base_source,
             reason="production_resume_label_removal",
+            ensure_ready=True,
         )
         quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
         command = (
@@ -7906,6 +7932,7 @@ class MachineRuntime:
         wicklers: list[dict[str, Any]] = []
         tto_printer: dict[str, Any] = {"ok": True, "skipped": "pause_not_confirmed"}
         if monitor_ok:
+            label_removal_pause = _is_label_removal_pause_reason(reason)
             cleanup_commands = (
                 ("PROCESS WICKLER CANCEL", 1.0),
                 ("PROCESS INDEXED STOP", 1.0),
@@ -7924,13 +7951,24 @@ class MachineRuntime:
                 except Exception as exc:
                     commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
 
-            wicklers = self._set_production_wicklers_idle(target_state=target_state)
-            self._sync_esp_machine_state(int(target_state or 0), required=False)
-            tto_printer = self._queue_tto_printer_state_sync(
-                int(target_state or 0),
-                self._param_values_by_prefix(("MAP", "TTS")),
-                reason=f"production_pause_after_print:{reason}",
+            wicklers = self._set_production_wicklers_idle(
+                target_state=target_state,
+                neutralize_indexed_start=label_removal_pause,
             )
+            self._sync_esp_machine_state(int(target_state or 0), required=False)
+            if label_removal_pause:
+                tto_printer = {
+                    "ok": True,
+                    "skipped": "label_removal_pause_keep_online",
+                    "machine_state": int(target_state or 0),
+                    "reason": f"production_pause_after_print:{reason}",
+                }
+            else:
+                tto_printer = self._queue_tto_printer_state_sync(
+                    int(target_state or 0),
+                    self._param_values_by_prefix(("MAP", "TTS")),
+                    reason=f"production_pause_after_print:{reason}",
+                )
         else:
             fallback_stop = self._stop_production_motion(
                 reason=f"controlled_pause_after_print_timeout:{reason}",

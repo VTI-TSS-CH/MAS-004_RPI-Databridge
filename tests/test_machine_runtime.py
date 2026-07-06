@@ -925,7 +925,7 @@ class MachineRuntimeTests(unittest.TestCase):
             runtime,
             "_read_production_monitor_diag",
             side_effect=monitor_replies,
-        ), patch.object(runtime, "_set_production_wicklers_idle", return_value=[{"ok": True}]), patch.object(
+        ), patch.object(runtime, "_set_production_wicklers_idle", return_value=[{"ok": True}]) as set_idle, patch.object(
             runtime, "_sync_esp_machine_state"
         ) as sync_state, patch.object(
             runtime, "_queue_tto_printer_state_sync", return_value={"ok": True, "skipped": "test"}
@@ -939,6 +939,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertNotIn("PROCESS PRODUCTION STOP", calls)
         self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
         sync_state.assert_called_once_with(7, required=False)
+        set_idle.assert_called_once_with(target_state=7, neutralize_indexed_start=False)
 
     def test_controlled_label_removal_pause_accepts_completed_active_runner(self):
         runtime = self.build_runtime()
@@ -965,18 +966,63 @@ class MachineRuntimeTests(unittest.TestCase):
             },
         ), patch.object(runtime, "_stop_production_motion") as hard_stop, patch.object(
             runtime, "_set_production_wicklers_idle", return_value=[{"ok": True}]
-        ), patch.object(runtime, "_sync_esp_machine_state"), patch.object(
+        ) as set_idle, patch.object(runtime, "_sync_esp_machine_state"), patch.object(
             runtime, "_queue_tto_printer_state_sync", return_value={"ok": True, "skipped": "test"}
-        ), patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
+        ) as queue_tto, patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
             result = runtime._pause_production_motion_after_print(reason="label_removal_required:3,6", target_state=7)
 
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["monitor_ok"])
         self.assertEqual("runner_completed_requested_pause", result["pause_acceptance"])
+        self.assertEqual("label_removal_pause_keep_online", result["tto_printer"]["skipped"])
         self.assertTrue(calls[0].startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"))
         self.assertNotIn("PROCESS PRODUCTION STOP", calls)
         self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
+        set_idle.assert_called_once_with(target_state=7, neutralize_indexed_start=True)
+        queue_tto.assert_not_called()
         hard_stop.assert_not_called()
+
+    def test_label_removal_pause_state_change_keeps_tto_online(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="production",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=10,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": True,
+                    "paused": False,
+                    "pause_reason": "label_removal_required:3,6",
+                    "last_stop": {"ok": True, "reason": "label_removal_required:3,6"},
+                }
+            },
+        )
+
+        with patch.object(
+            runtime,
+            "_queue_tto_printer_state_sync",
+            side_effect=AssertionError("label removal pause must keep TTO online"),
+        ), patch.object(runtime, "_sync_esp_machine_state"), patch.object(
+            runtime,
+            "_monitor_active_production_esp",
+            return_value={
+                "label_removal_pause": True,
+                "target_state": 7,
+                "stop": {"ok": True, "reason": "label_removal_required:3,6"},
+                "production_info": {
+                    "paused": True,
+                    "pause_reason": "label_removal_required:3,6",
+                    "label_removal_pending_labels": [3, 6],
+                },
+            },
+        ):
+            snapshot = runtime.refresh()
+
+        self.assertEqual(7, snapshot["current_state"])
 
     def test_failed_production_stop_forces_fault_state(self):
         runtime = self.build_runtime()
@@ -1513,6 +1559,24 @@ class MachineRuntimeTests(unittest.TestCase):
             [{"actor": "esp32"}, {"actor": "esp32"}],
             [call.kwargs for call in bridge.execute.call_args_list],
         )
+
+    def test_tto_printer_online_sync_skips_when_already_online(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        _insert_param(self.db, "TTS0001", "TTS", "0001", "3", "R", "W", "enum")
+        _insert_device_map(self.db, "TTS0001", "STATUS[PRINTER_STATE_CODE]")
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls:
+            result = runtime._sync_tto_printer_for_machine_state(
+                5,
+                {"MAP0016": "0", "MAP0035": "0"},
+                reason="resume_already_online",
+                required=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("already_online", result["skipped"])
+        bridge_cls.assert_not_called()
 
     def test_tto_printer_sync_skips_when_tto_bypass_is_active(self):
         self.cfg.vj6530_simulation = False
