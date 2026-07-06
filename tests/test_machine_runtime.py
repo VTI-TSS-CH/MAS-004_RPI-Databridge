@@ -3391,6 +3391,32 @@ class MachineRuntimeTests(unittest.TestCase):
         # command. The central runtime loop consumes MAS0002.
         self.assertEqual("1", self.params.get_effective_value("MAS0002"))
 
+    def test_virtual_start_from_production_pause_nudges_immediate_resume(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=10,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "paused": True,
+                    "pause_reason": "label_removal_required:3,6",
+                    "last_stop": {"ok": True, "reason": "label_removal_required:3,6"},
+                }
+            },
+        )
+
+        with patch.object(runtime, "_try_immediate_button_refresh", return_value={"ok": True, "test": True}) as refresh:
+            result = runtime.press_virtual_button("start_pause")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual({"ok": True, "test": True}, result["immediate_resume"])
+        refresh.assert_called_once_with("virtual_button_resume")
+
     def test_virtual_start_pause_is_blocked_while_setup_is_not_completed(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -4399,6 +4425,48 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["accepted"], result)
         self.assertEqual("start_pause", result["request"]["button"])
         self.assertEqual("2", self.params.get_effective_value("MAS0002"))
+
+    def test_physical_start_from_production_pause_sets_target_and_nudges_resume(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=10,
+            info={
+                "button_inputs": {"start_pause": False},
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "paused": True,
+                    "pause_reason": "label_removal_required:3,6",
+                    "last_stop": {"ok": True, "reason": "label_removal_required:3,6"},
+                },
+            },
+        )
+
+        with patch.object(runtime, "_try_immediate_button_refresh", return_value={"ok": True, "test": True}) as refresh:
+            result = runtime.process_physical_button_inputs(
+                current_inputs={
+                    "start_pause": True,
+                    "stop": False,
+                    "setup": False,
+                    "sync": False,
+                    "empty": False,
+                    "rewind": False,
+                },
+                previous_inputs={"start_pause": False},
+            )
+
+        self.assertTrue(result["accepted"], result)
+        self.assertEqual({"ok": True, "test": True}, result["immediate_resume"])
+        refresh.assert_called_once_with("physical_button_resume")
+        snapshot = runtime.snapshot()
+        self.assertEqual(5, snapshot["requested_state"])
+        pending = snapshot["info"]["pending_hmi_command"]
+        self.assertEqual("physical-panel", pending["actor"])
+        self.assertEqual(5, pending["target_state"])
 
     def test_button_led_writes_force_physical_sync(self):
         runtime = self.build_runtime()

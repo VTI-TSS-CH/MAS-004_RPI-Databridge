@@ -1962,6 +1962,20 @@ class MachineRuntime:
                     safety_info = dict(info.get("safety") or {})
                     safety_info["physical_reset_seen_ts"] = ts
                     info["safety"] = safety_info
+                if self._button_request_should_attempt_immediate_resume(
+                    request=request,
+                    snapshot=snapshot,
+                    info=info,
+                ):
+                    info["pending_hmi_command"] = {
+                        "button": request["button"],
+                        "action": request["action"],
+                        "command": int(request["command"]),
+                        "from_state": int(request["from_state"]),
+                        "target_state": int(request["target_state"]),
+                        "queued_ts": ts,
+                        "actor": "physical-panel",
+                    }
             else:
                 error = str(msg)
                 self.logs.log(
@@ -1974,7 +1988,11 @@ class MachineRuntime:
             info["button_inputs"] = current_inputs
             self._write_state(
                 current_state=int(snapshot.get("current_state") or 1),
-                requested_state=int(snapshot.get("requested_state") or snapshot.get("current_state") or 1),
+                requested_state=(
+                    int(request["target_state"])
+                    if request is not None and accepted
+                    else int(snapshot.get("requested_state") or snapshot.get("current_state") or 1)
+                ),
                 state_source=str(snapshot.get("state_source") or "runtime"),
                 warning_active=bool(snapshot.get("warning_active")),
                 purge_active=bool(snapshot.get("purge_active")),
@@ -1983,6 +2001,14 @@ class MachineRuntime:
                 info=info,
             )
 
+        immediate_resume = None
+        if request is not None and accepted and self._button_request_should_attempt_immediate_resume(
+            request=request,
+            snapshot=snapshot,
+            info=info,
+        ):
+            immediate_resume = self._try_immediate_button_refresh("physical_button_resume")
+
         return {
             "ok": True,
             "current_inputs": current_inputs,
@@ -1990,6 +2016,7 @@ class MachineRuntime:
             "request": request,
             "accepted": accepted,
             "error": error,
+            "immediate_resume": immediate_resume,
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -3145,9 +3172,13 @@ class MachineRuntime:
             last_label_no=int(queued_snapshot.get("last_label_no") or 0),
             info=queued_info,
         )
-        # The virtual HMI button must behave like the physical panel: it only
-        # queues MAS0002.  The central service loop owns the runtime transition
-        # and motion start, avoiding competing refreshes from web/API workers.
+        immediate_resume = None
+        if self._button_request_should_attempt_immediate_resume(
+            request=request,
+            snapshot=snapshot,
+            info=queued_info,
+        ):
+            immediate_resume = self._try_immediate_button_refresh("virtual_button_resume")
         snapshot = self.snapshot()
         return {
             "ok": True,
@@ -3155,8 +3186,54 @@ class MachineRuntime:
             "command": request["command"],
             "target_state": request["target_state"],
             "queued": True,
+            "immediate_resume": immediate_resume,
             "snapshot": snapshot,
         }
+
+    def _button_request_should_attempt_immediate_resume(
+        self,
+        *,
+        request: dict[str, Any],
+        snapshot: dict[str, Any],
+        info: dict[str, Any],
+    ) -> bool:
+        if int((request or {}).get("command") or 0) != 1:
+            return False
+        if int((request or {}).get("target_state") or 0) != 5:
+            return False
+        if int((snapshot or {}).get("current_state") or 0) != 7:
+            return False
+        if bool((snapshot or {}).get("purge_active")):
+            return False
+        production_info = dict((info or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        if bool(production_info.get("paused")):
+            return True
+        last_stop = production_info.get("last_stop")
+        if isinstance(last_stop, dict) and bool(last_stop.get("ok")):
+            return True
+        pause_reason = str(production_info.get("pause_reason") or "")
+        return pause_reason.startswith("label_removal_required:") or pause_reason == "operator_pause"
+
+    def _try_immediate_button_refresh(self, reason: str) -> dict[str, Any]:
+        acquired = _MACHINE_REFRESH_LOCK.acquire(blocking=False)
+        if not acquired:
+            return {"ok": True, "skipped": "refresh_in_progress", "reason": str(reason or "")}
+        try:
+            first = self._refresh_unlocked(include_snapshot=False)
+            second = None
+            if int(first.get("current_state") or 0) == 4 and int(first.get("requested_state") or 0) == 5:
+                second = self._refresh_unlocked(include_snapshot=False)
+            return {
+                "ok": True,
+                "reason": str(reason or ""),
+                "first": first,
+                "second": second,
+            }
+        except Exception as exc:
+            self.logs.log("machine", "warning", f"Immediate button refresh failed ({reason}): {repr(exc)}")
+            return {"ok": False, "reason": str(reason or ""), "error": repr(exc)}
+        finally:
+            _MACHINE_REFRESH_LOCK.release()
 
     def _compact_label_removal_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         label_no = _safe_int(payload.get("label_no"), 0)
