@@ -20,6 +20,7 @@ from mas004_rpi_databridge.machine_runtime import (
     band_break_monitoring_active,
     microtom_state_queue_options,
     parse_machine_event_line,
+    production_start_is_pause_resume,
     production_start_motion_enabled,
 )
 from mas004_rpi_databridge.outbox import Outbox
@@ -359,12 +360,13 @@ class EspPushListener:
                 logs.log("machine", "warning", f"Start blockiert: {PRODUCTION_START_BLOCK_REASON}")
                 logs.log("esp-plc", "out", f"raspi->esp: {resp}")
                 return resp
-            allowed, reason = production_logs.can_start_new_production()
-            if not allowed:
-                resp = f"{pkey}={reason}"
-                logs.log("raspi", "info", "start blocked: production logfiles of previous batch are still pending")
-                logs.log("esp-plc", "out", f"raspi->esp: {resp}")
-                return resp
+            if not production_start_is_pause_resume(params.db):
+                allowed, reason = production_logs.can_start_new_production()
+                if not allowed:
+                    resp = f"{pkey}={reason}"
+                    logs.log("raspi", "info", "start blocked: production logfiles of previous batch are still pending")
+                    logs.log("esp-plc", "out", f"raspi->esp: {resp}")
+                    return resp
 
         if pkey in RPI_AUTHORITATIVE_MA_KEYS:
             # The ESP receives these values mirrored from the Raspi. If it

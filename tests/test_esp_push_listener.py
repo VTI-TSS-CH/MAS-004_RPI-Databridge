@@ -84,6 +84,41 @@ class EspPushListenerTests(unittest.TestCase):
             self.assertEqual("0", ParamStore(db).get_effective_value("MAS0002"))
             self.assertEqual(0, Outbox(db).count())
 
+    def test_esp_start_from_pause_bypasses_pending_logfile_prefilter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "db.sqlite3"
+            db = DB(str(db_path))
+            _insert_param(db, "MAS0002", "MAS", "0002", "0", "W", "W")
+            with db._conn() as c:
+                c.execute(
+                    """INSERT INTO machine_state(
+                           singleton_id,current_state,requested_state,state_source,warning_active,purge_active,
+                           production_label,last_label_no,info_json,updated_ts
+                       ) VALUES(1,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        7,
+                        7,
+                        "operator_pause",
+                        0,
+                        0,
+                        "JOB_TEST",
+                        12,
+                        json.dumps({"production_runtime": {"paused": True, "pause_reason": "operator_pause"}}),
+                        now_ts(),
+                    ),
+                )
+            cfg = Settings(db_path=str(db_path), peer_base_url="", peer_base_url_secondary="")
+            listener = EspPushListener(cfg, lambda _msg: None)
+
+            with patch(
+                "mas004_rpi_databridge.esp_push_listener.ProductionLogManager.can_start_new_production",
+                side_effect=AssertionError("resume must not check pending logfiles"),
+            ):
+                resp = listener._process_line("MAS0002=1")
+
+            self.assertEqual("ACK_MAS0002=0", resp)
+            self.assertEqual("0", ParamStore(db).get_effective_value("MAS0002"))
+
     def test_esp_read_for_ma_param_is_served_locally_without_esp_tcp_callback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "db.sqlite3"

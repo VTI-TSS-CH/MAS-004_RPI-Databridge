@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB, now_ts
@@ -86,6 +86,39 @@ class RouterEspAccessTests(unittest.TestCase):
             self.assertIsNotNone(job)
             body = json.loads(job.body_json)
             self.assertEqual(f"MAS0002={PRODUCTION_START_BLOCK_CODE}", body["msg"])
+
+    def test_start_from_pause_bypasses_pending_logfile_prefilter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            router = self._make_router(base)
+            _insert_param(router.params.db, "MAS0002", "MAS", "0002", "0", "W", "W", "uint8")
+            with router.params.db._conn() as c:
+                c.execute(
+                    """INSERT INTO machine_state(
+                           singleton_id,current_state,requested_state,state_source,warning_active,purge_active,
+                           production_label,last_label_no,info_json,updated_ts
+                       ) VALUES(1,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        7,
+                        7,
+                        "label_removal_required",
+                        0,
+                        0,
+                        "JOB_TEST",
+                        9,
+                        json.dumps({"production_runtime": {"paused": True, "pause_reason": "label_removal_required:6,9"}}),
+                        now_ts(),
+                    ),
+                )
+            router.production_logs.can_start_new_production = Mock(return_value=(False, "NAK_ProductionLogfilesPending"))
+            router.production_logs.handle_param_change = Mock(side_effect=AssertionError("resume must not start new logs"))
+
+            resp = router.handle_microtom_line("MAS0002=1", correlation="resume")
+
+            self.assertNotEqual("MAS0002=NAK_ProductionLogfilesPending", resp)
+            self.assertEqual("1", router.params.get_effective_value("MAS0002"))
+            router.production_logs.can_start_new_production.assert_not_called()
+            router.production_logs.handle_param_change.assert_not_called()
 
     def test_ma_param_with_esp_rw_n_stays_local_even_when_esp_live_is_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:

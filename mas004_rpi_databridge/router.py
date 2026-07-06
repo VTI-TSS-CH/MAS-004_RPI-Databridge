@@ -14,6 +14,7 @@ from mas004_rpi_databridge.machine_runtime import (
     mark_external_purge_start,
     mark_external_purge_clear,
     microtom_state_queue_options,
+    production_start_is_pause_resume,
     production_start_motion_enabled,
     recent_external_purge_clear,
 )
@@ -242,6 +243,7 @@ class Router:
         self.logs.log("raspi", "in", f"microtom: {line}")
         self.logs.log(dev, "in", f"raspi-> {dev}: {line}")
 
+        start_is_pause_resume = False
         if pkey == "MAS0002" and op == "write" and str(value).strip() == "1":
             if not production_start_motion_enabled():
                 resp = f"{pkey}={PRODUCTION_START_BLOCK_CODE}"
@@ -250,14 +252,16 @@ class Router:
                 self.logs.log("raspi", "out", f"to microtom: {resp}")
                 self._enqueue_to_microtom(resp, correlation=correlation)
                 return resp
-            allowed, reason = self.production_logs.can_start_new_production()
-            if not allowed:
-                resp = f"{pkey}={reason}"
-                self.logs.log("raspi", "info", "start blocked: production logfiles of previous batch are still pending")
-                self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
-                self.logs.log("raspi", "out", f"to microtom: {resp}")
-                self._enqueue_to_microtom(resp, correlation=correlation)
-                return resp
+            start_is_pause_resume = production_start_is_pause_resume(self.params.db)
+            if not start_is_pause_resume:
+                allowed, reason = self.production_logs.can_start_new_production()
+                if not allowed:
+                    resp = f"{pkey}={reason}"
+                    self.logs.log("raspi", "info", "start blocked: production logfiles of previous batch are still pending")
+                    self.logs.log(dev, "out", f"{dev}->raspi: {resp}")
+                    self.logs.log("raspi", "out", f"to microtom: {resp}")
+                    self._enqueue_to_microtom(resp, correlation=correlation)
+                    return resp
 
         if pkey == "MAS0030" and op == "read":
             self.production_logs.ready_manifest()
@@ -290,7 +294,7 @@ class Router:
                     deleted = self.outbox.delete_status_updates("MAS0028")
                 if deleted:
                     self.logs.log("raspi", "info", f"cleared {deleted} pending stale MAS0028 status callback(s)")
-            event = self.production_logs.handle_param_change(pkey, value)
+            event = None if start_is_pause_resume else self.production_logs.handle_param_change(pkey, value)
             if event and event.get("event") == "start":
                 self.logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
             elif event and event.get("event") == "stop":

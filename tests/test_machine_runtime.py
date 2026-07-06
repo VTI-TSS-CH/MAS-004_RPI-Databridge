@@ -666,6 +666,44 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(production["active"])
         self.assertEqual(100.0, production["plan"]["travel_mm"])
 
+    def test_start_from_pause_ignores_pending_logfiles_for_resume(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=9,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:6,9",
+                    "label_removal_pending_labels": [6, 9],
+                    "label_removal_request": {"label_no": 6, "label_nos": [6, 9]},
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"reason": "label_removal_required:6", "finished_ts": now_ts() - 1.0},
+                }
+            },
+        )
+        ok, msg = self.params.set_value("MAS0002", "1", actor="microtom")
+        self.assertTrue(ok, msg)
+        runtime.production_logs.can_start_new_production = Mock(return_value=(False, "NAK_ProductionLogfilesPending"))
+        runtime.production_logs.handle_param_change = Mock(side_effect=AssertionError("resume must not start new logs"))
+
+        with patch("mas004_rpi_databridge.machine_runtime.PRODUCTION_START_MOTION_ENABLED", True):
+            snapshot = runtime.refresh()
+
+        self.assertEqual(4, snapshot["current_state"])
+        self.assertEqual(5, snapshot["requested_state"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0002"))
+        production = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertTrue(production["pending_start"]["from_state"] == 7)
+        self.assertTrue(production["resume_log_bypass"])
+        runtime.production_logs.can_start_new_production.assert_not_called()
+
     def test_start_from_pause_clears_stale_label_pause_error_before_transition(self):
         runtime = self.build_runtime()
         runtime._write_state(

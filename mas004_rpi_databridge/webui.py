@@ -38,7 +38,7 @@ from mas004_rpi_databridge.netconfig import IfaceCfg, apply_static, get_current_
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
-from mas004_rpi_databridge.machine_runtime import MachineRuntime, mark_external_purge_clear
+from mas004_rpi_databridge.machine_runtime import MachineRuntime, mark_external_purge_clear, production_start_is_pause_resume
 from mas004_rpi_databridge.machine_control_ui import build_machine_control_ui_html
 from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.format_semantics import build_format_plan
@@ -3220,7 +3220,10 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     if not persisted:
                         logs.log("raspi", "info", f"value not persisted for {pkey}: {persist_msg}")
                     else:
-                        event = production_logs.handle_param_change(pkey, rhs)
+                        start_is_pause_resume = (
+                            pkey == "MAS0002" and rhs.strip() == "1" and production_start_is_pause_resume(db)
+                        )
+                        event = None if start_is_pause_resume else production_logs.handle_param_change(pkey, rhs)
                         if event and event.get("event") == "start":
                             logs.log("raspi", "info", f"production logging started: {event.get('production_label')}")
                         elif event and event.get("event") == "stop":

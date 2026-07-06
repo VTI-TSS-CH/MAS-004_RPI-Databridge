@@ -572,6 +572,15 @@ def _machine_state_row_from_db(db: DB) -> dict[str, Any]:
     }
 
 
+def production_start_is_pause_resume(db: DB) -> bool:
+    state = _machine_state_row_from_db(db)
+    current_state = _safe_int(state.get("current_state"), 1)
+    requested_state = _safe_int(state.get("requested_state"), current_state)
+    if current_state != 7 and requested_state != 7:
+        return False
+    return not bool(state.get("purge_active"))
+
+
 def _write_machine_state_to_db(
     db: DB,
     *,
@@ -1010,7 +1019,10 @@ class MachineRuntime:
                         requested_command = 0
                     else:
                         quick_setup_log_bypass = quick_setup_log_bypass_active(info)
-                        if quick_setup_log_bypass:
+                        resume_start_request = production_start_is_pause_resume(self.db)
+                        if resume_start_request:
+                            allowed, reason = True, "OK_PRODUCTION_RESUME"
+                        elif quick_setup_log_bypass:
                             allowed, reason = True, "OK_QUICK_SETUP_LOG_BYPASS"
                         else:
                             allowed, reason = self.production_logs.can_start_new_production()
@@ -1033,9 +1045,13 @@ class MachineRuntime:
                             requested_command = 0
                         else:
                             event = None
-                            if quick_setup_log_bypass:
+                            if resume_start_request:
+                                production_info["resume_log_bypass"] = True
+                                production_info.pop("quick_setup_log_bypass", None)
+                            elif quick_setup_log_bypass:
                                 production_info["quick_setup_log_bypass"] = True
                             else:
+                                production_info.pop("resume_log_bypass", None)
                                 production_info.pop("quick_setup_log_bypass", None)
                                 event = self.production_logs.handle_param_change("MAS0002", "1")
                             if event and event.get("event") == "start":
