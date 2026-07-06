@@ -115,7 +115,8 @@ def _is_label_removal_pause_reason(reason: Any) -> bool:
 
 def _keep_tto_online_for_pause_reason(machine_state: int, reason: Any) -> bool:
     text = str(reason or "").strip()
-    if int(machine_state or 0) != 7:
+    state = int(machine_state or 0)
+    if state not in (4, 7):
         return False
     return (
         _is_label_removal_pause_reason(text)
@@ -360,6 +361,8 @@ PRODUCTION_ESP_START_READBACK_KEYS = (
 TTO_PRINTER_STATE_PKEY = "TTS0001"
 TTO_PRINTER_OFFLINE_CODE = "0"
 TTO_PRINTER_ONLINE_CODE = "3"
+TTO_READY_DEVICE_CODE = "raspi_plc21"
+TTO_READY_PIN = "I0.0"
 WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
 WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
@@ -4688,6 +4691,84 @@ class MachineRuntime:
             return {"3", "4", "5"}
         return {target}
 
+    def _tto_ready_status_for_production(
+        self,
+        *,
+        param_map: dict[str, str] | None = None,
+        refresh: bool = False,
+        source: str = "",
+    ) -> dict[str, Any]:
+        params = dict(param_map or {})
+        status: dict[str, Any] = {
+            "ok": True,
+            "source": str(source or "tto_ready"),
+            "device_code": TTO_READY_DEVICE_CODE,
+            "pin_label": TTO_READY_PIN,
+            "zbc_skipped": True,
+        }
+        if _safe_int(params.get("MAP0016", self.params.get_effective_value("MAP0016")), 0) != 0:
+            return {**status, "skipped": "tto_not_selected"}
+        if _truthy(params.get("MAP0035", self.params.get_effective_value("MAP0035"))):
+            return {**status, "skipped": "tto_print_bypass_active"}
+
+        refresh_result: dict[str, Any] | None = None
+        if refresh:
+            refresh_result = self._refresh_single_io_device(TTO_READY_DEVICE_CODE, {TTO_READY_PIN})
+            status["refresh"] = refresh_result
+        io_map = self._io_values_for_pins({(TTO_READY_DEVICE_CODE, TTO_READY_PIN)})
+        detail = self._io_point_detail(
+            io_map,
+            TTO_READY_DEVICE_CODE,
+            TTO_READY_PIN,
+            default=False,
+        )
+        point_defined = bool(self.io_store.get_point(f"{TTO_READY_DEVICE_CODE}__{TTO_READY_PIN.replace('.', '_')}"))
+        refresh_ok = True if refresh_result is None else bool(refresh_result.get("ok", False))
+        ready = bool(detail.get("active")) and point_defined and refresh_ok
+        status.update(
+            {
+                "ok": ready,
+                "ready": ready,
+                "ready_input": detail,
+                "ready_defined": point_defined,
+                "method": "hardware_io",
+            }
+        )
+        if not point_defined:
+            status["reason"] = "tto_ready_io_missing"
+            status["message"] = f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} ist nicht in der IO-Liste definiert"
+        elif not refresh_ok:
+            status["reason"] = "tto_ready_refresh_failed"
+            status["message"] = (
+                f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} konnte nicht live gelesen werden; "
+                "Produktionsresume gesperrt"
+            )
+        elif not ready:
+            status["reason"] = "tto_ready_low"
+            status["message"] = (
+                f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} ist LOW; "
+                "Produktionsresume gesperrt"
+            )
+        return status
+
+    def _ensure_tto_ready_for_label_removal_resume(self, param_map: dict[str, str] | None = None) -> dict[str, Any]:
+        status = self._tto_ready_status_for_production(
+            param_map=param_map,
+            refresh=True,
+            source="label_removal_resume",
+        )
+        if not bool(status.get("ok")):
+            message = str(status.get("message") or "TTO Ready fehlt")
+            self.logs.log("machine", "warning", f"production_resume_label_removal: {message}")
+            self._record_event(
+                "production_resume_tto_ready_blocked",
+                "warning",
+                message,
+                status,
+            )
+            raise RuntimeError(message)
+        return status
+
     def _tto_printer_state_sync_plan(self, machine_state: int, param_map: dict[str, str]) -> dict[str, Any]:
         target_code = TTO_PRINTER_ONLINE_CODE if int(machine_state or 0) == 5 else TTO_PRINTER_OFFLINE_CODE
         result: dict[str, Any] = {
@@ -7557,12 +7638,7 @@ class MachineRuntime:
         label_text = ",".join(str(label) for label in labels)
         laser_ready = self._ensure_laser_ready_for_production_start(param_map)
         self._sync_esp_machine_state(5, required=True)
-        tto_printer = self._sync_tto_printer_for_machine_state(
-            5,
-            param_map,
-            reason="production_resume_label_removal",
-            required=True,
-        )
+        tto_printer = self._ensure_tto_ready_for_label_removal_resume(param_map)
         sync_info = self._reuse_production_params_for_resume(
             param_map,
             previous_values=previous_sync_values,

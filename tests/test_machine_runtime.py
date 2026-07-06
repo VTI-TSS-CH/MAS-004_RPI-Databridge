@@ -208,6 +208,8 @@ class MachineRuntimeTests(unittest.TestCase):
             _insert_param(self.db, pkey, ptype, pid, default_v, rw, esp_rw, dtype)
 
         for pin, value in (
+            ("I0.0", "1"),
+            ("I0.1", "0"),
             ("I0.6", "1"),
             ("I0.7", "0"),
             ("I0.8", "0"),
@@ -1085,6 +1087,39 @@ class MachineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(7, snapshot["current_state"])
 
+    def test_label_removal_resume_transition_keeps_tto_online(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=9,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:6,9",
+                    "label_removal_pending_labels": [6, 9],
+                    "last_stop": {"ok": True, "reason": "label_removal_required:6,9"},
+                }
+            },
+        )
+        ok, msg = self.params.set_value("MAS0002", "1", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch.object(
+            runtime,
+            "_queue_tto_printer_state_sync",
+            side_effect=AssertionError("label removal resume transition must not set TTO offline"),
+        ):
+            snapshot = runtime.refresh()
+
+        self.assertEqual(4, snapshot["current_state"])
+        self.assertEqual(5, snapshot["requested_state"])
+
     def test_failed_production_stop_forces_fault_state(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -1233,6 +1268,10 @@ class MachineRuntimeTests(unittest.TestCase):
             runtime,
             "_sync_production_params_to_esp",
             side_effect=AssertionError("label removal resume must reuse existing ESP params"),
+        ), patch.object(
+            runtime,
+            "_sync_tto_printer_for_machine_state",
+            side_effect=AssertionError("label removal resume must not use ZBC online/offline"),
         ):
             result = runtime._start_production_motion(param_map, format_plan)
 
@@ -1241,6 +1280,8 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual([6, 9], result["labels_expected_removed"])
         self.assertEqual([], result["synced_params"])
         self.assertTrue(result["param_sync"]["resume_reuse"])
+        self.assertEqual("hardware_io", result["tto_printer"]["method"])
+        self.assertTrue(result["tto_printer"]["zbc_skipped"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
