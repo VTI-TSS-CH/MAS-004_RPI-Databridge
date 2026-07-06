@@ -75,9 +75,9 @@ def _simulation_payload(role: str, label: str, host: str, port: int, simulation:
             "controlKd": 0.2,
         },
         "master": {
-            "map0023": 0,
-            "map0024": 0,
-            "map0025": 0.0,
+            "map0023": 5,
+            "map0024": 95,
+            "map0025": 1.0,
             "map0047": False,
             "indexedDirection": 1,
         },

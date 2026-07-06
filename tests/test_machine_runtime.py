@@ -1473,7 +1473,73 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(["unwinder", "rewinder", "unwinder", "rewinder"], fetch_calls)
         self.assertEqual(["0", "0"], [payload.get("indexedModeEnabled") for payload in master_payloads])
+        self.assertEqual(["1.0", "1.0"], [payload.get("map0025") for payload in master_payloads])
         self.assertTrue(all("indexedTravelMm" not in payload for payload in master_payloads))
+
+    def test_wickler_threshold_payload_converts_map0025_tenths_percent(self):
+        runtime = self.build_runtime()
+
+        self.assertEqual("1.0", runtime._wickler_master_threshold_payload({"MAP0025": "10"})["map0025"])
+        self.assertEqual("0.1", runtime._wickler_master_threshold_payload({"MAP0025": "1"})["map0025"])
+        self.assertEqual("5.0", runtime._wickler_master_threshold_payload({"MAP0025": "50"})["map0025"])
+
+    def test_continuous_wickler_prepare_waits_until_indexed_mode_released(self):
+        runtime = self.build_runtime()
+        plan = {
+            "speed_mm_s": 100.0,
+            "ramp_mm_s2": 300.0,
+            "wickler_standby_percent": 50.0,
+            "wickler_master_thresholds": {"map0023": "5", "map0024": "95", "map0025": "1.0"},
+        }
+        fetch_counts: dict[str, int] = {}
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+                self.descriptor = SimpleNamespace(label=role, simulation_attr=f"{role}_simulation")
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s=None):
+                return {"ok": True}
+
+            def release_for_continuous_motion(self, timeout_s=None):
+                return {"ok": True, "readyMotion": True}
+
+            def fetch_state(self, timeout_s=None):
+                fetch_counts[self.role] = fetch_counts.get(self.role, 0) + 1
+                indexed_mode = fetch_counts[self.role] == 1
+                return {
+                    "master": {"indexedModeEnabled": indexed_mode},
+                    "telemetry": {
+                        "modeLabel": "Bereit",
+                        "modeCss": "ready",
+                        "externalStopActive": False,
+                        "indexedModeEnabled": indexed_mode,
+                        "indexedCommandSeq": 15 if indexed_mode else 0,
+                        "wipePercent": 50.0,
+                        "calibrated": True,
+                        "requiresCalibration": False,
+                    },
+                    "drive": {
+                        "online": True,
+                        "ready": True,
+                        "move": False,
+                        "alarm": False,
+                        "continuousModeReady": not indexed_mode,
+                        "lastCommandOk": True,
+                    },
+                    "values": {},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient), patch(
+            "mas004_rpi_databridge.machine_runtime.time.sleep"
+        ):
+            result = runtime._prepare_production_wicklers_continuous(plan, timeout_s=0.3)
+
+        self.assertTrue(all(item["verify"]["ok"] for item in result), result)
+        self.assertEqual({"unwinder": 2, "rewinder": 2}, fetch_counts)
 
     def test_indexed_wickler_prepare_does_not_release_motion(self):
         runtime = self.build_runtime()
@@ -1538,6 +1604,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(all(item["ok"] for item in result), result)
         self.assertEqual([], release_calls)
         self.assertEqual(["1", "1"], [payload.get("indexedModeEnabled") for payload in master_payloads])
+        self.assertEqual(["1.0", "1.0"], [payload.get("map0025") for payload in master_payloads])
         self.assertEqual(["104.600", "104.600"], [payload.get("indexedTravelMm") for payload in master_payloads])
         self.assertTrue(all(item["ready"]["unchanged"] for item in result))
 

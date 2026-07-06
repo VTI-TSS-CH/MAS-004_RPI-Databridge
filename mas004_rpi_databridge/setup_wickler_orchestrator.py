@@ -246,7 +246,10 @@ class SetupWicklerOrchestrator:
                     f"setup abort diameter cancel ignored for {role}: {repr(exc)}",
                 )
             try:
-                client.post_master({"indexedModeEnabled": "0"}, timeout_s=2.0)
+                client.post_master(
+                    {"indexedModeEnabled": "0", **self._wickler_master_threshold_payload()},
+                    timeout_s=2.0,
+                )
             except Exception as exc:
                 self.logs.log(
                     "raspi",
@@ -895,9 +898,10 @@ class SetupWicklerOrchestrator:
         except Exception as exc:
             self.logs.log("raspi", "info", f"Motor 3 post-positioning wickler cancel ignored: {repr(exc)}")
         errors: list[str] = []
+        master_payload = {"indexedModeEnabled": "0", **self._wickler_master_threshold_payload()}
         for client in self._winder_clients():
             try:
-                client.post_master({"indexedModeEnabled": "0"}, timeout_s=5.0)
+                client.post_master(master_payload, timeout_s=5.0)
                 client.post_mode("stop", timeout_s=5.0)
             except Exception as exc:
                 errors.append(repr(exc))
@@ -1014,16 +1018,21 @@ class SetupWicklerOrchestrator:
     def _sync_wickler_setup_master(self) -> None:
         desired_map0047 = bool(self._param_int("MAP0047", 0))
         desired_map0047_wire = "1" if desired_map0047 else "0"
+        threshold_payload = self._wickler_master_threshold_payload()
         for client in self._winder_clients():
             role = self._wickler_role(client)
             payload = {
                 "indexedModeEnabled": "0",
+                **threshold_payload,
                 "map0047": desired_map0047_wire,
             }
             self.logs.log(
                 "raspi",
                 "info",
-                f"setup wickler {role} master sync: indexedModeEnabled=0 map0047={desired_map0047_wire}",
+                "setup wickler "
+                f"{role} master sync: indexedModeEnabled=0 "
+                f"map0023={payload['map0023']} map0024={payload['map0024']} "
+                f"map0025={payload['map0025']} map0047={desired_map0047_wire}",
             )
             try:
                 client.post_master(payload, timeout_s=8.0)
@@ -1040,6 +1049,48 @@ class SetupWicklerOrchestrator:
                     f"Wickler {role} master sync failed: map0047 is {int(observed)}, "
                     f"expected {desired_map0047_wire}"
                 )
+            threshold_mismatches = self._wickler_master_threshold_mismatches(master, threshold_payload)
+            if threshold_mismatches:
+                raise RuntimeError(
+                    f"Wickler {role} master sync failed: " + "; ".join(threshold_mismatches)
+                )
+
+    def _wickler_master_threshold_payload(self) -> dict[str, str]:
+        map0023 = max(0, min(100, self._param_int("MAP0023", 5)))
+        map0024 = max(0, min(100, self._param_int("MAP0024", 95)))
+        map0025_tenths_percent = max(0.0, min(50.0, self._param_float("MAP0025", 10.0)))
+        map0025 = map0025_tenths_percent / 10.0
+        return {
+            "map0023": str(map0023),
+            "map0024": str(map0024),
+            "map0025": f"{map0025:.1f}",
+        }
+
+    @staticmethod
+    def _wickler_master_threshold_mismatches(
+        master: dict[str, Any],
+        expected: dict[str, str],
+    ) -> list[str]:
+        mismatches: list[str] = []
+        for key, expected_value in expected.items():
+            if key not in master:
+                mismatches.append(f"{key} missing")
+                continue
+            actual = master.get(key)
+            if key in {"map0023", "map0024"}:
+                try:
+                    if int(float(str(actual))) == int(float(expected_value)):
+                        continue
+                except Exception:
+                    pass
+            else:
+                try:
+                    if abs(float(str(actual)) - float(expected_value)) <= 0.05:
+                        continue
+                except Exception:
+                    pass
+            mismatches.append(f"{key} is {actual}, expected {expected_value}")
+        return mismatches
 
     @staticmethod
     def _truthy_value(value: Any) -> bool:
@@ -1056,6 +1107,87 @@ class SetupWicklerOrchestrator:
         if "calibrated" in telemetry:
             return cls._truthy_value(telemetry.get("calibrated"))
         return True
+
+    @staticmethod
+    def _wickler_mode_key(value: Any) -> str:
+        return str(value or "").strip().lower().replace("\u00f6", "oe")
+
+    def _wickler_state_faults(
+        self,
+        client: SmartWicklerClient,
+        state: dict[str, Any],
+        *,
+        abort_not_calibrated: bool,
+        abort_external_stop: bool,
+        abort_dancer_range: bool,
+    ) -> list[str]:
+        role = self._wickler_role(client)
+        label = self._wickler_label(client)
+        telemetry = state.get("telemetry") or {}
+        drive = state.get("drive") or {}
+        values = state.get("values") or {}
+        mode = str(telemetry.get("modeLabel") or "")
+        mode_css = str(telemetry.get("modeCss") or "")
+        mode_key = self._wickler_mode_key(mode)
+        mode_css_key = self._wickler_mode_key(mode_css)
+        reason = str(telemetry.get("faultReason") or "").strip()
+        device = state.get("device") or {}
+        try:
+            wipe_percent = float(telemetry.get("wipePercent"))
+        except Exception:
+            wipe_percent = 50.0
+
+        role_prefix = f"{label} ({role})"
+        faults: list[str] = []
+        offline = (
+            mode_key == "offline"
+            or (state.get("ok") is False and not bool(device.get("reachable", True)))
+            or (bool(device) and not bool(device.get("reachable", True)))
+        )
+        if offline:
+            count = self._wickler_offline_fault_counts.get(role, 0) + 1
+            self._wickler_offline_fault_counts[role] = count
+            if count >= 3:
+                faults.append(f"{role_prefix} offline: {reason or device.get('error') or 'Endpoint nicht erreichbar'}")
+            return faults
+
+        self._wickler_offline_fault_counts[role] = 0
+        if abort_not_calibrated and not self._wickler_calibrated(telemetry):
+            faults.append(f"{role_prefix} Wippe nicht eingemessen")
+        if abort_dancer_range:
+            if wipe_percent <= WICKLER_MOTION_ABORT_LOW_PERCENT:
+                faults.append(f"{role_prefix} Wippe im unteren Sicherheitsbereich ({wipe_percent:.1f}%)")
+            elif wipe_percent >= WICKLER_MOTION_ABORT_HIGH_PERCENT:
+                faults.append(f"{role_prefix} Wippe im oberen Sicherheitsbereich ({wipe_percent:.1f}%)")
+        if (
+            mode_css_key == "fault"
+            or mode_key in {"stoerung", "fault", "fehler"}
+            or str(values.get("statusMas") or "").strip() == "4"
+        ):
+            faults.append(f"{role_prefix} rot: {reason or mode or mode_css or 'MAS-Status 4'}")
+        if abort_external_stop and bool(telemetry.get("externalStopActive")):
+            faults.append(f"{role_prefix} externer STOP aktiv")
+        if drive.get("online") is False:
+            faults.append(f"{role_prefix} AZD offline")
+        if drive.get("lastCommandOk") is False:
+            faults.append(f"{role_prefix} letzter AZD-Befehl fehlgeschlagen")
+        if bool(drive.get("alarm")):
+            faults.append(f"{role_prefix} AZD alarm {drive.get('alarmCode')}")
+        for key, text in (
+            ("maeLow", "Taenzerarm zu tief"),
+            ("maeHigh", "Taenzerarm zu hoch"),
+            ("maeBlocked", "Taenzerarm blockiert"),
+        ):
+            if bool(values.get(key)):
+                faults.append(f"{role_prefix} {text}")
+        for key, text in (
+            ("faultTooLow", "Taenzerarm zu tief"),
+            ("faultTooHigh", "Taenzerarm zu hoch"),
+            ("faultBlocked", "Taenzerarm blockiert"),
+        ):
+            if bool(telemetry.get(key)):
+                faults.append(f"{role_prefix} {text}")
+        return faults
 
     def _wickler_faults_during_motor3_motion(self) -> list[str]:
         faults: list[str] = []
@@ -1196,6 +1328,15 @@ class SetupWicklerOrchestrator:
             telemetry = state.get("telemetry") or {}
             drive = state.get("drive") or {}
             mode = str(telemetry.get("modeLabel") or "")
+            faults = self._wickler_state_faults(
+                client,
+                state,
+                abort_not_calibrated=False,
+                abort_external_stop=require_motion_ready,
+                abort_dancer_range=False,
+            )
+            if faults:
+                raise RuntimeError("Wickler-Bereitschaft blockiert: " + "; ".join(faults))
             calibrated = self._wickler_calibrated(telemetry)
             try:
                 wipe_percent = float(telemetry.get("wipePercent"))
@@ -1408,6 +1549,15 @@ class SetupWicklerOrchestrator:
                 drive = state.get("drive") or {}
                 values = state.get("values") or {}
                 mode = str(telemetry.get("modeLabel") or "")
+                faults = self._wickler_state_faults(
+                    client,
+                    state,
+                    abort_not_calibrated=False,
+                    abort_external_stop=require_motion_ready,
+                    abort_dancer_range=False,
+                )
+                if faults:
+                    raise RuntimeError("Wickler-Bereitschaft blockiert: " + "; ".join(faults))
                 calibrated = self._wickler_calibrated(telemetry)
                 mode_ready = mode in {"Bereit", "Warnung"} and calibrated and not bool(drive.get("alarm"))
                 motion_ready = (
@@ -1456,9 +1606,25 @@ class SetupWicklerOrchestrator:
 
     def _param_int(self, key: str, default: int = 0) -> int:
         try:
-            return int(float(str(self.params.get_effective_value(key) or default).strip()))
+            return int(float(self._param_text(key, default)))
         except Exception:
             return int(default)
+
+    def _param_float(self, key: str, default: float = 0.0) -> float:
+        try:
+            return float(self._param_text(key, default))
+        except Exception:
+            return float(default)
+
+    def _param_text(self, key: str, default: object = "") -> str:
+        try:
+            if self.params.get_meta(key) is None and self.params.get_value(key) is None:
+                return str(default)
+            value = self.params.get_effective_value(key)
+        except Exception:
+            value = default
+        text = str(value if value is not None else "").strip()
+        return text if text else str(default)
 
     def _sensor_teach_ms(self, speed_mm_s: float) -> int:
         return int(self.defaults.sensor_teach_min_ms)

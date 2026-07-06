@@ -4340,6 +4340,34 @@ class MachineRuntime:
             "speed_mm_s": speed_mm_s,
             "ramp_mm_s2": ramp_mm_s2,
             "wickler_standby_percent": PRODUCTION_WICKLER_STANDBY_PERCENT,
+            "wickler_master_thresholds": self._wickler_master_threshold_payload(param_map),
+        }
+
+    def _param_effective_or_default(self, key: str, default: object) -> str:
+        try:
+            if self.params.get_meta(key) is None and self.params.get_value(key) is None:
+                return str(default)
+            value = self.params.get_effective_value(key)
+        except Exception:
+            value = default
+        text = str(value if value is not None else "").strip()
+        return text if text else str(default)
+
+    def _wickler_master_threshold_payload(self, param_map: dict[str, str] | None = None) -> dict[str, str]:
+        values = param_map if isinstance(param_map, dict) else {}
+
+        def _raw(key: str, default: object) -> str:
+            text = str(values.get(key, "")).strip()
+            return text if text else self._param_effective_or_default(key, default)
+
+        map0023 = max(0, min(100, _safe_int(_raw("MAP0023", 5), 5)))
+        map0024 = max(0, min(100, _safe_int(_raw("MAP0024", 95), 95)))
+        map0025_tenths_percent = max(0.0, min(50.0, _safe_float(_raw("MAP0025", 10.0), 10.0)))
+        map0025 = map0025_tenths_percent / 10.0
+        return {
+            "map0023": str(map0023),
+            "map0024": str(map0024),
+            "map0025": f"{map0025:.1f}",
         }
 
     def _production_esp(
@@ -4868,7 +4896,8 @@ class MachineRuntime:
 
     def _production_wickler_indexed_payload(self, plan: dict[str, Any], travel_mm: float) -> dict[str, str]:
         safe_travel_mm = max(1.0, min(PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM, float(travel_mm)))
-        return {
+        payload = dict(plan.get("wickler_master_thresholds") or self._wickler_master_threshold_payload())
+        payload.update({
             "indexedModeEnabled": "1",
             "indexedTravelMm": f"{safe_travel_mm:.3f}",
             "indexedDirection": "1",
@@ -4876,7 +4905,8 @@ class MachineRuntime:
             "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
             "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
             "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
-        }
+        })
+        return payload
 
     def _production_wickler_reverse_indexed_payload(
         self,
@@ -4887,7 +4917,8 @@ class MachineRuntime:
     ) -> dict[str, str]:
         safe_travel_mm = max(1.0, min(PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM, float(travel_mm)))
         safe_speed_mm_s = max(5.0, min(float(plan.get("speed_mm_s", 100.0)), float(speed_mm_s)))
-        return {
+        payload = dict(plan.get("wickler_master_thresholds") or self._wickler_master_threshold_payload())
+        payload.update({
             "indexedModeEnabled": "1",
             "indexedTravelMm": f"{safe_travel_mm:.3f}",
             "indexedDirection": "-1",
@@ -4895,7 +4926,8 @@ class MachineRuntime:
             "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
             "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
             "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
-        }
+        })
+        return payload
 
     def _prepare_production_wicklers_continuous(
         self,
@@ -4906,6 +4938,7 @@ class MachineRuntime:
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         master_payload = {
+            **dict(plan.get("wickler_master_thresholds") or self._wickler_master_threshold_payload()),
             "indexedModeEnabled": "0",
             "indexedSpeedMmS": f"{float(plan['speed_mm_s']):.3f}",
             "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
@@ -4925,8 +4958,11 @@ class MachineRuntime:
             ready_reply = client.release_for_continuous_motion(timeout_s=timeout_s)
             if not ready_reply.get("ok", True):
                 raise RuntimeError(f"{client.descriptor.label} ready failed: {ready_reply}")
-            state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
-            verify = self._verify_wickler_production_state(role, state, require_indexed_mode=False)
+            state, verify = self._wait_production_wickler_continuous_prepared(
+                client,
+                role,
+                timeout_s=timeout_s,
+            )
             result = {
                 "role": role,
                 "reason": reason,
@@ -4939,6 +4975,25 @@ class MachineRuntime:
             if not verify.get("ok"):
                 raise RuntimeError(f"{client.descriptor.label} nicht kontinuierlich produktionsbereit: {verify}")
         return results
+
+    def _wait_production_wickler_continuous_prepared(
+        self,
+        client: SmartWicklerClient,
+        role: str,
+        *,
+        timeout_s: float,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        deadline = time.monotonic() + max(0.2, float(timeout_s))
+        last_state: dict[str, Any] = {}
+        last_verify: dict[str, Any] = {}
+        while True:
+            last_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
+            last_verify = self._verify_wickler_production_state(role, last_state, require_indexed_mode=False)
+            if bool(last_verify.get("ok")):
+                return last_state, last_verify
+            if time.monotonic() >= deadline:
+                return last_state, last_verify
+            time.sleep(0.05)
 
     def _wait_production_wickler_indexed_prepared(
         self,
@@ -6398,7 +6453,10 @@ class MachineRuntime:
             item: dict[str, Any] = {"role": role}
             errors: list[str] = []
             try:
-                item["indexed_disable"] = client.post_master({"indexedModeEnabled": "0"}, timeout_s=1.0)
+                item["indexed_disable"] = client.post_master(
+                    {"indexedModeEnabled": "0", **self._wickler_master_threshold_payload()},
+                    timeout_s=1.0,
+                )
                 if not item["indexed_disable"].get("ok", True):
                     errors.append(f"indexed_disable rejected: {item['indexed_disable']}")
             except Exception as exc:
@@ -10136,7 +10194,10 @@ class MachineRuntime:
                 role_detail["steps"].append({"step": "skipped", "ok": True, "reason": "simulation_or_endpoint_missing"})
                 return role_detail, role_failures
             try:
-                reply = client.post_master({"indexedModeEnabled": "0"}, timeout_s=8.0)
+                reply = client.post_master(
+                    {"indexedModeEnabled": "0", **self._wickler_master_threshold_payload()},
+                    timeout_s=8.0,
+                )
                 role_detail["steps"].append({"step": "disable_indexed_mode", "ok": bool(reply.get("ok", True)), "reply": reply})
                 if reply.get("ok") is False:
                     role_failures.append(f"{role} disable_indexed_mode: {reply}")

@@ -691,9 +691,50 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
             return_value=[FakeWicklerClient("unwinder"), FakeWicklerClient("rewinder")]
         )
 
-        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep"):
-            with self.assertRaisesRegex(RuntimeError, "motion-ready"):
+        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "externer STOP aktiv"):
                 self.controller._wait_wicklers_ready(timeout_s=0.01, require_motion_ready=True)
+        sleep.assert_not_called()
+
+    def test_wickler_ready_wait_aborts_immediately_on_fault_state(self):
+        class FakeDescriptor:
+            def __init__(self, role: str, label: str):
+                self.role = role
+                self.label = label
+
+        class FakeWicklerClient:
+            def __init__(self, role: str, label: str):
+                self.descriptor = FakeDescriptor(role, label)
+
+            def fetch_state(self):
+                return {
+                    "telemetry": {
+                        "modeLabel": "Stoerung",
+                        "modeCss": "fault",
+                        "faultReason": "Stoerung",
+                        "wipePercent": 29.3,
+                        "calibrationPhase": 1,
+                    },
+                    "drive": {
+                        "alarm": False,
+                        "continuousModeReady": False,
+                        "lastCommandOk": True,
+                    },
+                    "values": {"statusMas": 4},
+                }
+
+        self.controller._winder_clients = Mock(
+            return_value=[FakeWicklerClient("unwinder", "Abwickler")]
+        )
+
+        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep") as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Wickler-Bereitschaft blockiert: Abwickler \(unwinder\) rot",
+            ):
+                self.controller._wait_wicklers_ready(timeout_s=90.0)
+
+        sleep.assert_not_called()
 
     def test_wickler_ready_motion_commands_are_started_in_parallel(self):
         barrier = threading.Barrier(2, timeout=1.0)
@@ -953,7 +994,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
                 return {"ok": True, "payload": payload}
 
             def fetch_state(self):
-                return {"master": {"map0047": False}}
+                return {"master": {"map0023": 5, "map0024": 95, "map0025": 1.0, "map0047": False}}
 
         self.controller._sync_setup_params_to_esp = Mock()
         self.controller._configure_motor3 = Mock()
@@ -997,7 +1038,25 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertNotIn("wicklers:stop", result["applied"])
         self.assertEqual([{"role": "all", "action": "ready_motion", "ok": True}], result["final_wickler_ready"])
         for fake in fake_wicklers:
-            self.assertEqual([{"indexedModeEnabled": "0", "map0047": "0"}], fake.master_payloads)
+            self.assertEqual(
+                [
+                    {
+                        "indexedModeEnabled": "0",
+                        "map0023": "5",
+                        "map0024": "95",
+                        "map0025": "1.0",
+                        "map0047": "0",
+                    }
+                ],
+                fake.master_payloads,
+            )
+
+    def test_wickler_setup_threshold_payload_converts_map0025_tenths_percent(self):
+        _insert_param(self.db, "MAP0025", "1")
+
+        payload = self.controller._wickler_master_threshold_payload()
+
+        self.assertEqual("0.1", payload["map0025"])
 
     def test_setup_aborts_when_wickler_map0047_sync_is_not_confirmed(self):
         class FakeWicklerClient:
