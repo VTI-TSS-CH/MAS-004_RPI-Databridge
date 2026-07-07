@@ -11614,7 +11614,12 @@ class MachineRuntime:
             result.update({"ok": True, "value": bool(desired), "write": write_result})
         except Exception as exc:
             result.update({"ok": False, "error": str(exc)})
-            self.logs.log("machine", "warning", f"SEA-Vision Ready Q0.2 konnte nicht gesetzt werden: {exc}")
+            pin_label = str(point.get("pin_label") or SEA_VISION_READY_IO_KEY)
+            self.logs.log(
+                "machine",
+                "warning",
+                f"SEA-Vision Ready {pin_label} konnte nicht gesetzt werden: {exc}",
+            )
         return result
 
     def _current_production_label(self) -> str:
