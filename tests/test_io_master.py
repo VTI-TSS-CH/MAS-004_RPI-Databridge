@@ -591,6 +591,52 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertLessEqual(captured["wait_timeout_s"], 2.0)
             self.assertGreaterEqual(captured["wait_timeout_s"], 0.5)
 
+    def test_esp_io_snapshot_default_allows_slow_field_response(self):
+        io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
+        io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_host="127.0.0.1",
+                    esp_port=3010,
+                    esp_simulation=False,
+                    esp_connect_timeout_s=1.5,
+                    esp_read_timeout_s=2.0,
+                ),
+                store,
+            )
+            captured = {}
+
+            class FakeEspClient:
+                def __init__(self, host, port, timeout_s):
+                    pass
+
+                def diagnostics(self):
+                    return {"queue_depth": 0, "active_line": "", "priority_until_at": 0.0}
+
+                def exchange_line(self, line, read_timeout_s=None, **kwargs):
+                    captured["line"] = line
+                    captured["read_timeout_s"] = read_timeout_s
+                    captured.update(kwargs)
+                    return '{"points":{"I0.0":1,"I0.7":1,"I0.8":1}}'
+
+            with patch("mas004_rpi_databridge.io_runtime.EspPlcClient", FakeEspClient):
+                result = runtime.refresh(include_points=False, device_codes={"esp32_plc58"})
+
+            self.assertTrue(result["devices"][0]["reachable"])
+            self.assertEqual("IO SNAPSHOT?", captured["line"])
+            self.assertEqual(1.5, captured["read_timeout_s"])
+            self.assertGreaterEqual(captured["wait_timeout_s"], 2.0)
+
     def test_esp_io_snapshot_timeout_closes_broker_socket_for_reconnect(self):
         io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
         io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""
@@ -635,6 +681,36 @@ class IoMasterImportTests(unittest.TestCase):
 
             self.assertFalse(result["devices"][0]["reachable"])
             self.assertEqual([True], closed)
+
+    def test_field_io_offline_debounce_keeps_recent_live_snapshot(self):
+        io_runtime_module._DEVICE_OFFLINE_FAILURES.clear()
+        io_runtime_module._DEVICE_LAST_LIVE_MONOTONIC.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            store.upsert_value("esp32_plc58__I0_0", "1", "live", "test")
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_simulation=False,
+                    field_io_offline_debounce_failures=10,
+                    field_io_offline_grace_s=45,
+                ),
+                store,
+            )
+            points = store.list_points(device_code="esp32_plc58", include_reserved=True)
+
+            for _ in range(5):
+                result = runtime._apply_static_quality("esp32_plc58", points, "offline", "esp32", "timed out")
+                self.assertTrue(result["debounced"], result)
+
+            self.assertEqual("live", store.get_point("esp32_plc58__I0_0")["quality"])
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ _MOXA_DEVICE_CODES = {
     "moxa_e1213_2",
     "moxa_e1213_3",
 }
+_FIELD_IO_DEVICE_CODES = {"esp32_plc58"} | _MOXA_DEVICE_CODES
 _RPIPLC21_ANALOG_DIGITAL_INPUTS = {"I0.7", "I0.8", "I0.9", "I0.10", "I0.11", "I0.12"}
 
 
@@ -415,9 +416,9 @@ class IoRuntime:
             snapshot_timeout_s = max(
                 0.25,
                 min(
-                    self.cfg.get_float("esp_io_snapshot_timeout_s", 0.75),
+                    self.cfg.get_float("esp_io_snapshot_timeout_s", 1.5),
                     self.cfg.get_float("esp_read_timeout_s", 2.0),
-                    1.0,
+                    2.0,
                 ),
             )
             snapshot_wait_timeout_s = max(
@@ -426,7 +427,7 @@ class IoRuntime:
                     max(0.25, min(self.cfg.get_float("esp_connect_timeout_s", 1.5), 0.6))
                     + snapshot_timeout_s
                     + 0.25,
-                    1.2,
+                    2.5,
                 ),
             )
             raw = client.exchange_line(
@@ -612,6 +613,9 @@ class IoRuntime:
         _DEVICE_OFFLINE_FAILURES[code] = failures
         threshold = max(1, int(self.cfg.get_float("io_offline_debounce_failures", 3.0)))
         grace_s = max(0.0, min(self.cfg.get_float("io_offline_grace_s", 8.0), 60.0))
+        if code in _FIELD_IO_DEVICE_CODES:
+            threshold = max(threshold, int(self.cfg.get_float("field_io_offline_debounce_failures", 10.0)))
+            grace_s = max(grace_s, min(self.cfg.get_float("field_io_offline_grace_s", 45.0), 180.0))
         if failures >= threshold:
             return False
 

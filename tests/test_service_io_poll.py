@@ -32,6 +32,16 @@ def test_field_io_unhealthy_ignores_reachable_and_broker_busy_skip():
         0.02,
     )
     assert not _io_poll_field_io_unhealthy(
+        "esp32_plc58",
+        {"devices": [{"reachable": False, "debounced": True, "error": "ESP command broker request timed out"}]},
+        1.5,
+    )
+    assert not _io_poll_field_io_unhealthy(
+        "esp32_plc58",
+        {"devices": [{"reachable": False, "cooldown": True, "error": "ESP IO cooldown active"}]},
+        1.5,
+    )
+    assert not _io_poll_field_io_unhealthy(
         "raspi_plc21",
         {"devices": [{"reachable": False, "error": "timed out"}]},
         1.5,
