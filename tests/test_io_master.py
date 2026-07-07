@@ -9,6 +9,7 @@ from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime, _MoxaEndpointCooldown
+from mas004_rpi_databridge.moxa_iologik import MoxaProtocolError
 
 
 class IoMasterImportTests(unittest.TestCase):
@@ -355,7 +356,50 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual("live", store.get_point("moxa_e1213_3__DIO0")["quality"])
             self.assertEqual("1", store.get_point("moxa_e1213_3__DIO0")["value"])
 
-    def test_full_refresh_handles_esp_after_other_devices(self):
+    def test_moxa_protocol_error_does_not_cooldown_shared_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    moxa3_host="127.0.0.1",
+                    moxa3_port=502,
+                    moxa3_simulation=False,
+                    moxa_timeout_s=0.3,
+                ),
+                store,
+            )
+
+            class FakeMoxa:
+                calls = 0
+                labels = []
+
+                def read_outputs(self, labels=None):
+                    self.labels.append(tuple(labels or ()))
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise MoxaProtocolError("MOXA exception 2")
+                    return {"DIO0": 1}
+
+            fake = FakeMoxa()
+            with patch.object(runtime, "_moxa_client", return_value=fake):
+                first = runtime.refresh(include_points=False, device_codes={"moxa_e1213_3"})
+                second = runtime.refresh(include_points=False, device_codes={"moxa_e1213_3"})
+
+            self.assertFalse(first["devices"][0]["reachable"])
+            self.assertTrue(second["devices"][0]["reachable"])
+            self.assertEqual([("DIO0",), ("DIO0",)], fake.labels)
+            self.assertEqual("live", store.get_point("moxa_e1213_3__DIO0")["quality"])
+            self.assertEqual("1", store.get_point("moxa_e1213_3__DIO0")["value"])
+
+    def test_full_refresh_handles_esp_before_local_raspi_io(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "io.xlsx"
             db_path = Path(tmpdir) / "io.sqlite3"
@@ -385,7 +429,8 @@ class IoMasterImportTests(unittest.TestCase):
             with patch.object(runtime, "_refresh_device", side_effect=fake_refresh):
                 runtime.refresh(include_points=False)
 
-            self.assertEqual("esp32_plc58", order[-1])
+            self.assertEqual("esp32_plc58", order[0])
+            self.assertEqual("raspi_plc21", order[-1])
 
     def test_esp_io_snapshot_uses_short_broker_wait_timeout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
