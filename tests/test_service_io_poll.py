@@ -1,7 +1,7 @@
 from mas004_rpi_databridge.service import _io_poll_field_io_unhealthy
 
 
-def test_field_io_unhealthy_detects_slow_unreachable_eth1_device():
+def test_field_io_unhealthy_ignores_single_slow_unreachable_field_device():
     result = {
         "devices": [
             {
@@ -12,7 +12,7 @@ def test_field_io_unhealthy_detects_slow_unreachable_eth1_device():
         ]
     }
 
-    assert _io_poll_field_io_unhealthy("moxa_e1213_1", result, 1.5)
+    assert not _io_poll_field_io_unhealthy("moxa_e1213_1", result, 1.5)
 
 
 def test_field_io_unhealthy_ignores_reachable_and_broker_busy_skip():

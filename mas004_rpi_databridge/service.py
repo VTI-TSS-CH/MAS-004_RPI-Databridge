@@ -396,7 +396,7 @@ def _io_poll_field_io_unhealthy(device_code: str, result: dict[str, object], ela
         return False
     devices = result.get("devices") if isinstance(result, dict) else None
     if not isinstance(devices, list) or not devices:
-        return bool(float(elapsed_s or 0.0) >= 1.0)
+        return False
     device = devices[0] if isinstance(devices[0], dict) else {}
     if bool(device.get("reachable")):
         return False
@@ -406,8 +406,9 @@ def _io_poll_field_io_unhealthy(device_code: str, result: dict[str, object], ela
         return False
     if bool(device.get("cooldown")):
         return False
-    elapsed = float(elapsed_s or 0.0)
-    return bool(elapsed >= 0.5 or device.get("error"))
+    # Field devices already have per-device debounce/cooldown. A single slow or
+    # timed-out snapshot must not pause polling of the whole ESP/MOXA segment.
+    return False
 
 
 def io_runtime_loop(cfg_path: str):
@@ -482,7 +483,7 @@ def io_runtime_loop(cfg_path: str):
                 elapsed = time.monotonic() - started
                 if elapsed >= 1.0:
                     print(f"[IO] slow poll device={device_code} elapsed_s={elapsed:.3f}", flush=True)
-                next_due_by_device[device_code] = max(started + intervals[device_code], time.monotonic())
+                next_due_by_device[device_code] = time.monotonic() + intervals[device_code]
                 if _io_poll_field_io_unhealthy(device_code, result, elapsed):
                     field_io_cooldown_until = time.monotonic() + FIELD_IO_OUTAGE_COOLDOWN_S
                     for field_device_code in FIELD_IO_DEVICE_CODES:
