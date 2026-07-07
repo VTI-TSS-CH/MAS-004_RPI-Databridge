@@ -5742,16 +5742,63 @@ class MachineRuntime:
                     results.append({"role": role, "ok": True, "simulation": True})
                     continue
                 raise RuntimeError(f"{client.descriptor.label} endpoint missing")
-            master_reply = client.post_master(master_payload, timeout_s=timeout_s)
-            if not master_reply.get("ok", True):
-                raise RuntimeError(f"{client.descriptor.label} reverse indexed master failed: {master_reply}")
-            state, verify = self._wait_production_wickler_indexed_prepared(
-                client,
-                role,
-                timeout_s=timeout_s,
-            )
-            telemetry = dict((state or {}).get("telemetry") or {})
-            master = dict((state or {}).get("master") or {})
+            master_reply: dict[str, Any] = {}
+            ready_reply: dict[str, Any] = {"ok": True, "unchanged": True, "source": "already_ready_assumed"}
+            clear_reply: dict[str, Any] | None = None
+            state: dict[str, Any] = {}
+            verify: dict[str, Any] = {}
+            telemetry: dict[str, Any] = {}
+            master: dict[str, Any] = {}
+            prepare_attempts: list[dict[str, Any]] = []
+            for attempt in range(1, 3):
+                if attempt > 1:
+                    clear_reply = client.post_mode("stop", timeout_s=timeout_s)
+                    if not clear_reply.get("ok", True):
+                        raise RuntimeError(f"{client.descriptor.label} reverse indexed clear failed: {clear_reply}")
+                    time.sleep(0.05)
+                    ready_reply = client.release_for_continuous_motion(timeout_s=timeout_s)
+                    if not ready_reply.get("ok", True):
+                        raise RuntimeError(f"{client.descriptor.label} ready failed before reverse indexed prepare: {ready_reply}")
+                master_reply = client.post_master(master_payload, timeout_s=timeout_s)
+                if not master_reply.get("ok", True):
+                    raise RuntimeError(f"{client.descriptor.label} reverse indexed master failed: {master_reply}")
+                state, verify = self._wait_production_wickler_indexed_prepared(
+                    client,
+                    role,
+                    timeout_s=timeout_s,
+                )
+                telemetry = dict((state or {}).get("telemetry") or {})
+                master = dict((state or {}).get("master") or {})
+                observed_direction = _safe_int(telemetry.get("indexedDirection", master.get("indexedDirection")), 1)
+                reverse_direction_ready = observed_direction < 0
+                prepare_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "ok": bool(verify.get("ok")) and reverse_direction_ready,
+                        "verify_ok": bool(verify.get("ok")),
+                        "indexed_direction": observed_direction,
+                        "clear": clear_reply,
+                        "ready": ready_reply,
+                    }
+                )
+                if bool(verify.get("ok")) and reverse_direction_ready:
+                    break
+                if bool(verify.get("ok")) and not reverse_direction_ready and attempt == 1:
+                    self.logs.log(
+                        "machine",
+                        "warning",
+                        (
+                            f"Wickler-Rueckspultakt {client.descriptor.label}: "
+                            f"alter Vorwaerts-Indexed-Befehl noch eingefroren "
+                            f"(Richtung {observed_direction}), neutralisiere und bereite neu vor"
+                        ),
+                    )
+                    continue
+                if not verify.get("ok"):
+                    raise RuntimeError(f"{client.descriptor.label} nicht rueckspulbereit: {verify}")
+                raise RuntimeError(
+                    f"{client.descriptor.label} Rueckspultakt Richtung nicht uebernommen: {prepare_attempts[-1]}"
+                )
             indexed_plan = {
                 "base_travel_mm": float(travel_mm),
                 "master_travel_mm": _safe_float(master.get("indexedTravelMm"), travel_mm),
@@ -5769,6 +5816,9 @@ class MachineRuntime:
                 "travel_mm": float(travel_mm),
                 "speed_mm_s": float(speed_mm_s),
                 "indexed_plan": indexed_plan,
+                "ready": ready_reply,
+                "clear": clear_reply,
+                "prepare_attempts": prepare_attempts,
                 "master": master_reply,
                 "verify": verify,
             }
@@ -5778,14 +5828,17 @@ class MachineRuntime:
                 "info",
                 (
                     f"Wickler-Rueckspultakt vorbereitet {client.descriptor.label}: "
-                    f"Basis {float(travel_mm):.3f}mm, Richtung -1, "
+                    f"Basis {float(travel_mm):.3f}mm, Richtung {indexed_plan['indexed_direction']}, "
                     f"Wippe {indexed_plan['wipe_percent']:.1f}%, "
                     f"effektiv {indexed_plan['prepared_travel_mm']:.3f}mm, "
-                    f"Seq {indexed_plan['command_seq']}"
+                    f"Seq {indexed_plan['command_seq']}, "
+                    f"Versuche {len(prepare_attempts)}"
                 ),
             )
             if not verify.get("ok"):
                 raise RuntimeError(f"{client.descriptor.label} nicht rueckspulbereit: {verify}")
+            if indexed_plan["indexed_direction"] >= 0:
+                raise RuntimeError(f"{client.descriptor.label} Rueckspultakt Richtung nicht rueckwaerts: {result}")
         return results
 
     def _prepare_next_production_wickler_takt(self, *, label_no: int, reason: str) -> dict[str, Any]:
