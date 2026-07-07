@@ -301,6 +301,16 @@ class SetupWicklerOrchestrator:
             f"MOTOR 3 SET speed_mm_s={speed:.3f} accel_mm_s2={ramp:.3f} decel_mm_s2={ramp:.3f}"
         )
 
+    def _setup_learn_speed_mm_s(self) -> float:
+        try:
+            value = self.params.get_effective_value("MAP0014")
+            speed = abs(float(str(value or "").strip()))
+        except Exception:
+            speed = 0.0
+        if speed <= 0.0:
+            speed = float(self.defaults.learn_speed_mm_s)
+        return max(1.0, min(250.0, speed))
+
     def _motor3_operable(self, motor: dict[str, Any]) -> bool:
         return (
             bool(motor.get("link_ok") or motor.get("linkOk"))
@@ -933,7 +943,7 @@ class SetupWicklerOrchestrator:
                 self._esp(f"MOTOR 3 MOVE_REL_STEPS={correction_steps}", read_timeout_s=5.0)
             else:
                 self._esp(f"MOTOR 3 MOVE_REL_MM_OP={correction_mm:.3f}", read_timeout_s=5.0)
-            move_timeout = max(5.0, abs(correction_mm) / max(1.0, self.defaults.learn_speed_mm_s) + 4.0)
+            move_timeout = max(5.0, abs(correction_mm) / self._setup_learn_speed_mm_s() + 4.0)
             state = self._wait_motor3_idle(timeout_s=move_timeout, min_wait_s=0.1)
             self._hold_wicklers_for_motor3_postpositioning()
 
@@ -2003,7 +2013,7 @@ class SetupWicklerOrchestrator:
         return measurement, diameter_learning
 
     def run(self, wait_for_format_axes: Callable[[], Any] | None = None) -> dict[str, Any]:
-        speed = self.defaults.learn_speed_mm_s
+        speed = self._setup_learn_speed_mm_s()
         ramp = self.defaults.learn_ramp_mm_s2
         format_axes_ok: bool | None = None
         try:

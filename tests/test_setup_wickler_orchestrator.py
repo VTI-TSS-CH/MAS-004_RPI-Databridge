@@ -1058,6 +1058,11 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
 
         self.assertEqual("0.1", payload["map0025"])
 
+    def test_setup_measurement_uses_map0014_speed(self):
+        _insert_param(self.db, "MAP0014", "200")
+
+        self.assertEqual(200.0, self.controller._setup_learn_speed_mm_s())
+
     def test_setup_aborts_when_wickler_map0047_sync_is_not_confirmed(self):
         class FakeWicklerClient:
             def post_master(self, payload, timeout_s: float | None = None):
