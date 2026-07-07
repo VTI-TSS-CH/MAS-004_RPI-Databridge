@@ -4,6 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -50,8 +51,8 @@ class MachineSetupAuthTests(unittest.TestCase):
         pkey: str,
         default_v: str,
         *,
-        min_v: float | None = None,
-        max_v: float | None = None,
+        min_v: Optional[float] = None,
+        max_v: Optional[float] = None,
     ) -> None:
         db = DB(self._cfg["db_path"])
         with db._conn() as c:
@@ -168,6 +169,31 @@ class MachineSetupAuthTests(unittest.TestCase):
         led_test_api = client.post("/api/machine/led-test", json={"action": "start", "duration_ms": 1000})
         self.assertEqual(401, led_test_api.status_code)
         self.assertEqual("Machine-Setup login required", led_test_api.json()["detail"])
+
+    def test_io_overview_live_uses_cached_service_snapshot(self):
+        client = self.build_client(config_overrides={"esp_simulation": False})
+
+        login = client.post(
+            "/ui/machine-setup/login",
+            json={
+                "username": "Admin",
+                "password": "VideojetMAS004!",
+                "next": "/ui/machine-setup/io",
+            },
+        )
+        self.assertEqual(200, login.status_code)
+
+        with patch(
+            "mas004_rpi_databridge.webui.IoRuntime.refresh",
+            side_effect=AssertionError("IO monitor must not poll field hardware"),
+        ):
+            response = client.get("/api/io/overview?live=1")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["snapshot_only"])
+        self.assertEqual("io_monitor_uses_service_snapshot", payload["live_refresh_skipped"])
+        self.assertIn("points", payload)
 
     def test_machine_setup_login_unlocks_ui_and_api(self):
         client = self.build_client()
