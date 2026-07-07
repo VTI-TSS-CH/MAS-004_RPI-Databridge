@@ -143,6 +143,7 @@ class IoRuntime:
         enabled: bool,
         *,
         force: bool = False,
+        priority: bool = False,
         source: str = "runtime",
         best_effort: bool = False,
         override_owner: bool = False,
@@ -171,6 +172,7 @@ class IoRuntime:
                     bool(override_value),
                     source=override_source,
                     best_effort=True,
+                    priority=priority,
                     record_quality="override",
                     record_source=override_source,
                 )
@@ -184,7 +186,13 @@ class IoRuntime:
                 "source": source,
             }
 
-        return self._write_physical_output(point, bool(enabled), source=source, best_effort=best_effort)
+        return self._write_physical_output(
+            point,
+            bool(enabled),
+            source=source,
+            best_effort=best_effort,
+            priority=priority,
+        )
 
     def _write_physical_output(
         self,
@@ -193,6 +201,7 @@ class IoRuntime:
         *,
         source: str,
         best_effort: bool = False,
+        priority: bool = False,
         record_quality: str | None = None,
         record_source: str | None = None,
     ) -> Dict[str, Any]:
@@ -225,6 +234,7 @@ class IoRuntime:
                 response = client.exchange_line(
                     f"IO SET {point['pin_label']}={requested_value}",
                     read_timeout_s=command_timeout_s,
+                    priority=priority,
                 )
                 if "NAK" in (response or "").upper():
                     raise RuntimeError(response)
@@ -321,6 +331,103 @@ class IoRuntime:
 
         raise RuntimeError(f"Unsupported writable IO device '{device_code}'")
 
+    def _verify_physical_output(
+        self,
+        point: Dict[str, Any],
+        enabled: bool,
+        *,
+        source: str,
+        attempts: int = 3,
+    ) -> Dict[str, Any]:
+        device_code = str(point.get("device_code") or "")
+        pin_label = str(point.get("pin_label") or "").strip()
+        expected_value = 1 if enabled else 0
+        attempts = max(1, int(attempts or 1))
+        if not pin_label:
+            return {"ok": True, "skipped": "pin_missing", "expected_value": expected_value}
+        if device_code == "esp32_plc58":
+            if bool(self.cfg.esp_simulation) or not (self.cfg.esp_host or "").strip() or int(self.cfg.esp_port or 0) <= 0:
+                return {"ok": True, "skipped": "simulation", "expected_value": expected_value}
+            errors: list[str] = []
+            for attempt in range(1, attempts + 1):
+                try:
+                    connect_timeout_s = max(0.25, min(self.cfg.get_float("esp_connect_timeout_s", 1.5), 0.6))
+                    snapshot_timeout_s = max(
+                        0.25,
+                        min(
+                            self.cfg.get_float("esp_io_snapshot_timeout_s", 1.5),
+                            self.cfg.get_float("esp_read_timeout_s", 2.0),
+                            2.0,
+                        ),
+                    )
+                    client = EspPlcClient(self.cfg.esp_host, int(self.cfg.esp_port or 0), timeout_s=connect_timeout_s)
+                    raw = client.exchange_line(
+                        "IO SNAPSHOT?",
+                        read_timeout_s=snapshot_timeout_s,
+                        priority=True,
+                        wait_timeout_s=max(0.75, min(connect_timeout_s + snapshot_timeout_s + 0.5, 3.0)),
+                    )
+                    payload = json.loads(raw or "{}")
+                    snapshot = payload.get("points") if isinstance(payload, dict) else {}
+                    observed = _to_int01((snapshot or {}).get(pin_label, -1))
+                    if observed == expected_value:
+                        return {
+                            "ok": True,
+                            "device_code": device_code,
+                            "pin_label": pin_label,
+                            "expected_value": expected_value,
+                            "observed_value": observed,
+                            "attempt": attempt,
+                        }
+                    errors.append(f"attempt {attempt}: observed {observed}, expected {expected_value}")
+                except Exception as exc:
+                    errors.append(f"attempt {attempt}: {exc}")
+                if attempt < attempts:
+                    self._write_physical_output(
+                        point,
+                        bool(enabled),
+                        source=source,
+                        priority=True,
+                    )
+                    time.sleep(0.05)
+            raise RuntimeError(
+                f"IO force verification failed for {device_code} {pin_label}: " + "; ".join(errors)
+            )
+
+        if device_code in _MOXA_DEVICE_CODES:
+            host, port, simulation = self._moxa_target(device_code)
+            if simulation or not host or int(port or 0) <= 0:
+                return {"ok": True, "skipped": "simulation", "expected_value": expected_value}
+            errors: list[str] = []
+            for attempt in range(1, attempts + 1):
+                try:
+                    def _read():
+                        client = self._moxa_client(device_code, host, int(port))
+                        return client.read_outputs(labels=[pin_label])
+
+                    snapshot = self._moxa_call(device_code, _read)
+                    observed = _to_int01((snapshot or {}).get(pin_label, -1))
+                    if observed == expected_value:
+                        return {
+                            "ok": True,
+                            "device_code": device_code,
+                            "pin_label": pin_label,
+                            "expected_value": expected_value,
+                            "observed_value": observed,
+                            "attempt": attempt,
+                        }
+                    errors.append(f"attempt {attempt}: observed {observed}, expected {expected_value}")
+                except Exception as exc:
+                    errors.append(f"attempt {attempt}: {exc}")
+                if attempt < attempts:
+                    self._write_physical_output(point, bool(enabled), source=source, priority=True)
+                    time.sleep(0.05)
+            raise RuntimeError(
+                f"IO force verification failed for {device_code} {pin_label}: " + "; ".join(errors)
+            )
+
+        return {"ok": True, "skipped": "readback_unavailable", "expected_value": expected_value}
+
     def override_output(self, io_key: str, enabled: bool, source: str = "manual-ui") -> Dict[str, Any]:
         point = self.store.get_point(io_key)
         if not point:
@@ -332,22 +439,29 @@ class IoRuntime:
         previous_override_active = bool(point.get("override_active"))
         previous_override_value = point.get("override_value")
         previous_override_source = str(point.get("override_source") or "manual-ui")
+        previous_value = point.get("value", "0")
+        previous_quality = str(point.get("quality") or "unknown")
+        previous_source = str(point.get("source") or "runtime")
         override_result = self.store.set_override(io_key, 1 if enabled else 0, source=source)
         try:
             write_result = self.write_output(
                 io_key,
                 enabled,
                 force=True,
+                priority=True,
                 source=source,
                 override_owner=True,
             )
+            verify_result = self._verify_physical_output(point, enabled, source=source)
         except Exception:
             if previous_override_active:
                 self.store.set_override(io_key, previous_override_value, source=previous_override_source)
             else:
                 self.store.release_override(io_key)
+                self.store.upsert_value(io_key, previous_value, previous_quality, previous_source)
             raise
         write_result.update(override_result)
+        write_result["verify"] = verify_result
         return write_result
 
     def release_override(self, io_key: str) -> Dict[str, Any]:
@@ -374,11 +488,19 @@ class IoRuntime:
                 io_key,
                 True,
                 force=True,
+                priority=True,
                 source=source,
                 override_owner=True,
             )
+            high_verify = self._verify_physical_output(point, True, source=source)
         except Exception:
             self.store.release_override(io_key)
+            self.store.upsert_value(
+                io_key,
+                point.get("value", "0"),
+                point.get("quality") or "unknown",
+                point.get("source") or "runtime",
+            )
             raise
 
         time.sleep(duration_s)
@@ -388,10 +510,13 @@ class IoRuntime:
                 io_key,
                 False,
                 force=True,
+                priority=True,
                 source=source,
                 override_owner=True,
             )
+            low_verify = self._verify_physical_output(point, False, source=source)
         except Exception:
+            self.store.set_override(io_key, 1, source=source)
             raise
 
         release_result = self.store.release_override(io_key)
@@ -403,7 +528,9 @@ class IoRuntime:
             "duration_ms": int(round(duration_s * 1000.0)),
             "value": 0,
             "high": high_result,
+            "high_verify": high_verify,
             "low": low_result,
+            "low_verify": low_verify,
             "release": release_result,
         }
 
