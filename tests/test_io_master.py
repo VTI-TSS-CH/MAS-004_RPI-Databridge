@@ -712,6 +712,34 @@ class IoMasterImportTests(unittest.TestCase):
 
             self.assertEqual("live", store.get_point("esp32_plc58__I0_0")["quality"])
 
+    def test_field_io_offline_debounce_holds_repeated_transient_timeouts(self):
+        io_runtime_module._DEVICE_OFFLINE_FAILURES.clear()
+        io_runtime_module._DEVICE_LAST_LIVE_MONOTONIC.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            store.upsert_value("esp32_plc58__I0_0", "1", "live", "test")
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_simulation=False,
+                ),
+                store,
+            )
+            points = store.list_points(device_code="esp32_plc58", include_reserved=True)
+
+            for _ in range(30):
+                result = runtime._apply_static_quality("esp32_plc58", points, "offline", "esp32", "timed out")
+                self.assertTrue(result["debounced"], result)
+
+            self.assertEqual("live", store.get_point("esp32_plc58__I0_0")["quality"])
+
 
 if __name__ == "__main__":
     unittest.main()

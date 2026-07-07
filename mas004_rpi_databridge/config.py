@@ -92,8 +92,8 @@ class Settings:
     moxa_poll_interval_s: float = 1.0
     moxa_timeout_s: float = 1.5
     moxa_error_cooldown_s: float = 5.0
-    field_io_offline_debounce_failures: int = 10
-    field_io_offline_grace_s: float = 45.0
+    field_io_offline_debounce_failures: int = 60
+    field_io_offline_grace_s: float = 180.0
 
     # Printers / Wickler on ETH0
     vj3350_host: str = "192.168.210.21"
