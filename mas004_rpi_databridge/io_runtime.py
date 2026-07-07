@@ -208,14 +208,22 @@ class IoRuntime:
                 )
                 return {"ok": True, "simulation": True, "value": requested_value}
             try:
+                connect_timeout_s = self.cfg.get_float("esp_connect_timeout_s", 1.5)
+                command_timeout_s = self.cfg.get_float("esp_command_timeout_s", 8.0)
+                if best_effort:
+                    connect_timeout_s = max(0.2, min(connect_timeout_s, 0.6))
+                    command_timeout_s = max(
+                        0.2,
+                        min(command_timeout_s, self.cfg.get_float("esp_best_effort_write_timeout_s", 1.0)),
+                    )
                 client = EspPlcClient(
                     self.cfg.esp_host,
                     self.cfg.esp_port,
-                    timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
+                    timeout_s=connect_timeout_s,
                 )
                 response = client.exchange_line(
                     f"IO SET {point['pin_label']}={requested_value}",
-                    read_timeout_s=self.cfg.get_float("esp_command_timeout_s", 8.0),
+                    read_timeout_s=command_timeout_s,
                 )
                 if "NAK" in (response or "").upper():
                     raise RuntimeError(response)

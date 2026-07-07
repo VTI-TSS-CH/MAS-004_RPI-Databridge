@@ -1922,6 +1922,55 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("tto_print_bypass_active", result["skipped"])
         bridge_cls.assert_not_called()
 
+    def test_selected_printer_laser_start_pulses_q03_without_tto_bridge(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        self.io_store.upsert_value("esp32_plc58__I0_2", "1", "simulation", "test")
+        pulses: list[tuple[str, float, str]] = []
+
+        def fake_pulse(io_key, *, high_s, source):
+            pulses.append((io_key, float(high_s), source))
+            return {"ok": True, "io_key": io_key, "high_s": high_s}
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls, patch.object(
+            runtime,
+            "_pulse_io_output",
+            side_effect=fake_pulse,
+        ):
+            result = runtime._sync_selected_printer_for_machine_state(
+                5,
+                {"MAP0016": "1", "MAP0035": "0", "MAP0079": "0"},
+                reason="test_laser_start",
+                required=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("laser", result["active_printer"])
+        self.assertEqual(
+            [("esp32_plc58__Q0_3", 0.1, "laser-printer-state-5")],
+            pulses,
+        )
+        bridge_cls.assert_not_called()
+
+    def test_selected_printer_laser_start_skips_when_print_bypass_active(self):
+        runtime = self.build_runtime()
+
+        with patch("mas004_rpi_databridge.machine_runtime.DeviceBridge") as bridge_cls, patch.object(
+            runtime,
+            "_pulse_io_output",
+        ) as pulse:
+            result = runtime._sync_selected_printer_for_machine_state(
+                5,
+                {"MAP0016": "1", "MAP0035": "1", "MAP0079": "0"},
+                reason="test_laser_bypass",
+                required=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("printer_bypass_active", result["skipped"])
+        pulse.assert_not_called()
+        bridge_cls.assert_not_called()
+
     def test_tto_printer_online_pulses_laser_start_in_parallel_mode(self):
         self.cfg.vj6530_simulation = False
         runtime = self.build_runtime()
@@ -5213,6 +5262,26 @@ class MachineRuntimeTests(unittest.TestCase):
         message = str(row[0])
         self.assertIn("Q2.3", message)
         self.assertNotIn("Q0.2", message)
+
+    def test_sea_vision_ready_timeout_uses_retry_backoff(self):
+        runtime = self.build_runtime()
+        calls: list[tuple[str, bool]] = []
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, io_key, enabled, **_kwargs):
+                calls.append((io_key, bool(enabled)))
+                raise TimeoutError("timed out")
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            failed = runtime._apply_sea_vision_ready_output(7, ts=10.0)
+            backed_off = runtime._apply_sea_vision_ready_output(7, ts=11.0)
+
+        self.assertFalse(failed["ok"])
+        self.assertEqual("retry_backoff", backed_off["skipped"])
+        self.assertEqual([("esp32_plc58__Q2_3", True)], calls)
 
     def test_reset_waits_for_esp_safety_inputs_after_pulse_sequence(self):
         runtime = self.build_runtime()
