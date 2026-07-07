@@ -380,11 +380,12 @@ class IoRuntime:
             result["debounced"] = True
             result["cooldown"] = True
             return result
+        client: EspPlcClient | None = None
         try:
             client = EspPlcClient(
                 host,
                 port,
-                timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
+                timeout_s=max(0.25, min(self.cfg.get_float("esp_connect_timeout_s", 1.5), 0.6)),
             )
             diag = client.diagnostics()
             if (
@@ -414,8 +415,10 @@ class IoRuntime:
             snapshot_wait_timeout_s = max(
                 0.5,
                 min(
-                    self.cfg.get_float("esp_connect_timeout_s", 1.5) + snapshot_timeout_s + 0.25,
-                    2.0,
+                    max(0.25, min(self.cfg.get_float("esp_connect_timeout_s", 1.5), 0.6))
+                    + snapshot_timeout_s
+                    + 0.25,
+                    1.2,
                 ),
             )
             raw = client.exchange_line(
@@ -443,6 +446,15 @@ class IoRuntime:
                 result["override_enforced"] = override_enforced
             return result
         except Exception as exc:
+            if client is not None and (
+                isinstance(exc, TimeoutError)
+                or "ESP command broker request timed out" in str(exc)
+                or "ESP endpoint command deadline exceeded" in str(exc)
+            ):
+                try:
+                    client.close()
+                except Exception:
+                    pass
             _ESP_IO_COOLDOWN_ERROR = str(exc)
             _ESP_IO_COOLDOWN_UNTIL = time.monotonic() + max(
                 1.0,
@@ -730,7 +742,7 @@ class IoRuntime:
         # MOXA lives on the local eth1 machine subnet. Keep this much shorter
         # than external HTTP peer timeouts so unreachable I/O modules cannot
         # stall the machine runtime or ESP motor command path for many seconds.
-        return max(0.3, min(self.cfg.get_float("moxa_timeout_s", 1.5), 2.0))
+        return max(0.2, min(self.cfg.get_float("moxa_timeout_s", 1.5), 0.6))
 
     def _moxa_error_cooldown_s(self) -> float:
         # After a timeout, do not hammer the MOXA every machine-runtime tick.

@@ -57,6 +57,15 @@ PANEL_BUTTON_EVENT_QUEUE: queue.Queue[dict[str, object]] = queue.Queue(maxsize=P
 SECONDARY_PEER_FAILURE_COOLDOWN_S = 300.0
 SECONDARY_PEER_FAILURE_COOLDOWN_MAX_S = 1800.0
 SECONDARY_PEER_COOLDOWN_LOG_S = 300.0
+FIELD_IO_DEVICE_CODES = {
+    "esp32_plc58",
+    "moxa_e1211_1",
+    "moxa_e1211_2",
+    "moxa_e1213_1",
+    "moxa_e1213_2",
+    "moxa_e1213_3",
+}
+FIELD_IO_OUTAGE_COOLDOWN_S = 2.0
 
 
 def resolve_repo_master_ios_xlsx() -> str:
@@ -382,9 +391,27 @@ def _io_poll_deferred_devices_for_critical_window(db: DB, due_devices: list[str]
         return set()
 
 
+def _io_poll_field_io_unhealthy(device_code: str, result: dict[str, object], elapsed_s: float) -> bool:
+    if str(device_code or "") not in FIELD_IO_DEVICE_CODES:
+        return False
+    devices = result.get("devices") if isinstance(result, dict) else None
+    if not isinstance(devices, list) or not devices:
+        return bool(float(elapsed_s or 0.0) >= 1.0)
+    device = devices[0] if isinstance(devices[0], dict) else {}
+    if bool(device.get("reachable")):
+        return False
+    if str(device.get("skipped") or "") == "broker_busy":
+        return False
+    elapsed = float(elapsed_s or 0.0)
+    if bool(device.get("cooldown")) and elapsed < 0.5:
+        return False
+    return bool(elapsed >= 0.5 or device.get("error"))
+
+
 def io_runtime_loop(cfg_path: str):
     last_import_sig = None
     next_due_by_device: dict[str, float] = {}
+    field_io_cooldown_until = 0.0
     cfg = None
     io_store = None
     reload_due = 0.0
@@ -432,6 +459,11 @@ def io_runtime_loop(cfg_path: str):
                 )
                 if device_code in intervals and now_m >= float(next_due_by_device.get(device_code, 0.0))
             ]
+            if due_devices and now_m < field_io_cooldown_until:
+                cooled_devices = [device_code for device_code in due_devices if device_code in FIELD_IO_DEVICE_CODES]
+                due_devices = [device_code for device_code in due_devices if device_code not in FIELD_IO_DEVICE_CODES]
+                for device_code in cooled_devices:
+                    next_due_by_device[device_code] = field_io_cooldown_until
             if due_devices:
                 deferred_devices = _io_poll_deferred_devices_for_critical_window(db, due_devices)
                 if deferred_devices:
@@ -444,11 +476,24 @@ def io_runtime_loop(cfg_path: str):
             runtime = IoRuntime(cfg, io_store)
             for device_code in due_devices:
                 started = time.monotonic()
-                runtime.refresh(include_points=False, device_codes={device_code})
+                result = runtime.refresh(include_points=False, device_codes={device_code})
                 elapsed = time.monotonic() - started
                 if elapsed >= 1.0:
                     print(f"[IO] slow poll device={device_code} elapsed_s={elapsed:.3f}", flush=True)
                 next_due_by_device[device_code] = max(started + intervals[device_code], time.monotonic())
+                if _io_poll_field_io_unhealthy(device_code, result, elapsed):
+                    field_io_cooldown_until = time.monotonic() + FIELD_IO_OUTAGE_COOLDOWN_S
+                    for field_device_code in FIELD_IO_DEVICE_CODES:
+                        next_due_by_device[field_device_code] = max(
+                            field_io_cooldown_until,
+                            float(next_due_by_device.get(field_device_code, 0.0)),
+                        )
+                    print(
+                        f"[IO] field io cooldown after device={device_code} "
+                        f"elapsed_s={elapsed:.3f} until={field_io_cooldown_until:.3f}",
+                        flush=True,
+                    )
+                    break
         except Exception as e:
             print(f"[IO] loop error: {repr(e)}", flush=True)
 
