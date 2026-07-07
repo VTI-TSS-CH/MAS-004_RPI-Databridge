@@ -361,25 +361,25 @@ def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
         time.sleep(5.0)
 
 
-def _io_poll_paused_for_critical_motion(db: DB) -> bool:
+def _io_poll_deferred_devices_for_critical_window(db: DB, due_devices: list[str]) -> set[str]:
     try:
         with db._conn() as conn:
             row = conn.execute(
                 "SELECT current_state, info_json FROM machine_state WHERE singleton_id=1"
             ).fetchone()
         if not row:
-            return False
-        state = int(row[0] or 0)
-        if state in (2, 3, 4, 5, 6, 8):
-            return True
+            return set()
         info = json.loads(row[1] or "{}")
         safety = dict(info.get("safety") or {})
+        deferred: set[str] = set()
         if str(safety.get("phase") or "") == "resetting":
-            return True
+            deferred.add("esp32_plc58")
         production = dict(info.get("production_runtime") or {})
-        return bool(production.get("pending_start"))
+        if bool(production.get("pending_start")):
+            deferred.add("esp32_plc58")
+        return {device_code for device_code in due_devices if device_code in deferred}
     except Exception:
-        return False
+        return set()
 
 
 def io_runtime_loop(cfg_path: str):
@@ -422,28 +422,32 @@ def io_runtime_loop(cfg_path: str):
             due_devices = [
                 device_code
                 for device_code in (
-                    "raspi_plc21",
+                    "esp32_plc58",
                     "moxa_e1211_1",
                     "moxa_e1211_2",
                     "moxa_e1213_1",
                     "moxa_e1213_2",
                     "moxa_e1213_3",
-                    "esp32_plc58",
+                    "raspi_plc21",
                 )
                 if device_code in intervals and now_m >= float(next_due_by_device.get(device_code, 0.0))
             ]
-            if due_devices and _io_poll_paused_for_critical_motion(db):
-                skipped_devices = [device_code for device_code in due_devices if device_code != "raspi_plc21"]
-                due_devices = [device_code for device_code in due_devices if device_code == "raspi_plc21"]
-                for device_code in skipped_devices:
+            if due_devices:
+                deferred_devices = _io_poll_deferred_devices_for_critical_window(db, due_devices)
+                if deferred_devices:
+                    due_devices = [device_code for device_code in due_devices if device_code not in deferred_devices]
+                for device_code in deferred_devices:
                     next_due_by_device[device_code] = now_m + max(
-                        2.0,
+                        0.5,
                         intervals.get(device_code, 1.0),
                     )
             runtime = IoRuntime(cfg, io_store)
             for device_code in due_devices:
                 started = time.monotonic()
                 runtime.refresh(include_points=False, device_codes={device_code})
+                elapsed = time.monotonic() - started
+                if elapsed >= 1.0:
+                    print(f"[IO] slow poll device={device_code} elapsed_s={elapsed:.3f}", flush=True)
                 next_due_by_device[device_code] = max(started + intervals[device_code], time.monotonic())
         except Exception as e:
             print(f"[IO] loop error: {repr(e)}", flush=True)

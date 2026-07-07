@@ -7,6 +7,10 @@ import threading
 from typing import Dict, List, Optional, Sequence
 
 
+class MoxaProtocolError(RuntimeError):
+    pass
+
+
 class MoxaIoLogikClient:
     E1211_OUTPUT_LABELS = tuple(f"DO{idx}" for idx in range(16))
     E1213_OUTPUT_LABELS = ("DO0", "DO1", "DO2", "DO3", "DIO0", "DIO1", "DIO2", "DIO3")
@@ -95,7 +99,7 @@ class MoxaIoLogikClient:
         response_fc = body[0]
         if response_fc & 0x80:
             code = body[1] if len(body) > 1 else 0
-            raise RuntimeError(f"MOXA exception {code}")
+            raise MoxaProtocolError(f"MOXA exception {code}")
         if response_fc != function_code:
             raise RuntimeError(f"MOXA unexpected function code {response_fc}")
         return body[1:]

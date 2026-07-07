@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_clients import EspPlcClient
 from mas004_rpi_databridge.io_master import IoStore
-from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client, MoxaE1213Client
+from mas004_rpi_databridge.moxa_iologik import MoxaE1211Client, MoxaE1213Client, MoxaProtocolError
 
 
 _RPIPLC_MODULE = None
@@ -115,7 +115,14 @@ class IoRuntime:
         devices: List[Dict[str, Any]] = []
         changed = 0
 
-        for device_code, device_points in sorted(grouped.items(), key=lambda item: item[0] == "esp32_plc58"):
+        for device_code, device_points in sorted(
+            grouped.items(),
+            key=lambda item: (
+                item[0] != "esp32_plc58",
+                item[0] == "raspi_plc21",
+                item[0],
+            ),
+        ):
             device_result = self._refresh_device(device_code, device_points)
             devices.append(device_result)
             changed += int(device_result.get("changed", 0) or 0)
@@ -372,7 +379,12 @@ class IoRuntime:
         try:
             def _read():
                 client = self._moxa_client(device_code, host, int(port))
-                return client.read_outputs()
+                labels = [
+                    str(point.get("pin_label") or "").strip()
+                    for point in device_points
+                    if str(point.get("pin_label") or "").strip()
+                ]
+                return client.read_outputs(labels=labels)
 
             snapshot = self._moxa_call(device_code, _read)
             changed = self._upsert_runtime_values(
@@ -602,6 +614,8 @@ class IoRuntime:
                 _MOXA_COOLDOWN_ERROR.pop(key, None)
                 return result
             except Exception as exc:
+                if isinstance(exc, MoxaProtocolError):
+                    raise
                 _MOXA_COOLDOWN_UNTIL[key] = time.monotonic() + self._moxa_error_cooldown_s()
                 _MOXA_COOLDOWN_ERROR[key] = str(exc)
                 raise
