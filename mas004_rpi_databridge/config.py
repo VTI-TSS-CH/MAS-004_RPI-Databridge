@@ -71,7 +71,7 @@ class Settings:
     esp_read_timeout_s: float = 2.0
     esp_command_timeout_s: float = 8.0
     esp_io_poll_interval_s: float = 1.0
-    esp_io_snapshot_timeout_s: float = 0.75
+    esp_io_snapshot_timeout_s: float = 1.5
     esp_io_error_cooldown_s: float = 5.0
     raspi_plc_model: str = "RPIPLC_21"
     raspi_io_simulation: bool = True
@@ -92,6 +92,8 @@ class Settings:
     moxa_poll_interval_s: float = 1.0
     moxa_timeout_s: float = 1.5
     moxa_error_cooldown_s: float = 5.0
+    field_io_offline_debounce_failures: int = 10
+    field_io_offline_grace_s: float = 45.0
 
     # Printers / Wickler on ETH0
     vj3350_host: str = "192.168.210.21"

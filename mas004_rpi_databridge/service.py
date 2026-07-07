@@ -402,9 +402,11 @@ def _io_poll_field_io_unhealthy(device_code: str, result: dict[str, object], ela
         return False
     if str(device.get("skipped") or "") == "broker_busy":
         return False
-    elapsed = float(elapsed_s or 0.0)
-    if bool(device.get("cooldown")) and elapsed < 0.5:
+    if bool(device.get("debounced")):
         return False
+    if bool(device.get("cooldown")):
+        return False
+    elapsed = float(elapsed_s or 0.0)
     return bool(elapsed >= 0.5 or device.get("error"))
 
 
