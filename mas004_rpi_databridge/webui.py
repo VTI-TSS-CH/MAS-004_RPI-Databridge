@@ -4935,13 +4935,19 @@ async function reloadAll(silent=false, live=false){
 }
 
 async function overrideIo(ioKey, value){
-  document.getElementById("status").textContent = `override ${ioKey}=${value ? "High" : "Low"}...`;
-  await api(`/api/io/${encodeURIComponent(ioKey)}/override`, {
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({value})
-  });
-  await reloadAll(true);
+  const status = document.getElementById("status");
+  status.textContent = `override ${ioKey}=${value ? "High" : "Low"}...`;
+  try{
+    await api(`/api/io/${encodeURIComponent(ioKey)}/override`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({value})
+    });
+    await reloadAll(true);
+  }catch(err){
+    await reloadAll(true).catch(() => {});
+    status.textContent = `override failed: ${err.message}`;
+  }
 }
 
 async function releaseIo(ioKey){
@@ -4951,9 +4957,15 @@ async function releaseIo(ioKey){
 }
 
 async function shotIo(ioKey){
-  document.getElementById("status").textContent = `shot ${ioKey}=High 100ms...`;
-  await api(`/api/io/${encodeURIComponent(ioKey)}/shot`, {method:"POST"});
-  await reloadAll(true);
+  const status = document.getElementById("status");
+  status.textContent = `shot ${ioKey}=High 100ms...`;
+  try{
+    await api(`/api/io/${encodeURIComponent(ioKey)}/shot`, {method:"POST"});
+    await reloadAll(true);
+  }catch(err){
+    await reloadAll(true).catch(() => {});
+    status.textContent = `shot failed: ${err.message}`;
+  }
 }
 
 async function releaseAllOverrides(){
