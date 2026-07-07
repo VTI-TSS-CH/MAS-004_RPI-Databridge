@@ -1648,7 +1648,7 @@ class SetupWicklerOrchestrator:
         # The setup run can accumulate several metres of travel while both
         # wicklers settle; keep a small engineering reserve here. The +/-0.05
         # mm print-stop check remains separate in the ESP and is not relaxed.
-        return max(8.0, self._param_int("MAP0040", 5) / 10.0)
+        return max(20.0, self._param_int("MAP0040", 5) / 10.0)
 
     def _set_infeed_sensor_teach(
         self,
