@@ -8,6 +8,7 @@ from openpyxl import Workbook
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.db import DB
 from mas004_rpi_databridge.io_master import IoStore
+from mas004_rpi_databridge import io_runtime as io_runtime_module
 from mas004_rpi_databridge.io_runtime import IoRuntime, _MoxaEndpointCooldown
 from mas004_rpi_databridge.moxa_iologik import MoxaProtocolError
 
@@ -252,6 +253,8 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertTrue(point["override_active"])
 
     def test_esp_refresh_reasserts_physical_output_when_override_snapshot_differs(self):
+        io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
+        io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "io.xlsx"
             db_path = Path(tmpdir) / "io.sqlite3"
@@ -541,6 +544,8 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual("raspi_plc21", order[-1])
 
     def test_esp_io_snapshot_uses_short_broker_wait_timeout(self):
+        io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
+        io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""
         with tempfile.TemporaryDirectory() as tmpdir:
             workbook_path = Path(tmpdir) / "io.xlsx"
             db_path = Path(tmpdir) / "io.sqlite3"
@@ -585,6 +590,51 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual(0.75, captured["read_timeout_s"])
             self.assertLessEqual(captured["wait_timeout_s"], 2.0)
             self.assertGreaterEqual(captured["wait_timeout_s"], 0.5)
+
+    def test_esp_io_snapshot_timeout_closes_broker_socket_for_reconnect(self):
+        io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
+        io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_host="127.0.0.1",
+                    esp_port=3010,
+                    esp_simulation=False,
+                    esp_connect_timeout_s=1.5,
+                    esp_io_snapshot_timeout_s=0.75,
+                    esp_read_timeout_s=2.0,
+                ),
+                store,
+            )
+            closed = []
+
+            class FakeEspClient:
+                def __init__(self, host, port, timeout_s):
+                    pass
+
+                def diagnostics(self):
+                    return {"queue_depth": 0, "active_line": "", "priority_until_at": 0.0}
+
+                def exchange_line(self, *_args, **_kwargs):
+                    raise TimeoutError("ESP command broker request timed out")
+
+                def close(self):
+                    closed.append(True)
+
+            with patch("mas004_rpi_databridge.io_runtime.EspPlcClient", FakeEspClient):
+                result = runtime.refresh(include_points=False, device_codes={"esp32_plc58"})
+
+            self.assertFalse(result["devices"][0]["reachable"])
+            self.assertEqual([True], closed)
 
 
 if __name__ == "__main__":
