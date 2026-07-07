@@ -3574,6 +3574,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         payload["release_result"] = result
         return payload
 
+    @app.post("/api/io/{io_key}/shot")
+    def io_shot(request: Request, io_key: str):
+        cfg2 = Settings.load(cfg_path)
+        require_machine_setup_session(request, cfg2)
+        runtime = IoRuntime(cfg2, io_store)
+        result = runtime.pulse_output(io_key, high_s=0.1, source="machine-setup-ui-shot")
+        payload = get_io_snapshot()
+        payload["shot_result"] = result
+        return payload
+
     @app.post("/api/io/overrides/release-all")
     def io_release_all(request: Request):
         cfg2 = Settings.load(cfg_path)
@@ -4875,6 +4885,7 @@ function renderRows(data){
       actions = `<span class="io-action-set">
         <button class="btn small io-high ${overrideActive && overrideValue === 1 ? "active" : ""}" onclick="overrideIo('${item.io_key}',1)">High</button>
         <button class="btn small io-low ${overrideActive && overrideValue === 0 ? "active" : ""}" onclick="overrideIo('${item.io_key}',0)">Low</button>
+        <button class="btn small io-shot" ${overrideActive ? "disabled" : ""} onclick="shotIo('${item.io_key}')">Shot 100ms</button>
         <button class="btn small io-release ${overrideActive ? "active" : ""}" onclick="releaseIo('${item.io_key}')">Release</button>
       </span>`;
     }else if(isPulseOnly(item)){
@@ -4936,6 +4947,12 @@ async function overrideIo(ioKey, value){
 async function releaseIo(ioKey){
   document.getElementById("status").textContent = `release ${ioKey}...`;
   await api(`/api/io/${encodeURIComponent(ioKey)}/release`, {method:"POST"});
+  await reloadAll(true);
+}
+
+async function shotIo(ioKey){
+  document.getElementById("status").textContent = `shot ${ioKey}=High 100ms...`;
+  await api(`/api/io/${encodeURIComponent(ioKey)}/shot`, {method:"POST"});
   await reloadAll(true);
 }
 
