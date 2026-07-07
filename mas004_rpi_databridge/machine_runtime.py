@@ -3391,6 +3391,9 @@ class MachineRuntime:
             "expected_removed": _truthy(payload.get("expected_removed", 0)),
             "removed_confirmed": _truthy(payload.get("removed_confirmed", 0)),
             "control_bypass": _truthy(payload.get("control_bypass", 0)),
+            "rewind_mode": str(payload.get("rewind_mode") or ""),
+            "rewind_distance_mm": _safe_float(payload.get("rewind_distance_mm"), 0.0),
+            "rewind_after_label_no": _safe_int(payload.get("rewind_after_label_no"), 0),
         }
 
     def _label_removal_required_needs_rewind(self, compact_payload: dict[str, Any]) -> bool:
@@ -3474,7 +3477,10 @@ class MachineRuntime:
                     break
         if not already_rewound:
             try:
-                rewind_result = self._execute_label_removal_rewind(label_no=int(label_no))
+                rewind_result = self._execute_label_removal_rewind(
+                    label_no=int(label_no),
+                    distance_mm=_safe_float(compact_payload.get("rewind_distance_mm"), 0.0),
+                )
             except Exception as exc:
                 rewind_result = {
                     "ok": False,
@@ -3792,7 +3798,20 @@ class MachineRuntime:
         }
         pause_labels = _payload_label_nos(compact_payload, label_no)
         pause_label_text = ",".join(str(item) for item in pause_labels) if pause_labels else str(label_no)
-        if current_state in (4, 5, 6) or bool(production_info.get("active")):
+        deferred_tact_rewind_ready = (
+            str(compact_payload.get("rewind_mode") or "") == "tact_after_current_tact"
+            and _safe_float(compact_payload.get("rewind_distance_mm"), 0.0) >= 1.0
+        )
+        if deferred_tact_rewind_ready:
+            stop_result = {
+                "ok": True,
+                "skipped": "esp_runner_deferred_missed_removal_rewind_ready",
+                "reason": f"label_removal_required:{pause_label_text}",
+                "target_state": 7,
+                "controlled": True,
+                "finished_ts": now_ts(),
+            }
+        elif current_state in (4, 5, 6) or bool(production_info.get("active")):
             stop_result = self._pause_production_motion_after_print(
                 reason=f"label_removal_required:{pause_label_text}",
                 target_state=7,
@@ -3817,7 +3836,10 @@ class MachineRuntime:
             rewind_result = {"ok": True, "skipped": f"target_state={target_state}"}
         if target_state == 7 and rewind_required:
             try:
-                rewind_result = self._execute_label_removal_rewind(label_no=int(label_no))
+                rewind_result = self._execute_label_removal_rewind(
+                    label_no=int(label_no),
+                    distance_mm=_safe_float(compact_payload.get("rewind_distance_mm"), 0.0),
+                )
             except Exception as exc:
                 rewind_result = {
                     "ok": False,
@@ -7537,7 +7559,7 @@ class MachineRuntime:
             )
         return None
 
-    def _execute_label_removal_rewind(self, *, label_no: int) -> dict[str, Any]:
+    def _execute_label_removal_rewind(self, *, label_no: int, distance_mm: float = 0.0) -> dict[str, Any]:
         started_ts = now_ts()
         param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         plan = self._production_motion_plan(param_map, build_format_plan(param_map))
@@ -7546,12 +7568,15 @@ class MachineRuntime:
             rewind_speed_mm_s = float(plan["speed_mm_s"])
         rewind_speed_mm_s = max(5.0, min(250.0, rewind_speed_mm_s))
         backoff_mm = PRODUCTION_REMOVAL_REWIND_BACKOFF_MM
+        distance_mm = _safe_float(distance_mm, 0.0)
         base_command = (
             "PROCESS PRODUCTION REWIND_REMOVAL "
             f"LABEL={int(label_no)} "
             f"SPEED_MM_S={rewind_speed_mm_s:.3f} "
             f"BACKOFF_MM={backoff_mm:.3f}"
         )
+        if distance_mm >= 1.0:
+            base_command += f" DISTANCE_MM={distance_mm:.3f}"
 
         plan_response = self._production_esp_retry(
             base_command + " DRY_RUN=1",
