@@ -3380,6 +3380,16 @@ class MachineRuntime:
             "control_bypass": _truthy(payload.get("control_bypass", 0)),
         }
 
+    def _label_removal_required_needs_rewind(self, compact_payload: dict[str, Any]) -> bool:
+        if str(compact_payload.get("reason") or "") == "expected_removed_but_seen":
+            return True
+        return (
+            _truthy(compact_payload.get("control_seen", 0))
+            and not _truthy(compact_payload.get("control_bypass", 0))
+            and _truthy(compact_payload.get("removal_pending", compact_payload.get("needs_removal", 0)))
+            and not _truthy(compact_payload.get("removed_confirmed", 0))
+        )
+
     def _merge_label_removal_request(
         self,
         production_info: dict[str, Any],
@@ -3784,8 +3794,12 @@ class MachineRuntime:
 
         rewind_required = target_state == 7
         if target_state == 7 and str(compact_payload.get("type") or "") == "label_removal_required":
-            rewind_required = False
-            rewind_result: dict[str, Any] = {"ok": True, "skipped": "operator_removal_pause"}
+            rewind_required = self._label_removal_required_needs_rewind(compact_payload)
+            rewind_result: dict[str, Any] = (
+                {"ok": True, "skipped": "operator_removal_pause"}
+                if not rewind_required
+                else {"ok": True, "pending": "expected_removed_but_seen"}
+            )
         else:
             rewind_result = {"ok": True, "skipped": f"target_state={target_state}"}
         if target_state == 7 and rewind_required:
