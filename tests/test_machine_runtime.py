@@ -1342,7 +1342,10 @@ class MachineRuntimeTests(unittest.TestCase):
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
 
+        commands: list[str] = []
+
         def fake_production_esp(command, *args, **kwargs):
+            commands.append(str(command))
             if str(command).startswith("PROCESS PRODUCTION RESUME_REMOVED"):
                 return 'JSON {"ok":true,"marked":[6,9],"missing":[],"running":true,"next_label_no":11,"mode":"indexed"}'
             return "ACK"
@@ -1384,6 +1387,9 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("ready", result["tto_printer"])
         self.assertTrue(result["tto_printer"]["resume_allowed"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
+        self.assertIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
+        self.assertEqual(11, result["resume_wickler_ready"]["label_no"])
+        self.assertTrue(result["resume_wickler_ready"]["ok"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
         self.assertEqual(104.07, prepare_indexed.call_args.kwargs["travel_mm"])
@@ -3211,6 +3217,42 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("reset_motion_recovery_in_progress", snapshot["info"]["stop_positions"]["reason"])
         self.assertFalse(snapshot["info"]["stop_positions"]["ok"])
         client_cls.return_value.move_absolute_set_mm.assert_not_called()
+
+    def test_motion_recovery_drops_stale_stop_axis_target_cache(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=9,
+            requested_state=9,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "stop_positions": {
+                    "active": True,
+                    "ok": False,
+                    "logic_version": 11,
+                    "target_key": "2:50.000;5:0.000;6:-20.000;7:-20.000;8:100.000;9:100.000",
+                    "targets_mm": {"2": 50.0, "5": 0.0, "6": -20.0, "7": -20.0, "8": 100.0, "9": 100.0},
+                    "results": [{"motor_id": 2, "target_mm": 50.0}],
+                }
+            },
+        )
+        self.assertTrue(machine_runtime_module._RESET_MOTION_RECOVERY_LOCK.acquire(blocking=False))
+        try:
+            snapshot = runtime.refresh()
+        finally:
+            machine_runtime_module._RESET_MOTION_RECOVERY_LOCK.release()
+
+        stop_positions = snapshot["info"]["stop_positions"]
+        self.assertEqual("reset_motion_recovery_in_progress", stop_positions["reason"])
+        self.assertEqual(12, stop_positions["logic_version"])
+        self.assertIn("2:20.000", stop_positions["target_key"])
+        targets_mm = stop_positions["targets_mm"]
+        self.assertEqual(20.0, targets_mm.get(2, targets_mm.get("2")))
+        self.assertNotIn("results", stop_positions)
 
     def test_setup_waits_for_reset_motion_recovery_before_starting(self):
         runtime = self.build_runtime()

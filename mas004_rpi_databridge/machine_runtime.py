@@ -7932,6 +7932,7 @@ class MachineRuntime:
                 raise RuntimeError(f"PROCESS PRODUCTION RESUME_REMOVED rejected: {response_text[:240]}")
         resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
         resume_wickler_gate: dict[str, Any] | None = None
+        resume_wickler_ready: dict[str, Any] | None = None
         if resume_next_label_no > 0:
             resume_wickler_gate = {
                 "label_no": int(resume_next_label_no),
@@ -7943,6 +7944,29 @@ class MachineRuntime:
                 "production_resume_removed_next_label_commanded",
                 resume_wickler_gate,
             )
+            ready_command = f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(resume_next_label_no)}"
+            try:
+                ready_response = self._production_esp_retry(
+                    ready_command,
+                    read_timeout_s=2.0,
+                    attempts=3,
+                    settle_s=0.05,
+                    priority=True,
+                )
+                resume_wickler_ready = {
+                    "ok": True,
+                    "label_no": int(resume_next_label_no),
+                    "command": ready_command,
+                    "response": ready_response,
+                }
+            except Exception as exc:
+                self._stop_production_motion(
+                    reason="production_label_removal_resume_wickler_ready_failed",
+                    target_state=7,
+                )
+                raise RuntimeError(
+                    f"Wickler-Runline nach Entnahme-Resume nicht freigegeben: {exc}"
+                ) from exc
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
@@ -7984,6 +8008,8 @@ class MachineRuntime:
         }
         if resume_wickler_gate is not None:
             result["resume_wickler_gate"] = dict(resume_wickler_gate)
+        if resume_wickler_ready is not None:
+            result["resume_wickler_ready"] = dict(resume_wickler_ready)
         if isinstance(production_info.get("label_removal_resume_validation"), dict):
             result["label_removal_resume_validation"] = dict(production_info["label_removal_resume_validation"])
         result["resume_state_commit"] = self._commit_successful_production_resume_state(
@@ -9246,6 +9272,11 @@ class MachineRuntime:
             return
 
         if _RESET_MOTION_RECOVERY_LOCK.locked():
+            if (
+                stop_info.get("target_key") != target_key
+                or stop_info.get("logic_version") != STOP_MODE_POSITION_LOGIC_VERSION
+            ):
+                stop_info = {}
             stop_info.update(
                 {
                     "active": True,
@@ -9253,7 +9284,9 @@ class MachineRuntime:
                     "skipped": True,
                     "reason": "reset_motion_recovery_in_progress",
                     "last_skipped_ts": ts,
+                    "logic_version": STOP_MODE_POSITION_LOGIC_VERSION,
                     "target_key": target_key,
+                    "targets_mm": dict(STOP_MODE_AXIS_TARGETS_MM),
                 }
             )
             info["stop_positions"] = stop_info
