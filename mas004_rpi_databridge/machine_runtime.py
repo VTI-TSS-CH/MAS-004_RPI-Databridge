@@ -375,6 +375,7 @@ WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
 WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
 STOP_MODE_AXIS_TARGETS_MM = {
+    2: 50.0,   # Portalachse Z
     5: 0.0,    # Material-Kontrollkamera TV1
     6: -20.0,  # Sensor Etikettenerfassung
     7: -20.0,  # Sensor Auswurfkontrolle
@@ -386,13 +387,16 @@ STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
 STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 8.0
 STOP_MODE_POSITION_VERIFY_POLL_S = 0.1
-STOP_MODE_POSITION_LOGIC_VERSION = 10
+STOP_MODE_POSITION_LOGIC_VERSION = 11
 STOP_MODE_POSITION_LIMIT_MARGIN_TENTHS = 1
 SETUP_AXIS_POSITION_TOLERANCE_TENTHS = 1
 SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S = 45.0
 SETUP_AXIS_POSITION_VERIFY_POLL_S = 0.25
 SETUP_AXIS_MOVE_SET_MAX_ATTEMPTS = 3
 SETUP_AXIS_MOVE_SET_SHORT_VERIFY_TIMEOUT_S = 3.0
+PORTAL_Z_MOTOR_ID = 2
+PORTAL_Z_SETPOINT_PKEY = "MAP0057"
+PORTAL_Z_ACTUAL_PKEY = "MAS0012"
 MOTOR_HARDWARE_FEEDBACK_IO = {
     # AZD DOUT0 is commissioned as MOVE (function 134).  Where OUT1 is wired,
     # AZD DOUT1 stays IN-POS (function 138) for the positioning-complete edge.
@@ -1329,6 +1333,15 @@ class MachineRuntime:
                     if not bool(laser_setup_reset.get("ok")):
                         setup_result["ok"] = False
                         setup_result["error"] = laser_setup_reset.get("error") or "Laser safety reset after setup failed"
+                if bool(setup_result.get("ok")):
+                    portal_z_axis = self._position_portal_z_axis_for_production(
+                        format_plan,
+                        reason="setup_measurement_completed",
+                    )
+                    setup_result["portal_z_axis"] = portal_z_axis
+                    if not bool(portal_z_axis.get("ok")):
+                        setup_result["ok"] = False
+                        setup_result["error"] = portal_z_axis.get("error") or "Portal-Z after setup failed"
                 if bool((setup_info.get("last_result") or {}).get("ok")):
                     cleared_label_removal = self._clear_label_removal_runtime_state(
                         production_info,
@@ -8817,6 +8830,167 @@ class MachineRuntime:
         )
         return result
 
+    def _portal_z_production_target_tenths(self, format_plan: dict[str, Any]) -> int:
+        table = dict((format_plan.get("table") or {}) if isinstance(format_plan, dict) else {})
+        return _safe_int(table.get("z_target_tenths_mm"), 0)
+
+    def _position_portal_z_axis_for_production(
+        self,
+        format_plan: dict[str, Any],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        target_tenths = self._portal_z_production_target_tenths(format_plan)
+        target_mm = target_tenths / 10.0
+        result: dict[str, Any] = {
+            "ok": False,
+            "skipped": False,
+            "motor_id": PORTAL_Z_MOTOR_ID,
+            "target_mm": target_mm,
+            "target_tenths_mm": target_tenths,
+            "source": "MAP0007+MAP0028",
+            "reason": str(reason or "setup_completed"),
+        }
+
+        client = EspMotorClient(self.cfg)
+        if not client.available():
+            result.update({"ok": True, "skipped": True, "reason": "esp_motor_endpoint_unavailable_or_simulation"})
+            return result
+
+        errors: list[str] = []
+        try:
+            restore = apply_motor_setup_master_config_to_client(
+                self.params,
+                client,
+                PORTAL_Z_MOTOR_ID,
+                restore_position=False,
+            )
+            result["master_restore"] = restore
+            if not bool(restore.get("ok", False)):
+                reason_text = str(restore.get("reply") or restore.get("reason") or "Motor-Setup-Master nicht anwendbar")
+                errors.append(
+                    f"Motor {PORTAL_Z_MOTOR_ID}: Motor-Setup-Master konnte nicht angewendet werden: {reason_text}"
+                )
+            if not errors:
+                preflight = self._motor_preflight_for_position_move(client, PORTAL_Z_MOTOR_ID, target_mm)
+                result["preflight"] = preflight
+                if not preflight.get("ok"):
+                    latch = self._latch_position_axis_preflight_fault(
+                        PORTAL_Z_MOTOR_ID,
+                        preflight,
+                        context="Einrichten Portal-Z Produktionsposition",
+                    )
+                    if latch:
+                        preflight["latched_mae"] = latch
+                    errors.append(
+                        f"Motor {PORTAL_Z_MOTOR_ID}: {preflight.get('reason') or 'Positionierfreigabe verweigert'}"
+                    )
+
+            if errors:
+                raise RuntimeError("; ".join(errors))
+
+            feedback_tenths = _safe_int((result.get("preflight") or {}).get("feedback_tenths_mm"), 0)
+            already_in_position = int(target_tenths) == int(feedback_tenths)
+            if already_in_position:
+                result.update(
+                    {
+                        "ok": True,
+                        "already_in_position": True,
+                        "queued": False,
+                        "verification": {
+                            "ok": True,
+                            "results": [
+                                {
+                                    "motor_id": PORTAL_Z_MOTOR_ID,
+                                    "target_tenths_mm": target_tenths,
+                                    "feedback_tenths_mm": feedback_tenths,
+                                    "at_target": True,
+                                }
+                            ],
+                            "errors": [],
+                        },
+                    }
+                )
+            else:
+                client.reset_alarm(PORTAL_Z_MOTOR_ID)
+                client.recover_eto_motor(PORTAL_Z_MOTOR_ID)
+                move_acknowledged = False
+                move_warning = ""
+                try:
+                    reply = client.move_absolute_set_mm({PORTAL_Z_MOTOR_ID: target_mm})
+                    move_acknowledged = bool(reply.get("ok"))
+                    result["move_set"] = {
+                        "ok": move_acknowledged,
+                        "reply": reply,
+                        "targets_mm": {PORTAL_Z_MOTOR_ID: target_mm},
+                    }
+                    if not move_acknowledged:
+                        move_warning = f"Positionssatz: {reply}"
+                except Exception as exc:
+                    move_warning = f"Positionssatz: {exc}"
+                    result["move_set"] = {
+                        "ok": False,
+                        "error": repr(exc),
+                        "targets_mm": {PORTAL_Z_MOTOR_ID: target_mm},
+                    }
+                verification = self._verify_axis_targets(
+                    client,
+                    {PORTAL_Z_MOTOR_ID: target_mm},
+                    tolerance_tenths=SETUP_AXIS_POSITION_TOLERANCE_TENTHS,
+                    timeout_s=(
+                        SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S
+                        if move_acknowledged
+                        else SETUP_AXIS_MOVE_SET_SHORT_VERIFY_TIMEOUT_S
+                    ),
+                    poll_s=SETUP_AXIS_POSITION_VERIFY_POLL_S,
+                )
+                result["verification"] = verification
+                if not bool(verification.get("ok")):
+                    errors = [str(item) for item in verification.get("errors") or []]
+                    if move_warning:
+                        errors.insert(0, move_warning)
+                    raise RuntimeError("; ".join(errors) or "Portal-Z Ziel nicht erreicht")
+                if move_warning:
+                    result["warnings"] = [move_warning]
+                result.update({"ok": True, "already_in_position": False, "queued": True})
+
+            setpoint_ok, setpoint_msg = self.params.apply_device_value(
+                PORTAL_Z_SETPOINT_PKEY,
+                str(target_tenths),
+                promote_default=True,
+            )
+            result["setpoint_sync"] = {
+                "pkey": PORTAL_Z_SETPOINT_PKEY,
+                "value": str(target_tenths),
+                "ok": bool(setpoint_ok),
+                "message": setpoint_msg,
+            }
+            if setpoint_ok:
+                self._notify_microtom(
+                    PORTAL_Z_SETPOINT_PKEY,
+                    str(target_tenths),
+                    dedupe_key=f"machine:{PORTAL_Z_SETPOINT_PKEY}",
+                )
+            result["finished_ts"] = now_ts()
+            self.logs.log("machine", "info", f"Einrichten: Portal-Z auf Produktionsposition {target_mm:.1f}mm")
+            self._record_event(
+                "setup_portal_z_axis",
+                "info",
+                f"Einrichten: Portal-Z auf Produktionsposition {target_mm:.1f}mm",
+                result,
+            )
+            return result
+        except Exception as exc:
+            result.update({"ok": False, "error": str(exc), "finished_ts": now_ts()})
+            self.logs.log("machine", "error", f"Einrichten Portal-Z fehlgeschlagen: {exc}")
+            self._record_event(
+                "setup_portal_z_axis",
+                "error",
+                f"Einrichten Portal-Z fehlgeschlagen: {exc}",
+                result,
+            )
+            return result
+
     def _stop_mode_target_key(self) -> str:
         return ";".join(f"{motor_id}:{target_mm:.3f}" for motor_id, target_mm in sorted(STOP_MODE_AXIS_TARGETS_MM.items()))
 
@@ -9227,11 +9401,12 @@ class MachineRuntime:
             )
         else:
             stop_info.update({"ok": True, "errors": [], "finished_ts": now_ts()})
-            self.logs.log("machine", "info", "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=100mm")
+            stop_message = "Stop-Positionssatz gesendet: ID2=50mm, ID5=0mm, ID6/7=-20mm, ID8/9=100mm"
+            self.logs.log("machine", "info", stop_message)
             self._record_event(
                 "stop_mode_axis_targets",
                 "info",
-                "Stop-Positionssatz gesendet: ID5=0mm, ID6/7=-20mm, ID8/9=100mm",
+                stop_message,
                 stop_info,
             )
         info["stop_positions"] = stop_info
@@ -10305,6 +10480,8 @@ class MachineRuntime:
                             }
                             purge_active = True
                     info["safety"] = safety_info
+                    if ok:
+                        info.pop("stop_positions", None)
                     self._write_state(
                         current_state=current_state,
                         requested_state=requested_state,
