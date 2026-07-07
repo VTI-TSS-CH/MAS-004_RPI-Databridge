@@ -50,13 +50,14 @@ class EspMotorClient:
     def available(self) -> bool:
         return bool((self.cfg.esp_host or "").strip()) and int(self.cfg.esp_port or 0) > 0 and not bool(self.cfg.esp_simulation)
 
-    def _exchange(self, line: str) -> str:
+    def _exchange(self, line: str, *, wait_timeout_s: float | None = None) -> str:
         if not self.available():
             raise RuntimeError("ESP motor endpoint missing or simulation enabled")
         return self._esp.exchange_line(
             line,
             read_timeout_s=max(2.0, self.cfg.get_float("esp_command_timeout_s", 8.0)),
             read_limit=65536,
+            wait_timeout_s=wait_timeout_s,
         ).strip()
 
     def _json(self, line: str) -> dict[str, Any]:
@@ -69,8 +70,12 @@ class EspMotorClient:
         except Exception as exc:
             raise RuntimeError(f"ESP returned non-JSON reply for '{line}': {raw}") from exc
 
-    def _ack(self, line: str) -> dict[str, Any]:
-        raw = self._exchange(line)
+    def _ack(self, line: str, *, wait_timeout_s: float | None = None) -> dict[str, Any]:
+        raw = (
+            self._exchange(line, wait_timeout_s=wait_timeout_s)
+            if wait_timeout_s is not None
+            else self._exchange(line)
+        )
         return {"ok": "NAK" not in raw.upper(), "reply": raw}
 
     def list_motors(self) -> dict[str, Any]:
@@ -79,8 +84,8 @@ class EspMotorClient:
     def poll_state(self) -> dict[str, Any]:
         return self._json("MOTOR POLL?")
 
-    def set_poll(self, enabled: bool) -> dict[str, Any]:
-        return self._ack(f"MOTOR POLL={'1' if enabled else '0'}")
+    def set_poll(self, enabled: bool, *, wait_timeout_s: float | None = None) -> dict[str, Any]:
+        return self._ack(f"MOTOR POLL={'1' if enabled else '0'}", wait_timeout_s=wait_timeout_s)
 
     def apply_eto_recovery(self) -> dict[str, Any]:
         return self._ack("MOTOR APPLY_ETO_RECOVERY")

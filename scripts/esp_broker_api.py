@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import ssl
 import sys
@@ -52,3 +53,36 @@ def exchange_via_databridge(
     if not bool(body.get("ok")):
         raise RuntimeError(body)
     return str(body.get("reply") or ""), dict(body)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Send one ESP command through the running Databridge ESP broker API."
+    )
+    parser.add_argument("line", nargs="?", default="PING", help="ESP command line, default: PING")
+    parser.add_argument("--config", default=DEFAULT_CFG_PATH, help="Databridge config path")
+    parser.add_argument("--read-timeout", type=float, default=2.0, help="ESP read timeout in seconds")
+    parser.add_argument("--read-limit", type=int, default=8192, help="Maximum ESP reply size")
+    parser.add_argument("--request-timeout", type=float, default=None, help="HTTP request timeout in seconds")
+    parser.add_argument("--priority", action="store_true", help="Use broker priority queue")
+    parser.add_argument("--json", action="store_true", help="Print the full API response JSON")
+    args = parser.parse_args()
+
+    cfg = load_settings(args.config)
+    reply, body = exchange_via_databridge(
+        cfg,
+        args.line,
+        read_timeout_s=args.read_timeout,
+        read_limit=args.read_limit,
+        priority=args.priority,
+        request_timeout_s=args.request_timeout,
+    )
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, sort_keys=True))
+    else:
+        print(reply)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

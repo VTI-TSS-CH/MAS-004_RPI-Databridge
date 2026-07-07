@@ -232,6 +232,8 @@ class MachineRuntimeTests(unittest.TestCase):
             _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", pin, "input", value)
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.2", "output", "0")
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.3", "output", "0")
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.2", "output", "0")
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.3", "output", "0")
         _insert_io_point(self.db, "moxa_e1213_1", "Moxa ioLogik E1213 #1", "DIO3", "output", "0")
         for pin in ("DIO0", "DIO1", "DIO2"):
             _insert_io_point(self.db, "moxa_e1213_3", "Moxa ioLogik E1213 #3", pin, "output", "0")
@@ -385,6 +387,39 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(7, second["requested_state"])
         self.assertEqual("7", self.params.get_effective_value("MAS0001"))
         self.assertFalse(second["info"]["setup"]["pause_pending"])
+
+    def test_failed_setup_state_recovers_to_stop_for_retry(self):
+        runtime = self.build_runtime()
+        failed_ts = now_ts() - 30.0
+        runtime._write_state(
+            current_state=3,
+            requested_state=3,
+            state_source="test_failed_setup_stuck",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={
+                "setup": {
+                    "failed_ts": failed_ts,
+                    "last_result": {
+                        "ok": False,
+                        "response": "SETUP_WICKLER=NAK_DeviceComm",
+                        "error": "timed out",
+                    },
+                }
+            },
+        )
+
+        first = runtime.refresh()
+        second = runtime.refresh()
+
+        self.assertEqual(8, first["current_state"])
+        self.assertEqual(9, first["requested_state"])
+        self.assertEqual(9, second["current_state"])
+        self.assertEqual(9, second["requested_state"])
+        self.assertTrue(second["info"]["allowed_actions"]["setup"])
+        self.assertIn("failed_recovery_ts", second["info"]["setup"])
 
     def test_pause_idle_keeps_wicklers_ready_and_verifies_state(self):
         runtime = self.build_runtime()
@@ -1041,7 +1076,8 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(calls[0].startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"))
         self.assertNotIn("PROCESS PRODUCTION STOP", calls)
         self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
-        set_idle.assert_called_once_with(target_state=7, neutralize_indexed_start=True)
+        set_idle.assert_not_called()
+        self.assertEqual("label_removal_pause_keep_wicklers_armed", result["wicklers"][0]["skipped"])
         queue_tto.assert_not_called()
         hard_stop.assert_not_called()
 
@@ -1291,6 +1327,11 @@ class MachineRuntimeTests(unittest.TestCase):
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
         format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
 
+        def fake_production_esp(command, *args, **kwargs):
+            if str(command).startswith("PROCESS PRODUCTION RESUME_REMOVED"):
+                return 'JSON {"ok":true,"marked":[6,9],"missing":[],"running":true,"next_label_no":11,"mode":"indexed"}'
+            return "ACK"
+
         with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
             runtime,
             "_prepare_production_wicklers",
@@ -1311,6 +1352,10 @@ class MachineRuntimeTests(unittest.TestCase):
             runtime,
             "_sync_tto_printer_for_machine_state",
             side_effect=AssertionError("label removal resume must not use ZBC online/offline"),
+        ), patch.object(
+            runtime,
+            "_production_esp",
+            side_effect=fake_production_esp,
         ):
             result = runtime._start_production_motion(param_map, format_plan)
 
@@ -1321,8 +1366,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["param_sync"]["resume_reuse"])
         self.assertEqual("hardware_io", result["tto_printer"]["method"])
         self.assertTrue(result["tto_printer"]["zbc_skipped"])
-        self.assertFalse(result["tto_printer"]["ready"])
-        self.assertTrue(result["tto_printer"]["ready_warning"])
+        self.assertIn("ready", result["tto_printer"])
         self.assertTrue(result["tto_printer"]["resume_allowed"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
         self.assertNotIn("motor3_zero", result)
@@ -1333,6 +1377,104 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
         self.assertEqual(104.07, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
+        self.assertEqual(11, result["resume_wickler_gate"]["label_no"])
+        in_flight = runtime._production_wickler_start_already_in_flight(11)
+        self.assertIsNotNone(in_flight)
+        self.assertEqual("production_resume_removed_next_label_commanded", in_flight["event_type"])
+
+    def test_label_removal_resume_blocks_before_esp_when_wicklers_not_ready(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="label_removal_required",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=9,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:6,9",
+                    "label_removal_pending_labels": [6, 9],
+                    "label_removal_request": {"label_no": 6, "label_nos": [6, 9]},
+                    "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
+                    "last_stop": {"reason": "label_removal_required:6", "finished_ts": now_ts() - 1.0},
+                    "last_wickler_observed_travel": {"label_no": 9, "travel_mm": 104.07},
+                }
+            },
+        )
+        ok, msg = self.params.set_value("MAS0002", "1", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        commands: list[str] = []
+        failed_wicklers = {
+            "ok": False,
+            "errors": ["Abwickler: mode=Stoerung, Wippe 100.0%, Taenzerarm zu hoch"],
+            "results": [
+                {
+                    "role": "unwinder",
+                    "ok": False,
+                    "verify": {
+                        "ok": False,
+                        "errors": ["mode=Stoerung", "Wippe 100.0%", "Taenzerarm zu hoch"],
+                    },
+                }
+            ],
+        }
+
+        def fake_production_esp(command, *args, **kwargs):
+            commands.append(str(command))
+            return "ACK"
+
+        with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
+            runtime,
+            "_prepare_production_wicklers",
+            return_value=[{"ok": True, "role": "unwinder"}, {"ok": True, "role": "rewinder"}],
+        ), patch.object(
+            runtime,
+            "_prepare_production_wicklers_continuous",
+            side_effect=AssertionError("label removal resume must stay in indexed wickler mode"),
+        ), patch.object(
+            runtime,
+            "_production_wickler_verifications",
+            return_value=failed_wicklers,
+        ) as verify_wicklers, patch.object(
+            runtime,
+            "_production_esp",
+            side_effect=fake_production_esp,
+        ), patch.object(
+            runtime,
+            "_sync_production_params_to_esp",
+            side_effect=AssertionError("label removal resume must reuse existing ESP params"),
+        ), patch.object(
+            runtime,
+            "_sync_tto_printer_for_machine_state",
+            side_effect=AssertionError("label removal resume must not use ZBC online/offline"),
+        ), patch.object(
+            runtime,
+            "_stop_production_motion",
+            side_effect=AssertionError("pre-resume wickler block must not run generic production stop"),
+        ):
+            first = runtime.refresh()
+            second = runtime.refresh()
+
+        self.assertEqual(4, first["current_state"])
+        self.assertEqual(7, second["current_state"])
+        self.assertEqual(7, second["requested_state"])
+        production_info = second["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertTrue(production_info["paused"])
+        self.assertEqual("label_removal_required:6,9", production_info["pause_reason"])
+        self.assertEqual([6, 9], production_info["label_removal_pending_labels"])
+        self.assertTrue(production_info["last_start"]["skip_fail_stop"])
+        self.assertEqual(
+            "label_removal_resume_precheck_no_motion_started",
+            production_info["last_stop"]["skipped"],
+        )
+        self.assertEqual(1, verify_wicklers.call_count)
+        self.assertFalse(any(command.startswith("PROCESS PRODUCTION RESUME_REMOVED") for command in commands))
+        self.assertFalse(any(command.startswith("PROCESS PRODUCTION STOP") for command in commands))
 
     def test_production_start_duplicate_is_ignored_when_runner_already_active(self):
         runtime = self.build_runtime()
@@ -4843,14 +4985,68 @@ class MachineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             [
+                ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("esp32_plc58__Q2_2", False, True, "sea-vision-reset-second-pulse"),
                 ("esp32_plc58__Q0_2", True, True, "safety-reset"),
                 ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("esp32_plc58__Q2_2", True, True, "sea-vision-reset-second-pulse"),
                 ("esp32_plc58__Q0_2", True, True, "safety-reset"),
                 ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("esp32_plc58__Q2_2", False, True, "sea-vision-reset-second-pulse"),
             ],
             writes,
         )
-        self.assertEqual([0.2, 1.0, 0.2], [call.args[0] for call in sleep.call_args_list])
+        self.assertEqual([0.05, 0.2, 1.0, 0.2], [call.args[0] for call in sleep.call_args_list])
+
+    def test_sea_vision_ready_output_follows_pause_and_stop_states(self):
+        runtime = self.build_runtime()
+        writes: list[tuple[str, bool, bool, str]] = []
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, io_key, enabled, *, force=False, source="runtime", **_kwargs):
+                writes.append((io_key, bool(enabled), bool(force), source))
+                return {"ok": True}
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            high = runtime._apply_sea_vision_ready_output(7, ts=10.0)
+            cached = runtime._apply_sea_vision_ready_output(7, ts=10.5)
+            low = runtime._apply_sea_vision_ready_output(9, ts=11.0)
+
+        self.assertTrue(high["ok"])
+        self.assertEqual("cached", cached["skipped"])
+        self.assertTrue(low["ok"])
+        self.assertEqual(
+            [
+                ("esp32_plc58__Q2_3", True, True, "sea-vision-ready"),
+                ("esp32_plc58__Q2_3", False, True, "sea-vision-ready"),
+            ],
+            writes,
+        )
+
+    def test_reset_waits_for_esp_safety_inputs_after_pulse_sequence(self):
+        runtime = self.build_runtime()
+        self.io_store.upsert_value("esp32_plc58__I0_7", "0", "live", "test")
+        self.io_store.upsert_value("esp32_plc58__I0_8", "0", "live", "test")
+        refresh_calls = 0
+
+        def fake_refresh(*_args, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls >= 2:
+                self.io_store.upsert_value("esp32_plc58__I0_7", "1", "live", "test")
+                self.io_store.upsert_value("esp32_plc58__I0_8", "1", "live", "test")
+            return {"ok": True}
+
+        with patch.object(runtime, "_refresh_single_io_device", side_effect=fake_refresh), patch(
+            "mas004_rpi_databridge.machine_runtime.time.sleep"
+        ):
+            result = runtime._wait_for_esp_safety_inputs_high_after_reset(timeout_s=1.0, poll_s=0.1)
+
+        self.assertTrue(result["ok"], result)
+        self.assertGreaterEqual(refresh_calls, 2)
 
     def test_esp_q02_reset_pulses_laser_safety_reset_in_parallel_mode_when_ready(self):
         self.params.apply_device_value("MAP0079", "1", promote_default=True)
@@ -4881,13 +5077,17 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["laser_parallel_reset"]["enabled"])
         self.assertEqual(
             [
+                ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("esp32_plc58__Q2_2", False, True, "sea-vision-reset-second-pulse"),
                 ("moxa_e1213_1__DIO3", True, True, "laser-safety-reset-parallel"),
                 ("esp32_plc58__Q0_2", True, True, "safety-reset"),
                 ("esp32_plc58__Q0_2", False, True, "safety-reset"),
                 ("moxa_e1213_1__DIO3", False, True, "laser-safety-reset-parallel"),
                 ("moxa_e1213_1__DIO3", True, True, "laser-safety-reset-parallel"),
+                ("esp32_plc58__Q2_2", True, True, "sea-vision-reset-second-pulse"),
                 ("esp32_plc58__Q0_2", True, True, "safety-reset"),
                 ("esp32_plc58__Q0_2", False, True, "safety-reset"),
+                ("esp32_plc58__Q2_2", False, True, "sea-vision-reset-second-pulse"),
                 ("moxa_e1213_1__DIO3", False, True, "laser-safety-reset-parallel"),
             ],
             writes,
@@ -5817,7 +6017,11 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("label_removal_required:3", production_info["pause_reason"])
         self.assertEqual("0", self.params.get_effective_value("MAS0028"))
         runtime._stop_production_motion.assert_not_called()
-        runtime._set_production_wicklers_idle.assert_called_once_with(target_state=7, neutralize_indexed_start=True)
+        runtime._set_production_wicklers_idle.assert_not_called()
+        self.assertEqual(
+            "label_removal_pause_keep_wicklers_armed",
+            production_info["last_stop"]["wicklers"][0]["skipped"],
+        )
         runtime._queue_tto_printer_state_sync.assert_not_called()
         self.assertEqual("label_removal_pause_keep_online", production_info["last_stop"]["tto_printer"]["skipped"])
         runtime._notify_microtom.assert_not_called()

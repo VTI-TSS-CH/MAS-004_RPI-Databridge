@@ -1828,10 +1828,31 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             return bool(getattr(cfg_local, "moxa3_simulation", True))
         return False
 
+    def io_live_refresh_blocked_for_machine_window() -> bool:
+        try:
+            with db._conn() as conn:
+                row = conn.execute(
+                    "SELECT current_state, info_json FROM machine_state WHERE singleton_id=1"
+                ).fetchone()
+            if not row:
+                return False
+            state = int(row[0] or 0)
+            if state in (2, 3, 4, 5, 6, 8):
+                return True
+            info = json.loads(row[1] or "{}")
+            safety = dict(info.get("safety") or {})
+            if str(safety.get("phase") or "") == "resetting":
+                return True
+            production = dict(info.get("production_runtime") or {})
+            return bool(production.get("pending_start"))
+        except Exception:
+            return False
+
     def get_io_snapshot(*, live: bool = False) -> dict[str, Any]:
         cfg2 = Settings.load(cfg_path)
         runtime = IoRuntime(cfg2, io_store)
-        if live:
+        live_blocked = bool(live and io_live_refresh_blocked_for_machine_window())
+        if live and not live_blocked:
             payload = runtime.refresh()
             device_status = {item["device_code"]: item for item in (payload.get("devices") or [])}
         else:
@@ -1843,6 +1864,8 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 "points": points,
                 "snapshot_only": True,
             }
+            if live_blocked:
+                payload["live_refresh_skipped"] = "critical_machine_window"
             device_status = {}
             grouped_points: dict[str, list[dict[str, Any]]] = {}
             for point in points:

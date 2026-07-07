@@ -16,6 +16,25 @@
    - `ssh pi@192.168.210.20 "systemctl status mas004-rpi-databridge.service --no-pager"` (LIVE)
    - `curl -k https://<raspi-ip>:8080/health`
 
+## 1.0 Runtime Smoke After Deploy Or Flash
+- Use these checks directly after Databridge deploys, ESP flashes or service restarts. Do not rediscover the endpoint shape.
+- Service state:
+  - `ssh pi@10.141.94.213 "systemctl show mas004-rpi-databridge.service -p ActiveState -p SubState -p ExecMainPID -p NRestarts"`
+- WebUI health:
+  - use `GET https://127.0.0.1:8080/health` on the Raspi or `GET https://10.141.94.213:8080/health` from the laptop.
+  - do not use `/api/health`; it is not the health endpoint.
+  - do not use `HEAD`; the FastAPI handlers are GET-only and can return `405 Method Not Allowed` to HEAD.
+  - Raspi command: `ssh pi@10.141.94.213 "curl -kfsS https://127.0.0.1:8080/health"`
+- WebUI production page:
+  - `ssh pi@10.141.94.213 "curl -kf -L -o /dev/null -w '%{http_code} %{size_download}\n' https://127.0.0.1:8080/ui/machine-setup/production"`
+- ESP broker check:
+  - use the Databridge broker API, not a raw parallel TCP client to `192.168.2.101:3010`.
+  - preferred Raspi command: `ssh pi@10.141.94.213 "cd /opt/MAS-004_RPI-Databridge && .venv/bin/python scripts/esp_broker_api.py PING --priority"`
+  - expected reply: `PONG`.
+  - the script loads `/etc/mas004_rpi_databridge/config.json` and sends `X-Token` internally; do not hand-build JSON with nested SSH/Curl quoting.
+- Useful journal confirmation after restart:
+  - `ssh pi@10.141.94.213 "journalctl -u mas004-rpi-databridge.service --since '5 min ago' --no-pager | grep -E 'ESP-BROKER|PONG|Started|ERROR|Traceback'"`
+
 ## 1.1 Production IBN 10.141.94.x
 - This section prepares the former TEST machine as the next production/commissioning stand.
 - Production commissioning addresses:

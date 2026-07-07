@@ -667,6 +667,7 @@ class EspPlcClient:
         *,
         read_limit: int = 8192,
         priority: bool = False,
+        wait_timeout_s: float | None = None,
     ) -> str:
         if not self.host or self.port <= 0:
             raise RuntimeError("ESP endpoint missing")
@@ -691,14 +692,18 @@ class EspPlcClient:
                 3.0,
                 min(self.timeout_s + (read_timeout_s * _ESP_COMMAND_MAX_ATTEMPTS) + 2.0, 18.0),
             )
-            wait_timeout_s = max(command_window_s, min(self.timeout_s + read_timeout_s + 20.0, 60.0))
+            broker_wait_timeout_s = (
+                max(0.2, float(wait_timeout_s))
+                if wait_timeout_s is not None
+                else max(command_window_s, min(self.timeout_s + read_timeout_s + 20.0, 60.0))
+            )
             broker = _esp_command_broker(self.host, self.port, self.timeout_s)
             reply = broker.submit(
                 line,
                 read_timeout_s=read_timeout_s,
                 read_limit=read_limit,
                 priority=_esp_command_priority(line, priority),
-                wait_timeout_s=wait_timeout_s,
+                wait_timeout_s=broker_wait_timeout_s,
             )
             if priority:
                 state.priority_until_at = max(state.priority_until_at, time.monotonic() + 0.4)

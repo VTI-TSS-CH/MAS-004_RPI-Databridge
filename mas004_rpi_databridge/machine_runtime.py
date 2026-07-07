@@ -190,9 +190,17 @@ SAFETY_PHASE_READY = "ready"
 SAFETY_PHASE_FAILED = "failed"
 ESP_RESET_PULSE_HIGH_S = 0.2
 ESP_RESET_PULSE_GAP_S = 1.0
+ESP_RESET_PRE_PULSE_LOW_S = 0.05
 ESP_RESET_ENDPOINT_RECOVERY_TIMEOUT_S = 60.0
 ESP_RESET_ENDPOINT_RETRY_TIMEOUT_S = 45.0
 ESP_RESET_ENDPOINT_POLL_S = 0.5
+ESP_RESET_SAFETY_INPUT_READY_TIMEOUT_S = 5.0
+ESP_RESET_SAFETY_INPUT_READY_POLL_S = 0.2
+ESP_RESET_IO_KEY = "esp32_plc58__Q0_2"
+SEA_VISION_RESET_IO_KEY = "esp32_plc58__Q2_2"
+SEA_VISION_READY_IO_KEY = "esp32_plc58__Q2_3"
+SEA_VISION_READY_STATES = {4, 5, 6, 7}
+SEA_VISION_READY_FORCE_INTERVAL_S = 2.0
 LASER_SYSTEM_READY_PIN = "I0.12"
 LASER_READY_PIN = "I0.2"
 LASER_START_PIN = "Q0.3"
@@ -661,6 +669,8 @@ class MachineRuntime:
         self._button_led_last_plan: dict[str, bool] | None = None
         self._status_lamp_points_cache: dict[str, dict[str, Any]] | None = None
         self._status_lamp_last_plan: dict[str, bool] | None = None
+        self._sea_vision_ready_last_value: bool | None = None
+        self._sea_vision_ready_force_due_ts: float = 0.0
         production_log_dir = getattr(getattr(logs, "_production", None), "log_dir", None)
         self.production_logs = ProductionLogManager(
             db,
@@ -1368,7 +1378,13 @@ class MachineRuntime:
                         # reported cause is fixed.
                         self.params.apply_device_value("MAS0002", "2", promote_default=True)
                         requested_command = 2
+                        requested_state_override = 9
                         setup_info["failed_ts"] = now_ts()
+                        setup_info.pop("motion_recovery_pending", None)
+                        setup_info.pop("motion_recovery_pending_command_ts", None)
+                        setup_info.pop("motion_recovery_pending_ts", None)
+                        setup_info.pop("pause_pending", None)
+                        setup_info.pop("pause_pending_ts", None)
                         self._record_event(
                             "setup_failed_return_stop",
                             "warning",
@@ -1382,6 +1398,42 @@ class MachineRuntime:
             self._latest_machine_event_ts("setup_complete"),
         )
         setup_seen_ts = _safe_float(setup_info.get("mas0002_setup_seen_ts"), 0.0)
+        setup_last_result = setup_info.get("last_result") if isinstance(setup_info.get("last_result"), dict) else {}
+        setup_failed_ts = _safe_float(setup_info.get("failed_ts"), 0.0)
+        setup_failed_recovery_due = (
+            requested_state_override is None
+            and requested_command == 0
+            and int(snapshot["current_state"] or 0) in (2, 3)
+            and setup_failed_ts > 0.0
+            and not bool(setup_last_result.get("ok"))
+            and not bool(setup_last_result.get("running"))
+            and not bool(setup_last_result.get("waiting"))
+            and not _SETUP_WICKLER_LOCK.locked()
+            and forced_state is None
+            and not safety_latched
+            and not critical_active
+            and not _truthy(param_map.get("MAS0028", "0"))
+        )
+        if setup_failed_recovery_due:
+            requested_state_override = 9
+            setup_info["failed_recovery_ts"] = ts
+            setup_info.pop("motion_recovery_pending", None)
+            setup_info.pop("motion_recovery_pending_command_ts", None)
+            setup_info.pop("motion_recovery_pending_ts", None)
+            setup_info.pop("pause_pending", None)
+            setup_info.pop("pause_pending_ts", None)
+            setup_info.pop("pause_completed_ts", None)
+            info["setup"] = setup_info
+            self._record_event(
+                "setup_failed_recover_stop",
+                "warning",
+                "Fehlgeschlagenes Einrichten war noch in Status 2/3; Rueckkehr zu Produktions-Stop erzwungen",
+                {
+                    "target_state": 9,
+                    "failed_ts": setup_failed_ts,
+                    "last_result": setup_last_result,
+                },
+            )
         setup_pause_recovery_due = (
             requested_state_override is None
             and requested_command == 0
@@ -1630,22 +1682,46 @@ class MachineRuntime:
                 production_info.pop("label_removal_requests", None)
                 production_info.pop("label_removal_pending_labels", None)
             else:
-                self.logs.log("machine", "error", f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
+                failure_is_pre_resume_block = bool(start_result.get("skip_fail_stop"))
+                failure_severity = "warning" if failure_is_pre_resume_block else "error"
+                failure_event = "production_resume_blocked" if failure_is_pre_resume_block else "production_start_failed"
+                self.logs.log("machine", failure_severity, f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
                 self._record_event(
-                    "production_start_failed",
-                    "error",
+                    failure_event,
+                    failure_severity,
                     f"Produktionsstart fehlgeschlagen: {start_result.get('error')}",
                     start_result,
                 )
-                fail_stop = self._stop_production_motion(reason="production_start_failed", target_state=7)
+                if failure_is_pre_resume_block:
+                    fail_stop = {
+                        "ok": True,
+                        "skipped": str(start_result.get("skip_fail_stop_reason") or "motion_not_started"),
+                        "reason": str(start_result.get("error") or "production_resume_blocked"),
+                        "target_state": 7,
+                        "motion_started": False,
+                        "resume": start_result.get("resume"),
+                    }
+                    production_info["paused"] = True
+                    production_info["paused_ts"] = production_info.get("paused_ts") or now_ts()
+                    production_info["pause_reason"] = str(
+                        start_result.get("pause_reason")
+                        or production_info.get("pause_reason")
+                        or "label_removal_required"
+                    )
+                    production_info["resume_from_state"] = 7
+                    self.params.apply_device_value("MAS0002", "0", promote_default=True)
+                    requested_command = 0
+                else:
+                    fail_stop = self._stop_production_motion(reason="production_start_failed", target_state=7)
                 production_info["last_stop"] = fail_stop
                 production_info["active"] = False
-                event = self.production_logs.handle_param_change("MAS0002", "2")
-                if event and event.get("event") == "stop":
-                    self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
+                if not failure_is_pre_resume_block:
+                    event = self.production_logs.handle_param_change("MAS0002", "2")
+                    if event and event.get("event") == "stop":
+                        self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
                 new_state = 7
                 requested_state = 7
-                state_source = "production_start_failed"
+                state_source = "production_resume_blocked" if failure_is_pre_resume_block else "production_start_failed"
                 purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
 
         if bool(production_info.get("active")) and int(new_state or 0) == 5:
@@ -1833,6 +1909,7 @@ class MachineRuntime:
         # for the HMI/snapshot; writing here as well makes the blink cadence
         # race against the tick when refresh() work takes longer than usual.
         self._apply_status_lamp(new_state, warning_active=warning_active, ts=ts)
+        sea_vision_ready_output = self._apply_sea_vision_ready_output(new_state, ts=ts)
 
         machine_label = self._current_production_label()
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
@@ -1851,6 +1928,7 @@ class MachineRuntime:
                 "error_keys": sorted(pkey for pkey, value in param_map.items() if pkey.startswith("MAE") and _truthy(value)),
                 "status_lamp": lamp_outputs_for_state(new_state, warning_active=warning_active, ts=ts),
                 "button_leds": button_leds,
+                "sea_vision_ready_output": sea_vision_ready_output,
                 "format_plan": format_plan,
             }
         )
@@ -6389,7 +6467,14 @@ class MachineRuntime:
                 )
             except Exception as exc:
                 commands.append({"command": command, "ok": False, "error": repr(exc)})
-        wicklers = self._set_production_wicklers_idle(target_state=7, neutralize_indexed_start=True)
+        wicklers = [
+            {
+                "role": "both",
+                "ok": True,
+                "skipped": "label_removal_pause_keep_wicklers_armed",
+                "reason": last_error,
+            }
+        ]
         self._sync_esp_machine_state(7, required=False)
         tto_printer = {
             "ok": True,
@@ -7676,6 +7761,48 @@ class MachineRuntime:
             reason="production_resume_label_removal",
             ensure_ready=True,
         )
+        pre_resume_wicklers = self._production_wickler_verifications(
+            timeout_s=2.0,
+            require_indexed_mode=True,
+        )
+        if not pre_resume_wicklers.get("ok"):
+            error_text = (
+                "Wickler vor Entnahme-Resume nicht stabil: "
+                + "; ".join(str(error) for error in pre_resume_wicklers.get("errors") or ["unknown"])
+            )
+            result = {
+                "ok": False,
+                "resume": "label_removal",
+                "labels_expected_removed": labels,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "synced_state": 0,
+                "esp_state_prepared": 5,
+                "skip_fail_stop": True,
+                "skip_fail_stop_reason": "label_removal_resume_precheck_no_motion_started",
+                "motion_started": False,
+                "keep_pause": True,
+                "pause_reason": str(production_info.get("pause_reason") or f"label_removal_required:{label_text}"),
+                "error": error_text,
+                "synced_params": list(sync_info.get("synced") or []),
+                "skipped_synced_params": list(sync_info.get("skipped") or []),
+                "synced_param_values": dict(sync_info.get("values") or {}),
+                "param_sync": dict(sync_info),
+                "plan": plan,
+                "wicklers": wicklers,
+                "wickler_travel_mm": base_travel_mm,
+                "wickler_travel_source": base_source,
+                "pre_resume_wicklers": pre_resume_wicklers,
+                "laser_ready": laser_ready,
+                "tto_printer": tto_printer,
+            }
+            self._record_event(
+                "production_label_removal_resume_blocked",
+                "warning",
+                "Label-Entnahme-Resume blockiert: Wickler vor ESP-Resume nicht stabil",
+                result,
+            )
+            return result
         quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
         command = (
             "PROCESS PRODUCTION RESUME_REMOVED "
@@ -7687,6 +7814,7 @@ class MachineRuntime:
             command += " BAND_BREAK_BYPASS=1"
         response = self._production_esp(command, read_timeout_s=8.0, priority=True)
         response_text = str(response or "").strip()
+        response_payload: dict[str, Any] = {}
         if response_text.upper().startswith("JSON "):
             try:
                 response_payload = json.loads(response_text.removeprefix("JSON ").strip())
@@ -7694,6 +7822,19 @@ class MachineRuntime:
                 response_payload = {}
             if response_payload and not bool(response_payload.get("ok", True)):
                 raise RuntimeError(f"PROCESS PRODUCTION RESUME_REMOVED rejected: {response_text[:240]}")
+        resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
+        resume_wickler_gate: dict[str, Any] | None = None
+        if resume_next_label_no > 0:
+            resume_wickler_gate = {
+                "label_no": int(resume_next_label_no),
+                "source": "process_production_resume_removed",
+                "labels_removed": list(labels),
+                "ts": now_ts(),
+            }
+            self._remember_production_wickler_gate_event(
+                "production_resume_removed_next_label_commanded",
+                resume_wickler_gate,
+            )
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
@@ -7725,12 +7866,15 @@ class MachineRuntime:
             "wicklers": wicklers,
             "wickler_travel_mm": base_travel_mm,
             "wickler_travel_source": base_source,
+            "pre_resume_wicklers": pre_resume_wicklers,
             "post_start_wicklers": post_start_wicklers,
             "laser_ready": laser_ready,
             "tto_printer": tto_printer,
             "command": command,
             "response": response,
         }
+        if resume_wickler_gate is not None:
+            result["resume_wickler_gate"] = dict(resume_wickler_gate)
         if isinstance(production_info.get("label_removal_resume_validation"), dict):
             result["label_removal_resume_validation"] = dict(production_info["label_removal_resume_validation"])
         result["resume_state_commit"] = self._commit_successful_production_resume_state(
@@ -8156,10 +8300,20 @@ class MachineRuntime:
                 except Exception as exc:
                     commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
 
-            wicklers = self._set_production_wicklers_idle(
-                target_state=target_state,
-                neutralize_indexed_start=label_removal_pause,
-            )
+            if label_removal_pause:
+                wicklers = [
+                    {
+                        "role": "both",
+                        "ok": True,
+                        "skipped": "label_removal_pause_keep_wicklers_armed",
+                        "reason": reason,
+                    }
+                ]
+            else:
+                wicklers = self._set_production_wicklers_idle(
+                    target_state=target_state,
+                    neutralize_indexed_start=False,
+                )
             self._sync_esp_machine_state(int(target_state or 0), required=False)
             if label_removal_pause:
                 tto_printer = {
@@ -9897,22 +10051,17 @@ class MachineRuntime:
                 wait_after_reset.get("error") or "ESP command endpoint did not recover after reset pulse"
             )
 
-        refreshed = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
-        result["steps"].append({"step": "refresh_esp_io", "ok": bool(refreshed.get("ok", True)), "detail": refreshed})
-        if not bool(refreshed.get("ok", True)):
-            return finish_failure(refreshed.get("error") or "ESP safety IO refresh failed after reset sequence")
-        refreshed_io = self._io_values()
-        refreshed_safety = self._safety_status(refreshed_io)
-        refreshed_blocking_reasons = self._blocking_safety_reasons(refreshed_safety)
-        if refreshed_blocking_reasons:
-            result["blocked_by_safety"] = True
-            result["steps"].append(
-                {"step": "verify_safety_inputs_high_ok", "ok": False, "reasons": refreshed_blocking_reasons}
-            )
+        safety_ready = self._wait_for_esp_safety_inputs_high_after_reset(
+            timeout_s=ESP_RESET_SAFETY_INPUT_READY_TIMEOUT_S,
+            poll_s=ESP_RESET_SAFETY_INPUT_READY_POLL_S,
+        )
+        result["steps"].append({"step": "verify_safety_inputs_high_ok", **safety_ready})
+        if not bool(safety_ready.get("ok")):
+            result["blocked_by_safety"] = bool(safety_ready.get("blocked_by_safety"))
             return finish_failure(
-                "ESP safety input still LOW/not OK after reset sequence: " + ",".join(refreshed_blocking_reasons)
+                safety_ready.get("error")
+                or "ESP safety input still LOW/not OK after reset sequence"
             )
-        result["steps"].append({"step": "verify_safety_inputs_high_ok", "ok": True})
 
         if bool((result.get("laser_reset_interlock") or {}).get("laser_reset_required")):
             laser_reset = self._perform_laser_safety_reset_and_start()
@@ -9954,6 +10103,62 @@ class MachineRuntime:
         result["ok"] = True
         result["finished_ts"] = now_ts()
         return result
+
+    def _wait_for_esp_safety_inputs_high_after_reset(self, *, timeout_s: float, poll_s: float) -> dict[str, Any]:
+        started_ts = now_ts()
+        deadline = time.monotonic() + max(0.2, float(timeout_s or 0.2))
+        poll_interval_s = max(0.05, float(poll_s or 0.05))
+        attempts: list[dict[str, Any]] = []
+        last_error = ""
+        last_reasons: list[str] = []
+        while True:
+            try:
+                refreshed = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
+                io_map = self._io_values()
+                safety = self._safety_status(io_map)
+                reasons = self._blocking_safety_reasons(safety)
+                attempt = {
+                    "ts": now_ts(),
+                    "ok": bool(refreshed.get("ok", True)) and not bool(reasons),
+                    "refresh_ok": bool(refreshed.get("ok", True)),
+                    "reasons": list(reasons),
+                    "safety": {
+                        "estop_ok": bool(safety.get("estop_ok")),
+                        "light_curtain_ok": bool(safety.get("light_curtain_ok")),
+                        "reasons": list(safety.get("reasons") or []),
+                    },
+                }
+                attempts.append(attempt)
+                if attempt["ok"]:
+                    return {
+                        "ok": True,
+                        "started_ts": started_ts,
+                        "finished_ts": now_ts(),
+                        "duration_s": round(max(0.0, now_ts() - started_ts), 3),
+                        "attempts": attempts[-8:],
+                    }
+                if not bool(refreshed.get("ok", True)):
+                    last_error = str(refreshed.get("error") or "ESP safety IO refresh failed after reset sequence")
+                last_reasons = list(reasons)
+            except Exception as exc:
+                last_error = str(exc)
+                attempts.append({"ts": now_ts(), "ok": False, "error": last_error})
+            if time.monotonic() >= deadline:
+                error = last_error
+                if last_reasons:
+                    error = "ESP safety input still LOW/not OK after reset sequence: " + ",".join(last_reasons)
+                return {
+                    "ok": False,
+                    "started_ts": started_ts,
+                    "finished_ts": now_ts(),
+                    "duration_s": round(max(0.0, now_ts() - started_ts), 3),
+                    "timeout_s": float(timeout_s or 0.0),
+                    "blocked_by_safety": bool(last_reasons),
+                    "reasons": list(last_reasons),
+                    "error": error or "ESP safety inputs did not become ready after reset sequence",
+                    "attempts": attempts[-8:],
+                }
+            time.sleep(poll_interval_s)
 
     def _start_reset_motion_recovery_background(self) -> dict[str, Any]:
         if not _RESET_MOTION_RECOVERY_LOCK.acquire(blocking=False):
@@ -10156,9 +10361,12 @@ class MachineRuntime:
 
     def _pulse_esp_reset_output(self) -> dict[str, Any]:
         io_runtime = IoRuntime(self.cfg, self.io_store)
-        point = self.io_store.get_point("esp32_plc58__Q0_2")
+        point = self.io_store.get_point(ESP_RESET_IO_KEY)
         if not point:
             raise RuntimeError("ESP reset output Q0.2 is not defined in IO master")
+        sea_reset_point = self.io_store.get_point(SEA_VISION_RESET_IO_KEY)
+        if not sea_reset_point:
+            self.logs.log("machine", "warning", "safety-reset: SEA Vision Reset Q2.2 ist nicht im IO-Master definiert")
         laser_status = self._laser_reset_interlock_status(refresh=True)
         laser_point = None
         if bool(laser_status.get("laser_reset_required")):
@@ -10180,6 +10388,11 @@ class MachineRuntime:
         result: dict[str, Any] = {
             "ok": True,
             "esp_reset_io_key": point["io_key"],
+            "sea_vision_reset": {
+                "enabled": bool(sea_reset_point),
+                "io_key": sea_reset_point.get("io_key") if sea_reset_point else SEA_VISION_RESET_IO_KEY,
+                "second_pulse_only": True,
+            },
             "laser_parallel_reset": {
                 "enabled": bool(laser_point),
                 "io_key": laser_point.get("io_key") if laser_point else LASER_SAFETY_RESET_IO_KEY,
@@ -10188,6 +10401,7 @@ class MachineRuntime:
         }
         q_high = False
         laser_high = False
+        sea_reset_high = False
 
         def write_laser(enabled: bool) -> None:
             nonlocal laser_high
@@ -10206,7 +10420,22 @@ class MachineRuntime:
             io_runtime.write_output(point["io_key"], bool(enabled), force=True, source="safety-reset")
             q_high = bool(enabled)
 
+        def write_sea_reset(enabled: bool) -> None:
+            nonlocal sea_reset_high
+            if not sea_reset_point:
+                return
+            io_runtime.write_output(
+                sea_reset_point["io_key"],
+                bool(enabled),
+                force=True,
+                source="sea-vision-reset-second-pulse",
+            )
+            sea_reset_high = bool(enabled)
+
         try:
+            write_q02(False)
+            write_sea_reset(False)
+            time.sleep(ESP_RESET_PRE_PULSE_LOW_S)
             write_laser(True)
             write_q02(True)
             time.sleep(ESP_RESET_PULSE_HIGH_S)
@@ -10214,9 +10443,11 @@ class MachineRuntime:
             write_laser(False)
             time.sleep(ESP_RESET_PULSE_GAP_S)
             write_laser(True)
+            write_sea_reset(True)
             write_q02(True)
             time.sleep(ESP_RESET_PULSE_HIGH_S)
             write_q02(False)
+            write_sea_reset(False)
             write_laser(False)
             return result
         finally:
@@ -10225,6 +10456,16 @@ class MachineRuntime:
                     io_runtime.write_output(point["io_key"], False, force=True, source="safety-reset")
                 except Exception as exc:
                     self.logs.log("machine", "warning", f"safety-reset: failed to force Q0.2 LOW: {exc}")
+            if sea_reset_high and sea_reset_point:
+                try:
+                    io_runtime.write_output(
+                        sea_reset_point["io_key"],
+                        False,
+                        force=True,
+                        source="sea-vision-reset-second-pulse",
+                    )
+                except Exception as exc:
+                    self.logs.log("machine", "warning", f"safety-reset: failed to force Q2.2 LOW: {exc}")
             if laser_high and laser_point:
                 try:
                     io_runtime.write_output(
@@ -11084,6 +11325,41 @@ class MachineRuntime:
                 self.logs.log("machine", "info", f"status-lamp write skipped for {point['io_key']}: {exc}")
         if not had_error:
             self._status_lamp_last_plan = dict(lamp)
+
+    def _apply_sea_vision_ready_output(self, state: int, *, ts: float) -> dict[str, Any]:
+        desired = int(state or 0) in SEA_VISION_READY_STATES
+        point = self.io_store.get_point(SEA_VISION_READY_IO_KEY)
+        result: dict[str, Any] = {
+            "io_key": SEA_VISION_READY_IO_KEY,
+            "desired": bool(desired),
+            "state": int(state or 0),
+            "ts": float(ts),
+        }
+        if not point:
+            result.update({"ok": False, "skipped": "io_point_missing"})
+            return result
+        force = (
+            self._sea_vision_ready_last_value is None
+            or bool(self._sea_vision_ready_last_value) != bool(desired)
+            or float(ts) >= float(self._sea_vision_ready_force_due_ts or 0.0)
+        )
+        if not force:
+            result.update({"ok": True, "skipped": "cached", "value": bool(desired)})
+            return result
+        try:
+            write_result = IoRuntime(self.cfg, self.io_store).write_output(
+                point["io_key"],
+                bool(desired),
+                force=True,
+                source="sea-vision-ready",
+            )
+            self._sea_vision_ready_last_value = bool(desired)
+            self._sea_vision_ready_force_due_ts = float(ts) + SEA_VISION_READY_FORCE_INTERVAL_S
+            result.update({"ok": True, "value": bool(desired), "write": write_result})
+        except Exception as exc:
+            result.update({"ok": False, "error": str(exc)})
+            self.logs.log("machine", "warning", f"SEA-Vision Ready Q0.2 konnte nicht gesetzt werden: {exc}")
+        return result
 
     def _current_production_label(self) -> str:
         active = self.production_logs.active_state()

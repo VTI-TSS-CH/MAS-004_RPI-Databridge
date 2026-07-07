@@ -75,7 +75,7 @@ def disable_global_esp_motor_polling(cfg: Settings) -> None:
     try:
         client = EspMotorClient(cfg)
         if client.available():
-            result = client.set_poll(False)
+            result = client.set_poll(False, wait_timeout_s=2.0)
             print(f"[MOTORS] global ESP motor auto-poll disabled: {result.get('reply')}", flush=True)
     except Exception as exc:
         print(f"[MOTORS] global ESP motor auto-poll disable skipped: {exc!r}", flush=True)
@@ -106,6 +106,11 @@ def start_global_esp_command_broker(cfg: Settings) -> None:
             )
     except Exception as exc:
         print(f"[ESP-BROKER] startup skipped: {exc!r}", flush=True)
+
+
+def esp_startup_command_tasks(cfg: Settings) -> None:
+    start_global_esp_command_broker(cfg)
+    disable_global_esp_motor_polling(cfg)
 
 
 def install_thread_dump_signal() -> None:
@@ -356,7 +361,7 @@ def esp_push_listener_loop(cfg_path: str, push_mgr: EspPushListenerManager):
         time.sleep(5.0)
 
 
-def _esp_io_poll_paused_for_critical_motion(db: DB) -> bool:
+def _io_poll_paused_for_critical_motion(db: DB) -> bool:
     try:
         with db._conn() as conn:
             row = conn.execute(
@@ -427,12 +432,14 @@ def io_runtime_loop(cfg_path: str):
                 )
                 if device_code in intervals and now_m >= float(next_due_by_device.get(device_code, 0.0))
             ]
-            if "esp32_plc58" in due_devices and _esp_io_poll_paused_for_critical_motion(db):
-                due_devices.remove("esp32_plc58")
-                next_due_by_device["esp32_plc58"] = now_m + max(
-                    2.0,
-                    float(getattr(cfg, "esp_io_poll_interval_s", 1.0) or 1.0),
-                )
+            if due_devices and _io_poll_paused_for_critical_motion(db):
+                skipped_devices = [device_code for device_code in due_devices if device_code != "raspi_plc21"]
+                due_devices = [device_code for device_code in due_devices if device_code == "raspi_plc21"]
+                for device_code in skipped_devices:
+                    next_due_by_device[device_code] = now_m + max(
+                        2.0,
+                        intervals.get(device_code, 1.0),
+                    )
             runtime = IoRuntime(cfg, io_store)
             for device_code in due_devices:
                 started = time.monotonic()
@@ -633,8 +640,13 @@ def main():
     except Exception as e:
         print(f"[IO] startup import skipped: {repr(e)}", flush=True)
 
-    start_global_esp_command_broker(cfg)
-    disable_global_esp_motor_polling(cfg)
+    esp_startup_t = threading.Thread(
+        target=esp_startup_command_tasks,
+        args=(cfg,),
+        daemon=True,
+        name="esp-startup-command-tasks",
+    )
+    esp_startup_t.start()
 
     ntp_t = threading.Thread(target=ntp_loop, args=(cfg_path,), daemon=True, name="ntp-loop")
     ntp_t.start()

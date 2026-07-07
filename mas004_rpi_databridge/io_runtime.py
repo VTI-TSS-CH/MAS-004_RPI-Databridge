@@ -115,7 +115,7 @@ class IoRuntime:
         devices: List[Dict[str, Any]] = []
         changed = 0
 
-        for device_code, device_points in grouped.items():
+        for device_code, device_points in sorted(grouped.items(), key=lambda item: item[0] == "esp32_plc58"):
             device_result = self._refresh_device(device_code, device_points)
             devices.append(device_result)
             changed += int(device_result.get("changed", 0) or 0)
@@ -304,9 +304,17 @@ class IoRuntime:
                     1.0,
                 ),
             )
+            snapshot_wait_timeout_s = max(
+                0.5,
+                min(
+                    self.cfg.get_float("esp_connect_timeout_s", 1.5) + snapshot_timeout_s + 0.25,
+                    2.0,
+                ),
+            )
             raw = client.exchange_line(
                 "IO SNAPSHOT?",
                 read_timeout_s=snapshot_timeout_s,
+                wait_timeout_s=snapshot_wait_timeout_s,
             )
             payload = json.loads(raw or "{}")
             snapshot = payload.get("points") if isinstance(payload, dict) else {}

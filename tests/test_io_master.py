@@ -355,6 +355,84 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual("live", store.get_point("moxa_e1213_3__DIO0")["quality"])
             self.assertEqual("1", store.get_point("moxa_e1213_3__DIO0")["value"])
 
+    def test_full_refresh_handles_esp_after_other_devices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_simulation=False,
+                    raspi_io_simulation=True,
+                    moxa1_simulation=True,
+                    moxa2_simulation=True,
+                    moxa3_simulation=True,
+                ),
+                store,
+            )
+            order = []
+
+            def fake_refresh(device_code, device_points):
+                order.append(device_code)
+                return {"device_code": device_code, "changed": 0}
+
+            with patch.object(runtime, "_refresh_device", side_effect=fake_refresh):
+                runtime.refresh(include_points=False)
+
+            self.assertEqual("esp32_plc58", order[-1])
+
+    def test_esp_io_snapshot_uses_short_broker_wait_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_host="127.0.0.1",
+                    esp_port=3010,
+                    esp_simulation=False,
+                    esp_connect_timeout_s=1.5,
+                    esp_io_snapshot_timeout_s=0.75,
+                    esp_read_timeout_s=2.0,
+                ),
+                store,
+            )
+            captured = {}
+
+            class FakeEspClient:
+                def __init__(self, host, port, timeout_s):
+                    pass
+
+                def diagnostics(self):
+                    return {"queue_depth": 0, "active_line": "", "priority_until_at": 0.0}
+
+                def exchange_line(self, line, read_timeout_s=None, **kwargs):
+                    captured["line"] = line
+                    captured["read_timeout_s"] = read_timeout_s
+                    captured.update(kwargs)
+                    return '{"points":{"I0.0":1,"I0.7":1,"I0.8":1}}'
+
+            with patch("mas004_rpi_databridge.io_runtime.EspPlcClient", FakeEspClient):
+                result = runtime.refresh(include_points=False, device_codes={"esp32_plc58"})
+
+            self.assertTrue(result["devices"][0]["reachable"])
+            self.assertEqual("IO SNAPSHOT?", captured["line"])
+            self.assertEqual(0.75, captured["read_timeout_s"])
+            self.assertLessEqual(captured["wait_timeout_s"], 2.0)
+            self.assertGreaterEqual(captured["wait_timeout_s"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()
