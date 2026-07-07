@@ -144,22 +144,37 @@ class IoRuntime:
         force: bool = False,
         source: str = "runtime",
         best_effort: bool = False,
+        override_owner: bool = False,
     ) -> Dict[str, Any]:
         point = self.store.get_point(io_key)
         if not point:
             raise RuntimeError(f"Unknown IO point '{io_key}'")
         if point["io_dir"] not in {"output", "gpio"}:
             raise RuntimeError(f"IO point '{point['pin_label']}' is not writable")
-        if bool(point.get("override_active")) and not force:
+        requested_value = 1 if enabled else 0
+        if bool(point.get("override_active")) and not override_owner:
             override_value = _to_int01(point.get("override_value", point.get("value", "0")))
-            return {
+            override_source = str(point.get("override_source") or "manual-ui")
+            self.store.upsert_value(io_key, override_value, "override", override_source)
+            result: Dict[str, Any] = {
                 "ok": True,
                 "overridden": True,
-                "requested_value": 1 if enabled else 0,
+                "requested_value": requested_value,
                 "value": override_value,
                 "source": source,
+                "override_source": override_source,
             }
-        requested_value = 1 if enabled else 0
+            if force or requested_value != override_value or _to_int01(point.get("value", "0")) != override_value:
+                sync_result = self._write_physical_output(
+                    point,
+                    bool(override_value),
+                    source=override_source,
+                    best_effort=True,
+                    record_quality="override",
+                    record_source=override_source,
+                )
+                result["override_sync"] = sync_result
+            return result
         if self._is_unchanged_live_output(point, requested_value, force=force):
             return {
                 "ok": True,
@@ -168,40 +183,88 @@ class IoRuntime:
                 "source": source,
             }
 
+        return self._write_physical_output(point, bool(enabled), source=source, best_effort=best_effort)
+
+    def _write_physical_output(
+        self,
+        point: Dict[str, Any],
+        enabled: bool,
+        *,
+        source: str,
+        best_effort: bool = False,
+        record_quality: str | None = None,
+        record_source: str | None = None,
+    ) -> Dict[str, Any]:
+        io_key = str(point["io_key"])
+        requested_value = 1 if enabled else 0
         device_code = point["device_code"]
         if device_code == "esp32_plc58":
             if bool(self.cfg.esp_simulation) or not (self.cfg.esp_host or "").strip() or int(self.cfg.esp_port or 0) <= 0:
-                self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", "esp-sim")
-                return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
-            client = EspPlcClient(
-                self.cfg.esp_host,
-                self.cfg.esp_port,
-                timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
-            )
-            response = client.exchange_line(
-                f"IO SET {point['pin_label']}={1 if enabled else 0}",
-                read_timeout_s=self.cfg.get_float("esp_command_timeout_s", 8.0),
-            )
-            if "NAK" in (response or "").upper():
-                raise RuntimeError(response)
-            self.store.upsert_value(io_key, 1 if enabled else 0, "live", "esp32")
-            return {"ok": True, "simulation": False, "response": response, "value": 1 if enabled else 0}
+                self.store.upsert_value(
+                    io_key,
+                    requested_value,
+                    record_quality or "simulation",
+                    record_source or "esp-sim",
+                )
+                return {"ok": True, "simulation": True, "value": requested_value}
+            try:
+                client = EspPlcClient(
+                    self.cfg.esp_host,
+                    self.cfg.esp_port,
+                    timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
+                )
+                response = client.exchange_line(
+                    f"IO SET {point['pin_label']}={requested_value}",
+                    read_timeout_s=self.cfg.get_float("esp_command_timeout_s", 8.0),
+                )
+                if "NAK" in (response or "").upper():
+                    raise RuntimeError(response)
+                self.store.upsert_value(
+                    io_key,
+                    requested_value,
+                    record_quality or "live",
+                    record_source or "esp32",
+                )
+                return {"ok": True, "simulation": False, "response": response, "value": requested_value}
+            except Exception as exc:
+                if best_effort:
+                    return {
+                        "ok": False,
+                        "simulation": False,
+                        "value": _to_int01(point.get("value", "0")),
+                        "error": str(exc),
+                        "best_effort": True,
+                    }
+                raise
 
         if device_code in _MOXA_DEVICE_CODES:
             host, port, simulation = self._moxa_target(device_code)
             if simulation or not host or int(port or 0) <= 0:
-                self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", device_code)
-                return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
+                self.store.upsert_value(
+                    io_key,
+                    requested_value,
+                    record_quality or "simulation",
+                    record_source or device_code,
+                )
+                return {"ok": True, "simulation": True, "value": requested_value}
             try:
                 def _write():
                     client = self._moxa_client(device_code, host, int(port))
                     return client.write_output_label(str(point["pin_label"]), enabled)
 
                 self._moxa_call(device_code, _write)
-                self.store.upsert_value(io_key, 1 if enabled else 0, "live", device_code)
-                return {"ok": True, "simulation": False, "value": 1 if enabled else 0}
+                self.store.upsert_value(
+                    io_key,
+                    requested_value,
+                    record_quality or "live",
+                    record_source or device_code,
+                )
+                return {"ok": True, "simulation": False, "value": requested_value}
             except Exception as exc:
-                self.store.upsert_value(io_key, point.get("value", "0"), "offline", device_code)
+                if record_quality:
+                    self.store.upsert_value(io_key, point.get("value", "0"), record_quality, record_source or source)
+                else:
+                    self.store.upsert_value(io_key, point.get("value", "0"), "offline", device_code)
                 if best_effort:
                     return {
                         "ok": False,
@@ -214,17 +277,38 @@ class IoRuntime:
 
         if device_code == "raspi_plc21":
             if bool(getattr(self.cfg, "raspi_io_simulation", True)):
-                self.store.upsert_value(io_key, 1 if enabled else 0, "simulation", "raspi")
-                return {"ok": True, "simulation": True, "value": 1 if enabled else 0}
-            rpiplc, error = _ensure_rpiplc(str(getattr(self.cfg, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21"))
-            if rpiplc is None:
-                raise RuntimeError(f"rpiplc unavailable: {error}")
-            pin = point["pin_label"]
-            with _RPIPLC_LOCK:
-                rpiplc.pin_mode(pin, rpiplc.OUTPUT)
-                rpiplc.digital_write(pin, rpiplc.HIGH if enabled else rpiplc.LOW)
-            self.store.upsert_value(io_key, 1 if enabled else 0, "live", "raspi")
-            return {"ok": True, "simulation": False, "value": 1 if enabled else 0}
+                self.store.upsert_value(
+                    io_key,
+                    requested_value,
+                    record_quality or "simulation",
+                    record_source or "raspi",
+                )
+                return {"ok": True, "simulation": True, "value": requested_value}
+            try:
+                rpiplc, error = _ensure_rpiplc(str(getattr(self.cfg, "raspi_plc_model", "RPIPLC_21") or "RPIPLC_21"))
+                if rpiplc is None:
+                    raise RuntimeError(f"rpiplc unavailable: {error}")
+                pin = point["pin_label"]
+                with _RPIPLC_LOCK:
+                    rpiplc.pin_mode(pin, rpiplc.OUTPUT)
+                    rpiplc.digital_write(pin, rpiplc.HIGH if enabled else rpiplc.LOW)
+                self.store.upsert_value(
+                    io_key,
+                    requested_value,
+                    record_quality or "live",
+                    record_source or "raspi",
+                )
+                return {"ok": True, "simulation": False, "value": requested_value}
+            except Exception as exc:
+                if best_effort:
+                    return {
+                        "ok": False,
+                        "simulation": False,
+                        "value": _to_int01(point.get("value", "0")),
+                        "error": str(exc),
+                        "best_effort": True,
+                    }
+                raise
 
         raise RuntimeError(f"Unsupported writable IO device '{device_code}'")
 
@@ -236,8 +320,24 @@ class IoRuntime:
             raise RuntimeError(f"IO point '{point['pin_label']}' is not writable")
         if self._is_pulse_only(point):
             raise RuntimeError(f"IO point '{point['pin_label']}' is pulse-only and cannot be overridden")
-        write_result = self.write_output(io_key, enabled, force=True, source=source)
+        previous_override_active = bool(point.get("override_active"))
+        previous_override_value = point.get("override_value")
+        previous_override_source = str(point.get("override_source") or "manual-ui")
         override_result = self.store.set_override(io_key, 1 if enabled else 0, source=source)
+        try:
+            write_result = self.write_output(
+                io_key,
+                enabled,
+                force=True,
+                source=source,
+                override_owner=True,
+            )
+        except Exception:
+            if previous_override_active:
+                self.store.set_override(io_key, previous_override_value, source=previous_override_source)
+            else:
+                self.store.release_override(io_key)
+            raise
         write_result.update(override_result)
         return write_result
 
@@ -325,6 +425,7 @@ class IoRuntime:
             )
             payload = json.loads(raw or "{}")
             snapshot = payload.get("points") if isinstance(payload, dict) else {}
+            override_enforced = self._enforce_snapshot_overrides("esp32_plc58", device_points, snapshot or {})
             changed = self._upsert_runtime_values(
                 (
                     point,
@@ -337,7 +438,10 @@ class IoRuntime:
             _ESP_IO_COOLDOWN_UNTIL = 0.0
             _ESP_IO_COOLDOWN_ERROR = ""
             self._record_device_live("esp32_plc58")
-            return self._device_result("esp32_plc58", device_points, False, True, "", changed)
+            result = self._device_result("esp32_plc58", device_points, False, True, "", changed)
+            if override_enforced:
+                result["override_enforced"] = override_enforced
+            return result
         except Exception as exc:
             _ESP_IO_COOLDOWN_ERROR = str(exc)
             _ESP_IO_COOLDOWN_UNTIL = time.monotonic() + max(
@@ -387,6 +491,7 @@ class IoRuntime:
                 return client.read_outputs(labels=labels)
 
             snapshot = self._moxa_call(device_code, _read)
+            override_enforced = self._enforce_snapshot_overrides(device_code, device_points, snapshot or {})
             changed = self._upsert_runtime_values(
                 (
                     point,
@@ -397,7 +502,10 @@ class IoRuntime:
                 for point in device_points
             )
             self._record_device_live(device_code)
-            return self._device_result(device_code, device_points, False, True, "", changed)
+            result = self._device_result(device_code, device_points, False, True, "", changed)
+            if override_enforced:
+                result["override_enforced"] = override_enforced
+            return result
         except _MoxaEndpointCooldown as exc:
             result = self._device_result(device_code, device_points, False, False, str(exc), 0)
             result["debounced"] = True
@@ -433,6 +541,46 @@ class IoRuntime:
             values.append((point, fallback, quality, source))
         changed = self._upsert_runtime_values(values)
         return self._device_result(device_code, device_points, quality == "simulation", False, error, changed)
+
+    def _enforce_snapshot_overrides(
+        self,
+        device_code: str,
+        device_points: List[Dict[str, Any]],
+        snapshot: Dict[str, Any],
+    ) -> list[Dict[str, Any]]:
+        enforced: list[Dict[str, Any]] = []
+        for point in device_points:
+            if not bool(point.get("override_active")):
+                continue
+            if point.get("io_dir") not in {"output", "gpio"}:
+                continue
+            pin_label = str(point.get("pin_label") or "").strip()
+            if not pin_label or pin_label not in snapshot:
+                continue
+            override_value = _to_int01(point.get("override_value", point.get("value", "0")))
+            observed_value = _to_int01(snapshot.get(pin_label))
+            if observed_value == override_value:
+                continue
+            override_source = str(point.get("override_source") or "manual-ui")
+            write_result = self._write_physical_output(
+                point,
+                bool(override_value),
+                source=override_source,
+                best_effort=True,
+                record_quality="override",
+                record_source=override_source,
+            )
+            write_result.update(
+                {
+                    "io_key": point.get("io_key"),
+                    "device_code": device_code,
+                    "pin_label": pin_label,
+                    "observed_value": observed_value,
+                    "override_value": override_value,
+                }
+            )
+            enforced.append(write_result)
+        return enforced
 
     def _record_device_live(self, device_code: str) -> None:
         _DEVICE_OFFLINE_FAILURES.pop(str(device_code or ""), None)

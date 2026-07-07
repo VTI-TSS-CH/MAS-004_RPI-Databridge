@@ -359,12 +359,17 @@ class IoStore:
             keys = [item[0] for item in normalized]
             placeholders = ",".join("?" for _key in keys)
             rows = conn.execute(
-                f"SELECT io_key, value, quality, source, updated_ts FROM io_values WHERE io_key IN ({placeholders})",
+                f"""SELECT io_key, value, quality, source, updated_ts, override_value, override_source
+                    FROM io_values WHERE io_key IN ({placeholders})""",
                 keys,
             ).fetchall()
             current_by_key = {str(row[0]): row for row in rows}
             for io_key, text_value, quality_txt, source_txt in normalized:
                 current = current_by_key.get(io_key)
+                if current and current[5] is not None:
+                    text_value = str(_to_int01(current[5]))
+                    quality_txt = "override"
+                    source_txt = _to_clean_str(current[6]) or "manual-ui"
                 changed = not (
                     current
                     and current[1] == text_value

@@ -187,12 +187,120 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual("1", point["value"])
             self.assertTrue(point["override_active"])
 
+            force_result = runtime.write_output(io_key, False, force=True, source="safety-led")
+            self.assertTrue(force_result["overridden"])
+            point = store.get_point(io_key)
+            self.assertEqual("1", point["value"])
+            self.assertEqual("override", point["quality"])
+            self.assertTrue(point["override_active"])
+
+            store.upsert_value(io_key, "0", "live", "poller")
+            point = store.get_point(io_key)
+            self.assertEqual("1", point["value"])
+            self.assertEqual("override", point["quality"])
+            self.assertTrue(point["override_active"])
+
             release_result = runtime.release_override(io_key)
             self.assertTrue(release_result["released"])
             runtime.write_output(io_key, False)
             point = store.get_point(io_key)
             self.assertEqual("0", point["value"])
             self.assertFalse(point["override_active"])
+
+    def test_esp_override_blocks_force_writer_and_reasserts_override_value(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_host="127.0.0.1",
+                    esp_port=3010,
+                    esp_simulation=False,
+                    raspi_io_simulation=True,
+                    moxa1_simulation=True,
+                    moxa2_simulation=True,
+                    moxa3_simulation=True,
+                ),
+                store,
+            )
+            commands: list[str] = []
+
+            class FakeEspClient:
+                def __init__(self, host, port, timeout_s):
+                    pass
+
+                def exchange_line(self, line, **_kwargs):
+                    commands.append(str(line))
+                    return "ACK"
+
+            with patch("mas004_rpi_databridge.io_runtime.EspPlcClient", FakeEspClient):
+                runtime.override_output("esp32_plc58__GPIO0", True, source="test-ui")
+                runtime.write_output("esp32_plc58__GPIO0", False, force=True, source="safety-reset")
+
+            self.assertNotIn("IO SET GPIO0=0", commands)
+            self.assertGreaterEqual(commands.count("IO SET GPIO0=1"), 2)
+            point = store.get_point("esp32_plc58__GPIO0")
+            self.assertEqual("1", point["value"])
+            self.assertEqual("override", point["quality"])
+            self.assertTrue(point["override_active"])
+
+    def test_esp_refresh_reasserts_physical_output_when_override_snapshot_differs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_host="127.0.0.1",
+                    esp_port=3010,
+                    esp_simulation=False,
+                    raspi_io_simulation=True,
+                    moxa1_simulation=True,
+                    moxa2_simulation=True,
+                    moxa3_simulation=True,
+                ),
+                store,
+            )
+            commands: list[str] = []
+
+            class FakeEspClient:
+                def __init__(self, host, port, timeout_s):
+                    pass
+
+                def diagnostics(self):
+                    return {"queue_depth": 0, "active_line": "", "priority_until_at": 0.0}
+
+                def exchange_line(self, line, **_kwargs):
+                    commands.append(str(line))
+                    if str(line) == "IO SNAPSHOT?":
+                        return '{"points":{"GPIO0":0,"I0.0":1,"I0.7":1,"I0.8":1}}'
+                    return "ACK"
+
+            with patch("mas004_rpi_databridge.io_runtime.EspPlcClient", FakeEspClient):
+                runtime.override_output("esp32_plc58__GPIO0", True, source="test-ui")
+                commands.clear()
+                result = runtime.refresh(include_points=False, device_codes={"esp32_plc58"})
+
+            self.assertIn("IO SNAPSHOT?", commands)
+            self.assertIn("IO SET GPIO0=1", commands)
+            self.assertTrue(result["devices"][0]["override_enforced"])
+            point = store.get_point("esp32_plc58__GPIO0")
+            self.assertEqual("1", point["value"])
+            self.assertEqual("override", point["quality"])
+            self.assertTrue(point["override_active"])
 
     def test_gpio0_can_be_overridden_after_led_moved_to_tx1(self):
         with tempfile.TemporaryDirectory() as tmpdir:
