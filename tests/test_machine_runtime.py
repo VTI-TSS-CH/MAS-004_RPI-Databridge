@@ -1546,16 +1546,7 @@ class MachineRuntimeTests(unittest.TestCase):
         with patch.object(
             runtime,
             "_validate_label_removal_resume_on_esp",
-            return_value={
-                "ok": True,
-                "valid": False,
-                "stale": True,
-                "labels": [3],
-                "labels_active": 0,
-                "active_labels": [],
-                "missing": [3],
-                "not_pending": [],
-            },
+            side_effect=AssertionError("label removal resume must not query ESP visualization"),
         ), patch.object(
             runtime,
             "_prepare_production_wicklers",
@@ -1576,7 +1567,12 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=3", result["command"])
         self.assertNotIn("motor3_zero", result)
         self.assertNotIn("cleared_label_removal_state", result)
-        self.assertTrue(result["label_removal_resume_validation"]["stale"])
+        self.assertFalse(result["label_removal_resume_validation"]["stale"])
+        self.assertTrue(result["label_removal_resume_validation"]["skipped"])
+        self.assertEqual(
+            "raspi_label_removal_pause_state_authoritative",
+            result["label_removal_resume_validation"]["reason"],
+        )
         prepare_indexed.assert_called_once()
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
 
