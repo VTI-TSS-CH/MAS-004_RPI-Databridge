@@ -201,6 +201,7 @@ SEA_VISION_RESET_IO_KEY = "esp32_plc58__Q2_2"
 SEA_VISION_READY_IO_KEY = "esp32_plc58__Q2_3"
 SEA_VISION_READY_STATES = {4, 5, 6, 7}
 SEA_VISION_READY_FORCE_INTERVAL_S = 2.0
+SEA_VISION_READY_RETRY_BACKOFF_S = 30.0
 LASER_SYSTEM_READY_PIN = "I0.12"
 LASER_READY_PIN = "I0.2"
 LASER_START_PIN = "Q0.3"
@@ -675,6 +676,8 @@ class MachineRuntime:
         self._status_lamp_last_plan: dict[str, bool] | None = None
         self._sea_vision_ready_last_value: bool | None = None
         self._sea_vision_ready_force_due_ts: float = 0.0
+        self._sea_vision_ready_retry_due_ts: float = 0.0
+        self._sea_vision_ready_last_error: str = ""
         production_log_dir = getattr(getattr(logs, "_production", None), "log_dir", None)
         self.production_logs = ProductionLogManager(
             db,
@@ -5045,6 +5048,75 @@ class MachineRuntime:
         thread.start()
         return {**plan, "ok": True, "queued": True, "reason": str(reason or "")}
 
+    def _sync_laser_start_for_machine_state(
+        self,
+        machine_state: int,
+        param_map: dict[str, str],
+        *,
+        reason: str,
+        required: bool = False,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": True,
+            "machine_state": int(machine_state or 0),
+            "active_printer": "laser",
+            "reason": str(reason or ""),
+            "pin": LASER_START_PIN,
+        }
+        if not self._laser_printer_active(param_map):
+            return {**result, "skipped": "laser_not_selected"}
+        if _truthy(param_map.get("MAP0035", self.params.get_effective_value("MAP0035"))):
+            return {**result, "skipped": "printer_bypass_active"}
+        if int(machine_state or 0) != 5:
+            return {**result, "skipped": "laser_start_not_required_for_state"}
+        try:
+            result["laser_ready"] = self._ensure_laser_ready_for_production_start(param_map)
+            result["laser_start"] = self._pulse_io_output(
+                f"esp32_plc58__{LASER_START_PIN.replace('.', '_')}",
+                high_s=LASER_START_PULSE_HIGH_S,
+                source=f"laser-printer-state-{int(machine_state or 0)}",
+            )
+            self._record_event(
+                "laser_printer_start_sync",
+                "info",
+                "Laser Start Q0.3 fuer Produktionsstart gepulst",
+                result,
+            )
+            return result
+        except Exception as exc:
+            result.update({"ok": False, "error": str(exc)})
+            self._record_event(
+                "laser_printer_start_sync_failed",
+                "error" if required else "warning",
+                "Laser Start Q0.3 konnte nicht gepulst werden",
+                result,
+            )
+            if required:
+                raise
+            return result
+
+    def _sync_selected_printer_for_machine_state(
+        self,
+        machine_state: int,
+        param_map: dict[str, str],
+        *,
+        reason: str,
+        required: bool = False,
+    ) -> dict[str, Any]:
+        if self._laser_printer_active(param_map):
+            return self._sync_laser_start_for_machine_state(
+                machine_state,
+                param_map,
+                reason=reason,
+                required=required,
+            )
+        return self._sync_tto_printer_for_machine_state(
+            machine_state,
+            param_map,
+            reason=reason,
+            required=required,
+        )
+
     def _production_esp_sync_values(self, param_map: dict[str, str]) -> dict[str, str]:
         values: dict[str, str] = {}
         keys = list(PRODUCTION_ESP_SYNC_KEYS)
@@ -7723,7 +7795,7 @@ class MachineRuntime:
         pause_reason = str(production_info.get("pause_reason") or "operator_pause")
         laser_ready = self._ensure_laser_ready_for_production_start(param_map)
         self._sync_esp_machine_state(5, required=True)
-        tto_printer = self._sync_tto_printer_for_machine_state(
+        tto_printer = self._sync_selected_printer_for_machine_state(
             5,
             param_map,
             reason="production_resume_pause",
@@ -8092,7 +8164,7 @@ class MachineRuntime:
             laser_ready = self._ensure_laser_ready_for_production_start(param_map)
             self._sync_esp_machine_state(5, required=True)
             synced_state = 5
-            tto_printer = self._sync_tto_printer_for_machine_state(
+            tto_printer = self._sync_selected_printer_for_machine_state(
                 5,
                 param_map,
                 reason="production_start",
@@ -11627,13 +11699,49 @@ class MachineRuntime:
         if not point:
             result.update({"ok": False, "skipped": "io_point_missing"})
             return result
-        force = (
+
+        current_value = _truthy(point.get("override_value") if bool(point.get("override_active")) else point.get("value"))
+        current_quality = str(point.get("quality") or "").lower()
+        result.update(
+            {
+                "current_value": bool(current_value),
+                "current_quality": current_quality,
+                "override_active": bool(point.get("override_active")),
+            }
+        )
+        if bool(point.get("override_active")):
+            result.update({"ok": True, "skipped": "manual_override_active", "value": bool(current_value)})
+            return result
+        state_value_changed = (
             self._sea_vision_ready_last_value is None
             or bool(self._sea_vision_ready_last_value) != bool(desired)
-            or float(ts) >= float(self._sea_vision_ready_force_due_ts or 0.0)
         )
-        if not force:
+        live_mismatch = current_quality == "live" and bool(current_value) != bool(desired)
+        retry_due = float(ts) >= float(self._sea_vision_ready_retry_due_ts or 0.0)
+        if not state_value_changed and self._sea_vision_ready_last_error and not retry_due:
+            result.update(
+                {
+                    "ok": True,
+                    "skipped": "retry_backoff",
+                    "value": bool(current_value),
+                    "retry_due_ts": float(self._sea_vision_ready_retry_due_ts or 0.0),
+                    "last_error": self._sea_vision_ready_last_error,
+                }
+            )
+            return result
+        if not state_value_changed and not live_mismatch:
             result.update({"ok": True, "skipped": "cached", "value": bool(desired)})
+            return result
+        if not state_value_changed and current_quality != "live":
+            self._sea_vision_ready_retry_due_ts = float(ts) + SEA_VISION_READY_RETRY_BACKOFF_S
+            result.update(
+                {
+                    "ok": True,
+                    "skipped": "io_not_live",
+                    "value": bool(current_value),
+                    "retry_due_ts": self._sea_vision_ready_retry_due_ts,
+                }
+            )
             return result
         try:
             write_result = IoRuntime(self.cfg, self.io_store).write_output(
@@ -11641,12 +11749,26 @@ class MachineRuntime:
                 bool(desired),
                 force=True,
                 source="sea-vision-ready",
+                best_effort=True,
             )
+            if not bool(write_result.get("ok", True)):
+                raise RuntimeError(str(write_result.get("error") or write_result))
             self._sea_vision_ready_last_value = bool(desired)
             self._sea_vision_ready_force_due_ts = float(ts) + SEA_VISION_READY_FORCE_INTERVAL_S
+            self._sea_vision_ready_retry_due_ts = 0.0
+            self._sea_vision_ready_last_error = ""
             result.update({"ok": True, "value": bool(desired), "write": write_result})
         except Exception as exc:
-            result.update({"ok": False, "error": str(exc)})
+            self._sea_vision_ready_last_value = bool(desired)
+            self._sea_vision_ready_last_error = str(exc)
+            self._sea_vision_ready_retry_due_ts = float(ts) + SEA_VISION_READY_RETRY_BACKOFF_S
+            result.update(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "retry_due_ts": self._sea_vision_ready_retry_due_ts,
+                }
+            )
             pin_label = str(point.get("pin_label") or SEA_VISION_READY_IO_KEY)
             self.logs.log(
                 "machine",
