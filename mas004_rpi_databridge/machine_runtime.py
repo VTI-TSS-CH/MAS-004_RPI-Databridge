@@ -8016,29 +8016,12 @@ class MachineRuntime:
                 "production_resume_removed_next_label_commanded",
                 resume_wickler_gate,
             )
-            ready_command = f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(resume_next_label_no)}"
-            try:
-                ready_response = self._production_esp_retry(
-                    ready_command,
-                    read_timeout_s=2.0,
-                    attempts=3,
-                    settle_s=0.05,
-                    priority=True,
-                )
-                resume_wickler_ready = {
-                    "ok": True,
-                    "label_no": int(resume_next_label_no),
-                    "command": ready_command,
-                    "response": ready_response,
-                }
-            except Exception as exc:
-                self._stop_production_motion(
-                    reason="production_label_removal_resume_wickler_ready_failed",
-                    target_state=7,
-                )
-                raise RuntimeError(
-                    f"Wickler-Runline nach Entnahme-Resume nicht freigegeben: {exc}"
-                ) from exc
+            resume_wickler_ready = {
+                "ok": True,
+                "label_no": int(resume_next_label_no),
+                "skipped": "resume_removed_already_commanded_print_position",
+                "source": "process_production_resume_removed",
+            }
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
@@ -11711,6 +11694,12 @@ class MachineRuntime:
         )
         if bool(point.get("override_active")):
             result.update({"ok": True, "skipped": "manual_override_active", "value": bool(current_value)})
+            return result
+        if current_quality == "live" and bool(current_value) == bool(desired):
+            self._sea_vision_ready_last_value = bool(desired)
+            self._sea_vision_ready_last_error = ""
+            self._sea_vision_ready_retry_due_ts = 0.0
+            result.update({"ok": True, "skipped": "already_live", "value": bool(desired)})
             return result
         state_value_changed = (
             self._sea_vision_ready_last_value is None
