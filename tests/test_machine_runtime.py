@@ -2260,6 +2260,91 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["104.600", "104.600"], [payload.get("indexedTravelMm") for payload in master_payloads])
         self.assertTrue(all(item["ready"]["unchanged"] for item in result))
 
+    def test_reverse_wickler_prepare_clears_frozen_forward_command(self):
+        runtime = self.build_runtime()
+        calls: dict[str, list[tuple[str, object]]] = {"unwinder": [], "rewinder": []}
+        observed_direction = {"unwinder": 1, "rewinder": 1}
+        cleared = {"unwinder": False, "rewinder": False}
+        plan = {
+            "speed_mm_s": 200.0,
+            "ramp_mm_s2": 300.0,
+            "wickler_standby_percent": 50.0,
+            "travel_mm": 104.5,
+        }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+                self.descriptor = SimpleNamespace(label=role, simulation_attr=f"{role}_simulation")
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s=None):
+                calls[self.role].append(("master", dict(payload)))
+                if cleared[self.role]:
+                    observed_direction[self.role] = int(payload.get("indexedDirection", 1))
+                return {"ok": True}
+
+            def post_mode(self, mode, timeout_s=None):
+                calls[self.role].append(("mode", mode))
+                if mode == "stop":
+                    cleared[self.role] = True
+                return {"ok": True, "mode": mode}
+
+            def release_for_continuous_motion(self, timeout_s=None):
+                calls[self.role].append(("ready", True))
+                return {"ok": True, "readyMotion": True}
+
+            def fetch_state(self, timeout_s=None):
+                direction = observed_direction[self.role]
+                return {
+                    "master": {"indexedModeEnabled": True, "indexedDirection": direction, "indexedTravelMm": 104.038},
+                    "telemetry": {
+                        "modeLabel": "Bereit",
+                        "modeCss": "ready",
+                        "externalStopActive": False,
+                        "indexedModeEnabled": True,
+                        "indexedDirection": direction,
+                        "indexedMoveActive": False,
+                        "indexedCommandSeq": 12 if direction < 0 else 11,
+                        "indexedTravelMm": 104.038,
+                        "indexedTrimMm": 0.0,
+                        "wipePercent": 50.0,
+                        "calibrated": True,
+                        "requiresCalibration": False,
+                    },
+                    "drive": {
+                        "online": True,
+                        "ready": True,
+                        "move": False,
+                        "alarm": False,
+                        "continuousModeReady": True,
+                        "lastCommandOk": True,
+                    },
+                    "values": {},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient):
+            result = runtime._prepare_production_wicklers_reverse(
+                plan,
+                travel_mm=104.038,
+                speed_mm_s=200.0,
+                reason="label_removal_rewind:3",
+                timeout_s=0.2,
+            )
+
+        self.assertTrue(all(item["ok"] for item in result), result)
+        self.assertEqual([-1, -1], [item["indexed_plan"]["indexed_direction"] for item in result])
+        for role in ("unwinder", "rewinder"):
+            self.assertEqual(
+                ["master", "mode", "ready", "master"],
+                [name for name, _payload in calls[role]],
+            )
+            self.assertEqual("-1", calls[role][0][1]["indexedDirection"])
+            self.assertEqual("-1", calls[role][3][1]["indexedDirection"])
+            self.assertEqual(2, len([item for item in result if item["role"] == role][0]["prepare_attempts"]))
+
     def test_production_motion_plan_uses_label_length_compensation_for_wickler_travel(self):
         runtime = self.build_runtime()
 
