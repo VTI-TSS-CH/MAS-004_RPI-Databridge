@@ -1387,9 +1387,13 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("ready", result["tto_printer"])
         self.assertTrue(result["tto_printer"]["resume_allowed"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
-        self.assertIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
+        self.assertNotIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
         self.assertEqual(11, result["resume_wickler_ready"]["label_no"])
         self.assertTrue(result["resume_wickler_ready"]["ok"])
+        self.assertEqual(
+            "resume_removed_already_commanded_print_position",
+            result["resume_wickler_ready"]["skipped"],
+        )
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
         self.assertEqual(104.07, prepare_indexed.call_args.kwargs["travel_mm"])
@@ -5262,6 +5266,24 @@ class MachineRuntimeTests(unittest.TestCase):
         message = str(row[0])
         self.assertIn("Q2.3", message)
         self.assertNotIn("Q0.2", message)
+
+    def test_sea_vision_ready_does_not_rewrite_live_matching_output(self):
+        runtime = self.build_runtime()
+        self.io_store.upsert_value("esp32_plc58__Q2_3", "1", "live", "esp32")
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, *_args, **_kwargs):
+                raise AssertionError("Q2.3 already live/high must not be rewritten")
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            result = runtime._apply_sea_vision_ready_output(7, ts=10.0)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("already_live", result["skipped"])
+        self.assertTrue(result["value"])
 
     def test_sea_vision_ready_timeout_uses_retry_backoff(self):
         runtime = self.build_runtime()
