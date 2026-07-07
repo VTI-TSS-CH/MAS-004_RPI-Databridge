@@ -252,6 +252,72 @@ class IoMasterImportTests(unittest.TestCase):
             self.assertEqual("override", point["quality"])
             self.assertTrue(point["override_active"])
 
+    def test_output_shot_pulses_high_then_low_and_releases_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_simulation=True,
+                    raspi_io_simulation=True,
+                    moxa1_simulation=True,
+                    moxa2_simulation=True,
+                    moxa3_simulation=True,
+                ),
+                store,
+            )
+
+            io_key = "raspi_plc21__Q0_0"
+            with patch("mas004_rpi_databridge.io_runtime.time.sleep") as sleep:
+                result = runtime.pulse_output(io_key, high_s=0.1, source="test-shot")
+
+            sleep.assert_called_once_with(0.1)
+            self.assertTrue(result["ok"])
+            self.assertEqual(100, result["duration_ms"])
+            self.assertEqual(1, result["high"]["value"])
+            self.assertEqual(0, result["low"]["value"])
+            point = store.get_point(io_key)
+            self.assertEqual("0", point["value"])
+            self.assertEqual("simulation", point["quality"])
+            self.assertFalse(point["override_active"])
+
+    def test_output_shot_rejects_active_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workbook_path = Path(tmpdir) / "io.xlsx"
+            db_path = Path(tmpdir) / "io.sqlite3"
+            self.build_workbook(workbook_path)
+
+            store = IoStore(DB(str(db_path)))
+            store.import_xlsx(str(workbook_path))
+            runtime = IoRuntime(
+                Settings(
+                    db_path=str(db_path),
+                    peer_base_url="",
+                    shared_secret="",
+                    esp_simulation=True,
+                    raspi_io_simulation=True,
+                    moxa1_simulation=True,
+                    moxa2_simulation=True,
+                    moxa3_simulation=True,
+                ),
+                store,
+            )
+
+            io_key = "raspi_plc21__Q0_0"
+            runtime.override_output(io_key, True, source="test-ui")
+            with self.assertRaisesRegex(RuntimeError, "active override"):
+                runtime.pulse_output(io_key, high_s=0.1, source="test-shot")
+            point = store.get_point(io_key)
+            self.assertEqual("1", point["value"])
+            self.assertTrue(point["override_active"])
+
     def test_esp_refresh_reasserts_physical_output_when_override_snapshot_differs(self):
         io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
         io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""

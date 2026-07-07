@@ -356,6 +356,57 @@ class IoRuntime:
             raise RuntimeError(f"Unknown IO point '{io_key}'")
         return self.store.release_override(io_key)
 
+    def pulse_output(self, io_key: str, *, high_s: float = 0.1, source: str = "manual-ui-shot") -> Dict[str, Any]:
+        point = self.store.get_point(io_key)
+        if not point:
+            raise RuntimeError(f"Unknown IO point '{io_key}'")
+        if point["io_dir"] not in {"output", "gpio"}:
+            raise RuntimeError(f"IO point '{point['pin_label']}' is not writable")
+        if self._is_pulse_only(point):
+            raise RuntimeError(f"IO point '{point['pin_label']}' is pulse-only and cannot be overridden")
+        if bool(point.get("override_active")):
+            raise RuntimeError(f"IO point '{point['pin_label']}' already has an active override; release it before shot")
+
+        duration_s = max(0.02, min(float(high_s or 0.1), 2.0))
+        self.store.set_override(io_key, 1, source=source)
+        try:
+            high_result = self.write_output(
+                io_key,
+                True,
+                force=True,
+                source=source,
+                override_owner=True,
+            )
+        except Exception:
+            self.store.release_override(io_key)
+            raise
+
+        time.sleep(duration_s)
+        self.store.set_override(io_key, 0, source=source)
+        try:
+            low_result = self.write_output(
+                io_key,
+                False,
+                force=True,
+                source=source,
+                override_owner=True,
+            )
+        except Exception:
+            raise
+
+        release_result = self.store.release_override(io_key)
+        final_quality = "simulation" if bool(low_result.get("simulation")) else "live"
+        self.store.upsert_value(io_key, 0, final_quality, source)
+        return {
+            "ok": True,
+            "io_key": io_key,
+            "duration_ms": int(round(duration_s * 1000.0)),
+            "value": 0,
+            "high": high_result,
+            "low": low_result,
+            "release": release_result,
+        }
+
     def release_all_overrides(self) -> Dict[str, Any]:
         return self.store.release_all_overrides()
 
