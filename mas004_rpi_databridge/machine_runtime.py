@@ -7190,6 +7190,42 @@ class MachineRuntime:
             "labels": expected,
         }
 
+    @staticmethod
+    def _label_removal_pause_cleanup_reusable(production_info: dict[str, Any]) -> dict[str, Any]:
+        last_stop = production_info.get("last_stop")
+        if not isinstance(last_stop, dict):
+            return {"ok": False, "reason": "missing_last_stop"}
+        if _safe_int(last_stop.get("target_state"), 0) != 7:
+            return {"ok": False, "reason": "last_stop_not_pause"}
+        reason = str(last_stop.get("reason") or production_info.get("pause_reason") or "")
+        skipped = str(last_stop.get("skipped") or "")
+        if not (
+            reason.startswith("label_removal_required:")
+            or skipped == "esp_runner_already_paused_for_label_removal"
+        ):
+            return {"ok": False, "reason": "last_stop_not_label_removal"}
+        required = {
+            "PROCESS WICKLER CANCEL",
+            "PROCESS INDEXED STOP",
+            "PROCESS PROFILE STOP",
+        }
+        commands = last_stop.get("commands")
+        if not isinstance(commands, list):
+            return {"ok": False, "reason": "missing_cleanup_commands"}
+        confirmed = {
+            str(item.get("command") or "")
+            for item in commands
+            if isinstance(item, dict) and bool(item.get("ok"))
+        }
+        missing = sorted(required - confirmed)
+        if missing:
+            return {"ok": False, "reason": "cleanup_commands_missing", "missing": missing}
+        return {
+            "ok": True,
+            "skipped": "label_removal_pause_cleanup_already_confirmed",
+            "commands": sorted(required),
+        }
+
     def _production_label_for_audit(self) -> str:
         label = self._current_production_label()
         if label:
@@ -7753,9 +7789,17 @@ class MachineRuntime:
             param_map,
             previous_values=previous_sync_values,
         )
-        self._production_esp_retry("PROCESS WICKLER CANCEL", read_timeout_s=2.0, attempts=2, priority=True)
-        self._production_esp_retry("PROCESS PROFILE STOP", read_timeout_s=2.0, attempts=2, priority=True)
-        self._production_esp_retry("PROCESS INDEXED STOP", read_timeout_s=2.0, attempts=2, priority=True)
+        resume_cleanup = self._label_removal_pause_cleanup_reusable(production_info)
+        if not bool(resume_cleanup.get("ok")):
+            cleanup_commands: list[dict[str, Any]] = []
+            for command in ("PROCESS WICKLER CANCEL", "PROCESS PROFILE STOP", "PROCESS INDEXED STOP"):
+                response = self._production_esp_retry(command, read_timeout_s=2.0, attempts=2, priority=True)
+                cleanup_commands.append({"command": command, "ok": True, "response": response})
+            resume_cleanup = {
+                "ok": True,
+                "commands": cleanup_commands,
+                "reason": "cleanup_confirmed_on_resume",
+            }
         self._production_esp_retry(
             "MOTOR 3 SET "
             f"speed_mm_s={float(plan['speed_mm_s']):.3f} "
@@ -7884,6 +7928,7 @@ class MachineRuntime:
             "tto_printer": tto_printer,
             "command": command,
             "response": response,
+            "resume_cleanup": resume_cleanup,
         }
         if resume_wickler_gate is not None:
             result["resume_wickler_gate"] = dict(resume_wickler_gate)

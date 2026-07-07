@@ -1589,6 +1589,29 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("esp_visualization_unavailable", result["reason"])
         self.assertEqual([3, 6], result["labels"])
 
+    def test_label_removal_resume_reuses_confirmed_pause_cleanup(self):
+        production_info = {
+            "pause_reason": "label_removal_required:3,6",
+            "last_stop": {
+                "target_state": 7,
+                "reason": "label_removal_required:3,6",
+                "commands": [
+                    {"command": "PROCESS WICKLER CANCEL", "ok": True},
+                    {"command": "PROCESS INDEXED STOP", "ok": True},
+                    {"command": "PROCESS PROFILE STOP", "ok": True},
+                ],
+            },
+        }
+
+        result = MachineRuntime._label_removal_pause_cleanup_reusable(production_info)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("label_removal_pause_cleanup_already_confirmed", result["skipped"])
+        self.assertEqual(
+            ["PROCESS INDEXED STOP", "PROCESS PROFILE STOP", "PROCESS WICKLER CANCEL"],
+            result["commands"],
+        )
+
     def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
         runtime = self.build_runtime()
         param_map = runtime._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
