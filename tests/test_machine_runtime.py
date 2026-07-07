@@ -1282,6 +1282,14 @@ class MachineRuntimeTests(unittest.TestCase):
         format_plan = runtime.snapshot()["info"].get("format_plan") or {"label": {"length_tenths_mm": 1000}}
         self.io_store.upsert_value("raspi_plc21__I0_0", "0", "live", "test")
 
+        commands: list[str] = []
+
+        def fake_production_esp(command, *args, **kwargs):
+            commands.append(str(command))
+            if str(command).startswith("PROCESS PRODUCTION RESUME "):
+                return 'JSON {"ok":true,"running":true,"next_label_no":13,"mode":"indexed"}'
+            return "ACK"
+
         with patch("mas004_rpi_databridge.machine_runtime.time.sleep"), patch.object(
             runtime,
             "_prepare_production_wicklers",
@@ -1298,6 +1306,10 @@ class MachineRuntimeTests(unittest.TestCase):
             runtime,
             "_sync_production_params_to_esp",
             side_effect=AssertionError("operator pause resume must reuse existing ESP params"),
+        ), patch.object(
+            runtime,
+            "_production_esp",
+            side_effect=fake_production_esp,
         ):
             result = runtime._start_production_motion(param_map, format_plan)
 
@@ -1307,6 +1319,10 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual([], result["synced_params"])
         self.assertTrue(result["param_sync"]["resume_reuse"])
         self.assertIn("PROCESS PRODUCTION RESUME SPEED_MM_S=100.000 RAMP_MM_S2=300.000", result["command"])
+        self.assertIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=13", commands)
+        self.assertEqual(13, result["resume_wickler_ready"]["label_no"])
+        self.assertTrue(result["resume_wickler_ready"]["ok"])
+        self.assertEqual("process_production_resume", result["resume_wickler_ready"]["source"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
         self.assertEqual(103.25, prepare_indexed.call_args.kwargs["travel_mm"])
@@ -1387,13 +1403,10 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertIn("ready", result["tto_printer"])
         self.assertTrue(result["tto_printer"]["resume_allowed"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
-        self.assertNotIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
+        self.assertIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
         self.assertEqual(11, result["resume_wickler_ready"]["label_no"])
         self.assertTrue(result["resume_wickler_ready"]["ok"])
-        self.assertEqual(
-            "resume_removed_already_commanded_print_position",
-            result["resume_wickler_ready"]["skipped"],
-        )
+        self.assertEqual("process_production_resume_removed", result["resume_wickler_ready"]["source"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
         self.assertEqual(104.07, prepare_indexed.call_args.kwargs["travel_mm"])
@@ -1402,10 +1415,10 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
         self.assertEqual(104.07, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
-        self.assertEqual(11, result["resume_wickler_gate"]["label_no"])
+        self.assertEqual("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", result["resume_wickler_ready"]["command"])
         in_flight = runtime._production_wickler_start_already_in_flight(11)
         self.assertIsNotNone(in_flight)
-        self.assertEqual("production_resume_removed_next_label_commanded", in_flight["event_type"])
+        self.assertEqual("production_resume_wickler_ready_sent", in_flight["event_type"])
 
     def test_label_removal_resume_blocks_before_esp_when_wicklers_not_ready(self):
         runtime = self.build_runtime()
