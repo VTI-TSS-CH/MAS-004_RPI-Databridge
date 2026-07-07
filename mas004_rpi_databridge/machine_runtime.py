@@ -4772,6 +4772,39 @@ class MachineRuntime:
                 time.sleep(max(0.0, float(settle_s)) * attempt)
         raise RuntimeError(f"ESP command failed after {max(1, int(attempts))} attempts: {command}; errors={errors}")
 
+    def _send_resume_wickler_ready(
+        self,
+        *,
+        label_no: int,
+        source: str,
+        labels_removed: list[int] | None = None,
+    ) -> dict[str, Any]:
+        label = int(label_no or 0)
+        if label <= 0:
+            return {"ok": True, "skipped": "missing_next_label_no", "label_no": label, "source": source}
+        command = f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={label}"
+        response = self._production_esp_retry(
+            command,
+            read_timeout_s=8.0,
+            attempts=5,
+            settle_s=0.15,
+            priority=True,
+        )
+        payload: dict[str, Any] = {
+            "label_no": label,
+            "source": source,
+            "command": command,
+            "response": response,
+            "ts": now_ts(),
+        }
+        if labels_removed is not None:
+            payload["labels_removed"] = list(labels_removed)
+        self._remember_production_wickler_gate_event(
+            "production_resume_wickler_ready_sent",
+            payload,
+        )
+        return {"ok": True, **payload}
+
     def _production_status_after_start_error(self, start_command: str, exc: Exception) -> tuple[bool, str]:
         errors: list[str] = [repr(exc)]
         try:
@@ -7888,6 +7921,7 @@ class MachineRuntime:
             command += " BAND_BREAK_BYPASS=1"
         response = self._production_esp(command, read_timeout_s=8.0, priority=True)
         response_text = str(response or "").strip()
+        response_payload: dict[str, Any] = {}
         if response_text.upper().startswith("JSON "):
             try:
                 response_payload = json.loads(response_text.removeprefix("JSON ").strip())
@@ -7895,6 +7929,23 @@ class MachineRuntime:
                 response_payload = {}
             if response_payload and not bool(response_payload.get("ok", True)):
                 raise RuntimeError(f"PROCESS PRODUCTION RESUME rejected: {response_text[:240]}")
+        resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
+        resume_wickler_ready: dict[str, Any] | None = None
+        if resume_next_label_no > 0:
+            try:
+                resume_wickler_ready = self._send_resume_wickler_ready(
+                    label_no=resume_next_label_no,
+                    source="process_production_resume",
+                )
+            except Exception as exc:
+                stop_result = self._stop_production_motion(
+                    reason="production_pause_resume_wickler_ready_failed",
+                    target_state=7,
+                )
+                raise RuntimeError(
+                    f"Wickler-Freigabe nach Pause-Resume fuer Label {resume_next_label_no} fehlgeschlagen: {repr(exc)}; "
+                    f"stop={stop_result}"
+                ) from exc
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
@@ -7932,6 +7983,8 @@ class MachineRuntime:
             "command": command,
             "response": response,
         }
+        if resume_wickler_ready is not None:
+            result["resume_wickler_ready"] = dict(resume_wickler_ready)
         result["resume_state_commit"] = self._commit_successful_production_resume_state(
             result=result,
             state_info=state_info,
@@ -8056,25 +8109,23 @@ class MachineRuntime:
             if response_payload and not bool(response_payload.get("ok", True)):
                 raise RuntimeError(f"PROCESS PRODUCTION RESUME_REMOVED rejected: {response_text[:240]}")
         resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
-        resume_wickler_gate: dict[str, Any] | None = None
         resume_wickler_ready: dict[str, Any] | None = None
         if resume_next_label_no > 0:
-            resume_wickler_gate = {
-                "label_no": int(resume_next_label_no),
-                "source": "process_production_resume_removed",
-                "labels_removed": list(labels),
-                "ts": now_ts(),
-            }
-            self._remember_production_wickler_gate_event(
-                "production_resume_removed_next_label_commanded",
-                resume_wickler_gate,
-            )
-            resume_wickler_ready = {
-                "ok": True,
-                "label_no": int(resume_next_label_no),
-                "skipped": "resume_removed_already_commanded_print_position",
-                "source": "process_production_resume_removed",
-            }
+            try:
+                resume_wickler_ready = self._send_resume_wickler_ready(
+                    label_no=resume_next_label_no,
+                    source="process_production_resume_removed",
+                    labels_removed=labels,
+                )
+            except Exception as exc:
+                stop_result = self._stop_production_motion(
+                    reason="production_label_removal_resume_wickler_ready_failed",
+                    target_state=7,
+                )
+                raise RuntimeError(
+                    f"Wickler-Freigabe nach Entnahme-Resume fuer Label {resume_next_label_no} fehlgeschlagen: {repr(exc)}; "
+                    f"stop={stop_result}"
+                ) from exc
         time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
         post_start_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,
@@ -8114,8 +8165,6 @@ class MachineRuntime:
             "response": response,
             "resume_cleanup": resume_cleanup,
         }
-        if resume_wickler_gate is not None:
-            result["resume_wickler_gate"] = dict(resume_wickler_gate)
         if resume_wickler_ready is not None:
             result["resume_wickler_ready"] = dict(resume_wickler_ready)
         if isinstance(production_info.get("label_removal_resume_validation"), dict):
