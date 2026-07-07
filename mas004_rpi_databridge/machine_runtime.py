@@ -375,7 +375,7 @@ WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
 WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
 STOP_MODE_AXIS_TARGETS_MM = {
-    2: 50.0,   # Portalachse Z
+    2: 20.0,   # Portalachse Z
     5: 0.0,    # Material-Kontrollkamera TV1
     6: -20.0,  # Sensor Etikettenerfassung
     7: -20.0,  # Sensor Auswurfkontrolle
@@ -387,7 +387,7 @@ STOP_MODE_POSITION_RETRY_S = 60.0
 STOP_MODE_POSITION_MAX_ATTEMPTS = 3
 STOP_MODE_POSITION_VERIFY_TIMEOUT_S = 8.0
 STOP_MODE_POSITION_VERIFY_POLL_S = 0.1
-STOP_MODE_POSITION_LOGIC_VERSION = 11
+STOP_MODE_POSITION_LOGIC_VERSION = 12
 STOP_MODE_POSITION_LIMIT_MARGIN_TENTHS = 1
 SETUP_AXIS_POSITION_TOLERANCE_TENTHS = 1
 SETUP_AXIS_POSITION_VERIFY_TIMEOUT_S = 45.0
@@ -9426,7 +9426,7 @@ class MachineRuntime:
             )
         else:
             stop_info.update({"ok": True, "errors": [], "finished_ts": now_ts()})
-            stop_message = "Stop-Positionssatz gesendet: ID2=50mm, ID5=0mm, ID6/7=-20mm, ID8/9=100mm"
+            stop_message = "Stop-Positionssatz gesendet: ID2=20mm, ID5=0mm, ID6/7=-20mm, ID8/9=100mm"
             self.logs.log("machine", "info", stop_message)
             self._record_event(
                 "stop_mode_axis_targets",
