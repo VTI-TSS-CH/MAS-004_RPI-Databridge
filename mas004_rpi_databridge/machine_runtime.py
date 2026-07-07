@@ -1965,7 +1965,7 @@ class MachineRuntime:
             "state_source": state_source,
         }
 
-    def refresh_button_led_outputs(self, *, ts: float | None = None, force: bool = False) -> dict[str, Any]:
+    def refresh_button_led_outputs(self, *, ts: float | None = None, force: bool = True) -> dict[str, Any]:
         ts = now_ts() if ts is None else float(ts)
         snapshot = self._state_row()
         state = int(snapshot.get("current_state") or 1)

@@ -9,6 +9,8 @@ from typing import Any, Callable
 
 from mas004_rpi_databridge.config import Settings
 from mas004_rpi_databridge.device_clients import EspPlcClient
+from mas004_rpi_databridge.io_master import IoStore
+from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.logstore import LogStore
 from mas004_rpi_databridge.motor_master_sync import sync_motor_master_values
 from mas004_rpi_databridge.moxa_iologik import MoxaE1213Client
@@ -1658,6 +1660,25 @@ class SetupWicklerOrchestrator:
         verify: bool = True,
     ) -> None:
         pin_label = "DIO3"
+        try:
+            io_store = IoStore(self.params.db)
+            point = io_store.get_point("moxa_e1213_3__DIO3")
+            if point and bool(point.get("override_active")):
+                result = IoRuntime(self.cfg, io_store).write_output(
+                    point["io_key"],
+                    bool(enabled),
+                    force=True,
+                    source="setup-sensor-teach",
+                    best_effort=True,
+                )
+                self.logs.log(
+                    "moxa",
+                    "warning",
+                    f"setup sensor teach: Moxa3 {pin_label} durch IO-Override gesperrt: {result}",
+                )
+                return
+        except Exception as exc:
+            self.logs.log("moxa", "warning", f"setup sensor teach override check failed: {repr(exc)}")
         if bool(getattr(self.cfg, "moxa3_simulation", True)):
             self.logs.log("moxa", "info", f"setup sensor teach simulated: Moxa3 {pin_label}={int(enabled)}")
             return
