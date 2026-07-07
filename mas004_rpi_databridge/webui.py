@@ -1852,38 +1852,36 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2 = Settings.load(cfg_path)
         runtime = IoRuntime(cfg2, io_store)
         live_blocked = bool(live and io_live_refresh_blocked_for_machine_window())
-        if live and not live_blocked:
-            payload = runtime.refresh()
-            device_status = {item["device_code"]: item for item in (payload.get("devices") or [])}
-        else:
-            points = io_store.list_points(include_reserved=True)
-            payload = {
-                "ok": True,
-                "changed": 0,
-                "devices": [],
-                "points": points,
-                "snapshot_only": True,
+        points = io_store.list_points(include_reserved=True)
+        payload = {
+            "ok": True,
+            "changed": 0,
+            "devices": [],
+            "points": points,
+            "snapshot_only": True,
+        }
+        if live:
+            payload["live_refresh_skipped"] = (
+                "critical_machine_window" if live_blocked else "io_monitor_uses_service_snapshot"
+            )
+        device_status = {}
+        grouped_points: dict[str, list[dict[str, Any]]] = {}
+        for point in points:
+            grouped_points.setdefault(str(point.get("device_code") or ""), []).append(point)
+        for device_code, device_points in grouped_points.items():
+            qualities = {str(point.get("quality") or "unknown").lower() for point in device_points}
+            host, port = runtime._device_address(device_code)
+            simulation = io_device_configured_simulation(cfg2, device_code)
+            reachable = (not simulation) and bool(qualities & {"live", "override"})
+            device_status[device_code] = {
+                "device_code": device_code,
+                "host": host,
+                "port": port,
+                "simulation": simulation,
+                "reachable": reachable,
+                "error": "" if simulation or reachable else "kein aktueller Live-Snapshot",
             }
-            if live_blocked:
-                payload["live_refresh_skipped"] = "critical_machine_window"
-            device_status = {}
-            grouped_points: dict[str, list[dict[str, Any]]] = {}
-            for point in points:
-                grouped_points.setdefault(str(point.get("device_code") or ""), []).append(point)
-            for device_code, device_points in grouped_points.items():
-                qualities = {str(point.get("quality") or "unknown").lower() for point in device_points}
-                host, port = runtime._device_address(device_code)
-                simulation = io_device_configured_simulation(cfg2, device_code)
-                reachable = (not simulation) and bool(qualities & {"live", "override"})
-                device_status[device_code] = {
-                    "device_code": device_code,
-                    "host": host,
-                    "port": port,
-                    "simulation": simulation,
-                    "reachable": reachable,
-                    "error": "" if simulation or reachable else "kein aktueller Live-Snapshot",
-                }
-            payload["devices"] = list(device_status.values())
+        payload["devices"] = list(device_status.values())
         catalog = io_store.list_devices()
         for item in catalog:
             status = device_status.get(item["device_code"], {})
