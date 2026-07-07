@@ -3131,7 +3131,7 @@ class MachineRuntimeTests(unittest.TestCase):
             }
             client.move_absolute_set_mm.return_value = {"ok": True, "results": []}
             def fake_refresh(motor_id):
-                targets = {2: 500, 5: 0, 6: -200, 7: -200, 8: 1000, 9: 1000}
+                targets = {2: 200, 5: 0, 6: -200, 7: -200, 8: 1000, 9: 1000}
                 return {
                     "motor": {
                         "state": {
@@ -3384,7 +3384,7 @@ class MachineRuntimeTests(unittest.TestCase):
             client.refresh.side_effect = lambda motor_id: {
                 "motor": {
                     "state": {
-                        "feedback_tenths_mm": {2: 500, 6: 300}.get(int(motor_id), 1000),
+                        "feedback_tenths_mm": {2: 200, 6: 300}.get(int(motor_id), 1000),
                         "move": False,
                         "busy": False,
                         "alarm": False,
@@ -3433,7 +3433,7 @@ class MachineRuntimeTests(unittest.TestCase):
             client.refresh.side_effect = lambda motor_id: {
                 "motor": {
                     "state": {
-                        "feedback_tenths_mm": {2: 500, 5: 0, 6: -200, 7: -200, 8: 1000, 9: 1000}[int(motor_id)],
+                        "feedback_tenths_mm": {2: 200, 5: 0, 6: -200, 7: -200, 8: 1000, 9: 1000}[int(motor_id)],
                         "move": False,
                         "busy": False,
                         "alarm": False,
@@ -3445,7 +3445,7 @@ class MachineRuntimeTests(unittest.TestCase):
             snapshot = runtime.refresh()
 
         self.assertEqual(True, snapshot["info"]["stop_positions"]["ok"])
-        self.assertEqual(11, snapshot["info"]["stop_positions"]["logic_version"])
+        self.assertEqual(12, snapshot["info"]["stop_positions"]["logic_version"])
         self.assertEqual(1, snapshot["info"]["stop_positions"]["attempt_count"])
         client.move_absolute_set_mm.assert_not_called()
 
@@ -3464,7 +3464,7 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         ok, msg = self.params.set_value("MAS0002", "2", actor="microtom")
         self.assertTrue(ok, msg)
-        positions = {2: 500, 5: 380, 6: -200, 7: -200, 8: 1000, 9: 1000}
+        positions = {2: 200, 5: 380, 6: -200, 7: -200, 8: 1000, 9: 1000}
 
         with self.patched_runtime_external_io(runtime), patch("mas004_rpi_databridge.machine_runtime.EspMotorClient") as client_cls:
             client = client_cls.return_value
@@ -3553,7 +3553,7 @@ class MachineRuntimeTests(unittest.TestCase):
                 return {
                     "motor": {
                         "state": {
-                            "feedback_tenths_mm": -6508 if motor_id == 7 else {2: 500, 5: 0, 6: -200, 8: 1000, 9: 1000}.get(motor_id, 0),
+                            "feedback_tenths_mm": -6508 if motor_id == 7 else {2: 200, 5: 0, 6: -200, 8: 1000, 9: 1000}.get(motor_id, 0),
                             "move": False,
                             "busy": False,
                             "alarm": motor_id == 7,
@@ -3765,7 +3765,7 @@ class MachineRuntimeTests(unittest.TestCase):
                     self.motor6_calls += 1
                     if self.motor6_calls == 1:
                         return {"motor": {"state": {"feedback_tenths_mm": -150, "move": True, "alarm": False}}}
-                targets = {2: 500, 5: 0, 6: -200, 7: -200, 8: 1000, 9: 1000}
+                targets = {2: 200, 5: 0, 6: -200, 7: -200, 8: 1000, 9: 1000}
                 return {"motor": {"state": {"feedback_tenths_mm": targets[motor_id], "move": False, "alarm": False}}}
 
         with patch("mas004_rpi_databridge.machine_runtime.STOP_MODE_POSITION_VERIFY_POLL_S", 0.0):
