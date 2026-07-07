@@ -5149,6 +5149,29 @@ class MachineRuntimeTests(unittest.TestCase):
             writes,
         )
 
+    def test_sea_vision_ready_failure_log_names_q23_not_q02(self):
+        runtime = self.build_runtime()
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, *_args, **_kwargs):
+                raise RuntimeError("No route to host")
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            result = runtime._apply_sea_vision_ready_output(7, ts=10.0)
+
+        self.assertFalse(result["ok"])
+        with self.db._conn() as c:
+            row = c.execute(
+                "SELECT message FROM logs WHERE message LIKE 'SEA-Vision Ready%' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        message = str(row[0])
+        self.assertIn("Q2.3", message)
+        self.assertNotIn("Q0.2", message)
+
     def test_reset_waits_for_esp_safety_inputs_after_pulse_sequence(self):
         runtime = self.build_runtime()
         self.io_store.upsert_value("esp32_plc58__I0_7", "0", "live", "test")
