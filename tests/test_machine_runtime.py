@@ -5380,16 +5380,25 @@ class MachineRuntimeTests(unittest.TestCase):
                 "control_seen": 1,
                 "control_bypass": 0,
                 "removed_confirmed": 0,
+                "rewind_mode": "tact_after_current_tact",
+                "rewind_distance_mm": 104.5,
+                "rewind_after_label_no": 14,
             }
         )
 
         self.assertTrue(result["ok"])
-        runtime._execute_label_removal_rewind.assert_called_once_with(label_no=10)
+        runtime._pause_production_motion_after_print.assert_not_called()
+        runtime._execute_label_removal_rewind.assert_called_once_with(label_no=10, distance_mm=104.5)
         snapshot = runtime.snapshot()
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertTrue(production_info["label_removal_request"]["rewind_required"])
         self.assertTrue(production_info["label_removal_request"]["rewind_executed"])
         self.assertEqual(104.5, production_info["label_removal_request"]["rewind"]["distance_mm"])
+        self.assertEqual(14, production_info["label_removal_request"]["payload"]["rewind_after_label_no"])
+        self.assertEqual(
+            "esp_runner_deferred_missed_removal_rewind_ready",
+            production_info["label_removal_request"]["stop"]["skipped"],
+        )
 
     def test_label_removal_required_event_merges_visible_label_list(self):
         runtime = self.build_runtime()
