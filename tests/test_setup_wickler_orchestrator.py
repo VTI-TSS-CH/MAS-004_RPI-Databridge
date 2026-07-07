@@ -469,7 +469,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertIn("INFEED_SETTLE_MS=5000", command)
         self.assertIn("CONTROL_POST_TEACH_MS=5000", command)
         self.assertIn("BACKOFF_MM=10.000", command)
-        self.assertIn("SLIP_TOL_MM=8.000", command)
+        self.assertIn("SLIP_TOL_MM=20.000", command)
 
     def test_infeed_sensor_teach_retries_and_verifies_moxa_output(self):
         class FlakyMoxa:
@@ -1062,6 +1062,9 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         _insert_param(self.db, "MAP0014", "200")
 
         self.assertEqual(200.0, self.controller._setup_learn_speed_mm_s())
+
+    def test_setup_measurement_slip_tolerance_uses_twenty_mm_floor(self):
+        self.assertEqual(20.0, self.controller._slip_tolerance_mm())
 
     def test_setup_aborts_when_wickler_map0047_sync_is_not_confirmed(self):
         class FakeWicklerClient:
