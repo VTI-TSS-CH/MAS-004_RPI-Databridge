@@ -871,7 +871,19 @@ class MachineRuntimeTests(unittest.TestCase):
                     "label_removal_pending_labels": [6, 9],
                     "label_removal_request": {"label_no": 6, "label_nos": [6, 9]},
                     "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
-                    "last_stop": {"reason": "label_removal_required:6", "finished_ts": now_ts() - 1.0},
+                    "last_stop": {
+                        "ok": True,
+                        "reason": "label_removal_required:6,9",
+                        "target_state": 13,
+                        "finished_ts": now_ts() - 1.0,
+                        "wicklers": [
+                            {
+                                "role": "both",
+                                "ok": True,
+                                "skipped": "label_removal_pause_keep_wicklers_armed",
+                            }
+                        ],
+                    },
                 }
             },
         )
@@ -887,7 +899,10 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(5, snapshot["requested_state"])
         self.assertEqual("0", self.params.get_effective_value("MAS0002"))
         production = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
-        self.assertTrue(production["pending_start"]["from_state"] == 7)
+        self.assertEqual(13, production["pending_start"]["from_state"])
+        self.assertTrue(production["pending_start"]["label_removal_resume"])
+        self.assertEqual(13, production["last_stop"]["target_state"])
+        self.assertEqual("label_removal_pause_keep_wicklers_armed", production["last_stop"]["wicklers"][0]["skipped"])
         self.assertTrue(production["resume_log_bypass"])
         runtime.production_logs.can_start_new_production.assert_not_called()
 
@@ -1532,7 +1547,19 @@ class MachineRuntimeTests(unittest.TestCase):
                     "label_removal_pending_labels": [6, 9],
                     "label_removal_request": {"label_no": 6, "label_nos": [6, 9]},
                     "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
-                    "last_stop": {"reason": "label_removal_required:6", "finished_ts": now_ts() - 1.0},
+                    "last_stop": {
+                        "ok": True,
+                        "reason": "label_removal_required:6,9",
+                        "target_state": 13,
+                        "finished_ts": now_ts() - 1.0,
+                        "wicklers": [
+                            {
+                                "role": "both",
+                                "ok": True,
+                                "skipped": "label_removal_pause_keep_wicklers_armed",
+                            }
+                        ],
+                    },
                     "last_wickler_observed_travel": {"label_no": 9, "travel_mm": 104.07},
                 }
             },

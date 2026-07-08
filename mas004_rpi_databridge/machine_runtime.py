@@ -1131,6 +1131,13 @@ class MachineRuntime:
                                 "from_state": int(snapshot["current_state"] or 0),
                                 "cleared_pause_errors": cleared_pause_errors,
                             }
+                            label_removal_resume_start = (
+                                bool(resume_start_request)
+                                and int(snapshot["current_state"] or 0) in LABEL_REMOVAL_RESUME_STATES
+                                and _production_info_has_label_removal_pause(production_info)
+                            )
+                            if label_removal_resume_start:
+                                production_info["pending_start"]["label_removal_resume"] = True
                             pending_start = dict(production_info["pending_start"])
                             self._record_event(
                                 "production_start_accepted",
@@ -1138,7 +1145,8 @@ class MachineRuntime:
                                 "Produktionsstart akzeptiert: Wechsel nach Produktionsbetrieb wird vorbereitet",
                                 dict(production_info["pending_start"]),
                             )
-                            production_info.pop("last_stop", None)
+                            if not label_removal_resume_start:
+                                production_info.pop("last_stop", None)
                         # MAS0002 is a command byte. Once Start is accepted
                         # from Pause, consume it immediately so the next
                         # refresh in transition state 4 does not re-interpret
@@ -8878,15 +8886,38 @@ class MachineRuntime:
             return result
         resume_cleanup = self._label_removal_pause_cleanup_reusable(production_info)
         if not bool(resume_cleanup.get("ok")):
-            cleanup_commands: list[dict[str, Any]] = []
-            for command in ("PROCESS WICKLER CANCEL", "PROCESS PROFILE STOP", "PROCESS INDEXED STOP"):
-                response = self._production_esp_retry(command, read_timeout_s=2.0, attempts=2, priority=True)
-                cleanup_commands.append({"command": command, "ok": True, "response": response})
-            resume_cleanup = {
-                "ok": True,
-                "commands": cleanup_commands,
-                "reason": "cleanup_confirmed_on_resume",
+            result = {
+                "ok": False,
+                "resume": "label_removal",
+                "labels_expected_removed": labels,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "synced_state": 0,
+                "esp_state_prepared": 5,
+                "skip_fail_stop": True,
+                "skip_fail_stop_reason": "label_removal_resume_pause_context_missing_no_motion_started",
+                "motion_started": False,
+                "keep_pause": True,
+                "pause_reason": str(production_info.get("pause_reason") or f"label_removal_required:{label_text}"),
+                "error": "Labelentnahme-Resume blockiert: Entnahme-Pausekontext fehlt oder ist nicht wiederverwendbar",
+                "synced_params": list(sync_info.get("synced") or []),
+                "skipped_synced_params": list(sync_info.get("skipped") or []),
+                "synced_param_values": dict(sync_info.get("values") or {}),
+                "param_sync": dict(sync_info),
+                "plan": plan,
+                "resume_cleanup": resume_cleanup,
+                "laser_ready": laser_ready,
+                "tto_printer": tto_printer,
             }
+            if mark_removed is not None:
+                result["mark_removed"] = dict(mark_removed)
+            self._record_event(
+                "production_label_removal_resume_blocked",
+                "warning",
+                "Label-Entnahme-Resume blockiert: Entnahme-Pausekontext nicht wiederverwendbar",
+                result,
+            )
+            return result
         self._production_esp_retry(
             "MOTOR 3 SET "
             f"speed_mm_s={float(plan['speed_mm_s']):.3f} "
