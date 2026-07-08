@@ -1698,8 +1698,10 @@ class MachineRuntime:
                 production_info.pop("label_removal_requests", None)
                 production_info.pop("label_removal_pending_labels", None)
             else:
-                failure_is_pre_resume_block = bool(start_result.get("skip_fail_stop"))
-                failure_severity = "warning" if failure_is_pre_resume_block else "error"
+                failure_skips_stop = bool(start_result.get("skip_fail_stop"))
+                failure_keeps_pause = bool(start_result.get("keep_pause"))
+                failure_is_pre_resume_block = failure_skips_stop and failure_keeps_pause
+                failure_severity = "warning" if failure_skips_stop else "error"
                 failure_event = "production_resume_blocked" if failure_is_pre_resume_block else "production_start_failed"
                 self.logs.log("machine", failure_severity, f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
                 self._record_event(
@@ -1708,7 +1710,7 @@ class MachineRuntime:
                     f"Produktionsstart fehlgeschlagen: {start_result.get('error')}",
                     start_result,
                 )
-                if failure_is_pre_resume_block:
+                if failure_skips_stop:
                     fail_stop = {
                         "ok": True,
                         "skipped": str(start_result.get("skip_fail_stop_reason") or "motion_not_started"),
@@ -1717,21 +1719,27 @@ class MachineRuntime:
                         "motion_started": False,
                         "resume": start_result.get("resume"),
                     }
-                    production_info["paused"] = True
-                    production_info["paused_ts"] = production_info.get("paused_ts") or now_ts()
-                    production_info["pause_reason"] = str(
-                        start_result.get("pause_reason")
-                        or production_info.get("pause_reason")
-                        or "label_removal_required"
-                    )
-                    production_info["resume_from_state"] = 7
+                    if failure_keeps_pause:
+                        production_info["paused"] = True
+                        production_info["paused_ts"] = production_info.get("paused_ts") or now_ts()
+                        production_info["pause_reason"] = str(
+                            start_result.get("pause_reason")
+                            or production_info.get("pause_reason")
+                            or "label_removal_required"
+                        )
+                        production_info["resume_from_state"] = 7
+                    else:
+                        production_info.pop("paused", None)
+                        production_info.pop("paused_ts", None)
+                        production_info.pop("pause_reason", None)
+                        production_info.pop("resume_from_state", None)
                     self.params.apply_device_value("MAS0002", "0", promote_default=True)
                     requested_command = 0
                 else:
                     fail_stop = self._stop_production_motion(reason="production_start_failed", target_state=7)
                 production_info["last_stop"] = fail_stop
                 production_info["active"] = False
-                if not failure_is_pre_resume_block:
+                if not failure_skips_stop:
                     event = self.production_logs.handle_param_change("MAS0002", "2")
                     if event and event.get("event") == "stop":
                         self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
@@ -6305,13 +6313,30 @@ class MachineRuntime:
         return result
 
     def _ensure_esp_outbound_ready_for_start(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"ok": True}
+        result: dict[str, Any] = {"ok": True, "best_effort": True}
         drain = self._drain_esp_outbound_events(max_batches=4, max_items=32, dispatch=False)
         result["drain"] = drain
+        warnings: list[str] = []
+        if not bool(drain.get("ok", True)):
+            warnings.append("outbound_drain_failed:" + ";".join(str(item) for item in drain.get("errors") or []))
         try:
             before = self._read_esp_outbound_status()
         except Exception as exc:
-            result.update({"ok": False, "error": f"outbound_status_failed:{repr(exc)}"})
+            warnings.append(f"outbound_status_failed:{repr(exc)}")
+            try:
+                clear_response = self._production_esp_retry(
+                    "OUTBOUND CLEAR",
+                    read_timeout_s=1.0,
+                    read_limit=1024,
+                    attempts=1,
+                    priority=True,
+                )
+                result["clear_response"] = clear_response
+                result["cleared"] = True
+            except Exception as clear_exc:
+                warnings.append(f"outbound_clear_after_status_failed:{repr(clear_exc)}")
+            result["warnings"] = warnings
+            result["skipped_strict_status"] = True
             return result
         result["before"] = before
         needs_clear = (
@@ -6333,7 +6358,8 @@ class MachineRuntime:
                 result["clear_response"] = clear_response
                 after = self._read_esp_outbound_status()
             except Exception as exc:
-                result.update({"ok": False, "error": f"outbound_clear_failed:{repr(exc)}"})
+                warnings.append(f"outbound_clear_failed:{repr(exc)}")
+                result["warnings"] = warnings
                 return result
             result["after"] = after
             if (
@@ -6341,9 +6367,10 @@ class MachineRuntime:
                 or _safe_int(after.get("critical_overflow"), 0) > 0
                 or _truthy(after.get("busy"))
             ):
-                result.update({"ok": False, "error": "outbound_queue_not_empty_after_clear"})
-                return result
+                warnings.append("outbound_queue_not_empty_after_clear")
             result["cleared"] = True
+        if warnings:
+            result["warnings"] = warnings
         return result
 
     @staticmethod
@@ -8152,6 +8179,7 @@ class MachineRuntime:
             return {"ok": False, "error": "production_motion_start_already_running", "started_ts": started_ts}
         synced_state = 0
         cleared_label_removal_state: dict[str, Any] | None = None
+        esp_preflight: dict[str, Any] | None = None
         try:
             plan = self._production_motion_plan(param_map, format_plan)
             state_row = self._state_row()
@@ -8211,6 +8239,34 @@ class MachineRuntime:
                     started_ts=started_ts,
                 )
             laser_ready = self._ensure_laser_ready_for_production_start(param_map)
+            try:
+                preflight_response = self._production_esp_retry(
+                    "PING",
+                    read_timeout_s=1.0,
+                    attempts=2,
+                    settle_s=0.1,
+                    read_limit=512,
+                    priority=True,
+                )
+                esp_preflight = {"ok": True, "command": "PING", "response": preflight_response}
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "started_ts": started_ts,
+                    "finished_ts": now_ts(),
+                    "synced_state": 0,
+                    "error": f"ESP-Kommunikation vor Produktionsstart nicht bereit: {exc}",
+                    "skip_fail_stop": True,
+                    "skip_fail_stop_reason": "production_start_esp_preflight_no_motion_started",
+                    "motion_started": False,
+                    "keep_pause": False,
+                    "laser_ready": laser_ready,
+                    "esp_preflight": {
+                        "ok": False,
+                        "command": "PING",
+                        "error": repr(exc),
+                    },
+                }
             self._sync_esp_machine_state(5, required=True)
             synced_state = 5
             tto_printer = self._sync_selected_printer_for_machine_state(
@@ -8308,6 +8364,7 @@ class MachineRuntime:
                 "wicklers": wicklers,
                 "post_start_wicklers": post_start_wicklers,
                 "outbound_ready": outbound_ready,
+                "esp_preflight": esp_preflight,
                 "laser_ready": laser_ready,
                 "tto_printer": tto_printer,
                 "command": start_command,
@@ -8330,6 +8387,7 @@ class MachineRuntime:
                 "synced_state": synced_state,
                 "error": str(exc),
                 "cleared_label_removal_state": cleared_label_removal_state,
+                "esp_preflight": esp_preflight,
             }
         finally:
             _PRODUCTION_MOTION_LOCK.release()
