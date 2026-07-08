@@ -137,6 +137,7 @@
   - the 9 Oriental drives sit behind the ESP32-PLC Modbus-RTU bus, not directly behind the Raspi
   - the ESP starts with background motor polling disabled (`MOTOR POLL=0`) so missing/slow AZD controllers cannot block the ESP TCP command socket
   - the Machine-Setup motors page shows cached status by default, auto-reads only `MOTOR POLL?`, and has a per-motor `Status aktualisieren` action that sends `MOTOR <id> REFRESH`
+  - setup measurement keeps global motor polling disabled too; the Raspi only sends targeted `MOTOR 3 REFRESH` reads before setup-status decisions that need fresh Motor 3 values
   - avoid leaving `MOTOR POLL=1` enabled during process/Wickler tests; it can block the single ESP TCP endpoint while Modbus RTU timeouts are running
   - quick manual check from the Raspi:
     - `PING`
@@ -417,8 +418,7 @@ cd "D:\Users\Egli_Erwin\Veralto\DE-SMD-Support-Switzerland - Documents\26_VS_COD
   - The LED stripe is driven by a separate ESP32 LED controller. The ESP32-PLC sends `MAS004-LED-UDP/v1` frames from the label shift register; default target is `192.168.2.255:3050`.
   - The shortened strip is configured as `520.0 mm`, `75` LEDs at `6.95 mm` pitch. The PLC58 does not drive TX1/GPIO17 or GPIO0 as WS2812 data.
   - If the LED test is ACKed while the strip stays dark, check the external controller power, common GND, controller network reachability, UDP port, LED data direction, and LED type/order.
-  - the `ESP Motorpolling` checkbox on the same page toggles `MOTOR POLL=1/0` on the ESP32-PLC
-  - enabled motor polling must remain a paced ESP-side round-robin: motor `1` through `9`, `100 ms` pause between individual motor polls, then repeat
+  - global `ESP Motorpolling` must stay off; use targeted per-motor refresh or the Motors-page `1s Polling` checkbox for commissioning only
 - For the motor setup page:
   - `Parameter speichern` writes, saves and immediately refreshes the affected motor card.
   - `Move mm` and `Schritte fahren` are live commands; if no axis moves, inspect the card message because ESP `NAK` replies are surfaced there.
