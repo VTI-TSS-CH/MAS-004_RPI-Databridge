@@ -1448,7 +1448,12 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["tto_printer"]["zbc_skipped"])
         self.assertIn("ready", result["tto_printer"])
         self.assertTrue(result["tto_printer"]["resume_allowed"])
+        self.assertEqual("PROCESS PRODUCTION MARK_REMOVED LABELS=6,9", result["mark_removed"]["command"])
         self.assertIn("PROCESS PRODUCTION RESUME_REMOVED LABELS=6,9", result["command"])
+        self.assertLess(
+            commands.index("PROCESS PRODUCTION MARK_REMOVED LABELS=6,9"),
+            commands.index(result["command"]),
+        )
         self.assertNotIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
         self.assertEqual(11, result["resume_wickler_ready"]["label_no"])
         self.assertTrue(result["resume_wickler_ready"]["ok"])
