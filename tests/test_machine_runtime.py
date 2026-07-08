@@ -2460,11 +2460,94 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["104.600", "104.600"], [payload.get("indexedTravelMm") for payload in master_payloads])
         self.assertTrue(all(item["ready"]["unchanged"] for item in result))
 
-    def test_indexed_wickler_prepare_force_reprepare_keeps_indexed_mode(self):
+    def test_indexed_wickler_prepare_force_reprepare_reuses_armed_command(self):
+        runtime = self.build_runtime()
+        calls: dict[str, list[tuple[str, object]]] = {"unwinder": [], "rewinder": []}
+        plan = {
+            "speed_mm_s": 200.0,
+            "ramp_mm_s2": 300.0,
+            "wickler_standby_percent": 50.0,
+            "travel_mm": 80.8,
+            "wickler_master_thresholds": {"map0023": "5", "map0024": "95", "map0025": "1.0"},
+        }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+                self.descriptor = SimpleNamespace(label=role, simulation_attr=f"{role}_simulation")
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s=None):
+                calls[self.role].append(("master", dict(payload)))
+                return {"ok": True}
+
+            def release_for_continuous_motion(self, timeout_s=None):
+                calls[self.role].append(("ready", True))
+                return {"ok": True, "readyMotion": True}
+
+            def fetch_state(self, timeout_s=None):
+                calls[self.role].append(("fetch", True))
+                seq = 38 if self.role == "unwinder" else 39
+                return {
+                    "master": {
+                        "indexedModeEnabled": True,
+                        "indexedTravelMm": 80.8,
+                    },
+                    "telemetry": {
+                        "modeLabel": "Bereit",
+                        "modeCss": "ready",
+                        "externalStopActive": False,
+                        "indexedModeEnabled": True,
+                        "indexedPrepareFrozen": True,
+                        "indexedMoveActive": False,
+                        "indexedCommandSeq": seq,
+                        "indexedMotorPulseDelta": 1234,
+                        "indexedMotorSpeedHz": 42.0,
+                        "indexedDirection": 1,
+                        "indexedTravelMm": 80.8,
+                        "indexedTrimMm": 0.0,
+                        "wipePercent": 50.0,
+                        "calibrated": True,
+                        "requiresCalibration": False,
+                    },
+                    "drive": {
+                        "online": True,
+                        "ready": True,
+                        "move": False,
+                        "alarm": False,
+                        "continuousModeReady": False,
+                        "lastCommandOk": True,
+                    },
+                    "values": {},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient):
+            result = runtime._prepare_production_wicklers(
+                plan,
+                travel_mm=80.8,
+                reason="production_resume_label_removal",
+                timeout_s=0.2,
+                ensure_ready=True,
+                force_reprepare=True,
+            )
+
+        self.assertTrue(all(item["ok"] for item in result), result)
+        for role in ("unwinder", "rewinder"):
+            self.assertEqual([call[0] for call in calls[role]], ["ready", "fetch"])
+        self.assertEqual([38, 39], [item["indexed_plan"]["command_seq"] for item in result])
+        self.assertTrue(all(item["indexed_reprepare"]["ok"] for item in result))
+        self.assertTrue(all(item["indexed_reprepare"]["indexed_mode_preserved"] for item in result))
+        self.assertTrue(all(item["indexed_reprepare"]["existing_command"]["ok"] for item in result))
+        self.assertTrue(all(item["indexed_reprepare"]["skipped"] == "existing_indexed_command_armed" for item in result))
+        self.assertTrue(all(item["master"]["skipped"] == "existing_indexed_command_armed" for item in result))
+
+    def test_indexed_wickler_prepare_force_reprepare_waits_for_unarmed_command(self):
         runtime = self.build_runtime()
         calls: dict[str, list[tuple[str, object]]] = {"unwinder": [], "rewinder": []}
         indexed_enabled = {"unwinder": True, "rewinder": True}
-        prepare_frozen = {"unwinder": True, "rewinder": True}
+        prepare_frozen = {"unwinder": False, "rewinder": False}
         command_seq = {"unwinder": 38, "rewinder": 39}
         reprepare_pending = {"unwinder": False, "rewinder": False}
         reprepare_fetches = {"unwinder": 0, "rewinder": 0}

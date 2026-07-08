@@ -6243,6 +6243,51 @@ class MachineRuntime:
                 return last_state, last_verify
             time.sleep(0.05)
 
+    def _production_wickler_existing_indexed_command(
+        self,
+        state: dict[str, Any],
+        verify: dict[str, Any],
+        *,
+        planned_travel_mm: float,
+    ) -> dict[str, Any]:
+        telemetry = dict((state or {}).get("telemetry") or {})
+        errors: list[str] = []
+        if not bool(verify.get("ok")):
+            errors.extend(str(error) for error in verify.get("errors") or ["not_ready"])
+        if bool(verify.get("indexed_move_active")):
+            errors.append("indexedMoveActive=true")
+        command_seq = _safe_int(telemetry.get("indexedCommandSeq"), 0)
+        if command_seq <= 0:
+            errors.append("indexedCommandSeq=0")
+        if not _truthy(telemetry.get("indexedPrepareFrozen")):
+            errors.append("indexedPrepareFrozen=false")
+        pulse_delta = _safe_int(telemetry.get("indexedMotorPulseDelta"), 0)
+        if abs(pulse_delta) <= 0:
+            errors.append("indexedMotorPulseDelta=0")
+        speed_hz = _safe_float(telemetry.get("indexedMotorSpeedHz"), 0.0)
+        if abs(speed_hz) <= 0.01:
+            errors.append("indexedMotorSpeedHz=0")
+        direction = -1 if _safe_int(telemetry.get("indexedDirection"), 1) < 0 else 1
+        if direction < 0:
+            errors.append("indexedDirection=-1")
+        prepared_travel_mm = _safe_float(telemetry.get("indexedTravelMm"), 0.0)
+        travel_tolerance_mm = max(5.0, min(25.0, abs(float(planned_travel_mm)) * 0.25))
+        if abs(prepared_travel_mm - float(planned_travel_mm)) > travel_tolerance_mm:
+            errors.append(
+                f"indexedTravelMm mismatch {prepared_travel_mm:.3f}!={float(planned_travel_mm):.3f}"
+            )
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "command_seq": command_seq,
+            "prepare_frozen": _truthy(telemetry.get("indexedPrepareFrozen")),
+            "pulse_delta": pulse_delta,
+            "speed_hz": speed_hz,
+            "prepared_travel_mm": prepared_travel_mm,
+            "planned_travel_mm": float(planned_travel_mm),
+            "travel_tolerance_mm": travel_tolerance_mm,
+        }
+
     def _prepare_production_wicklers(
         self,
         plan: dict[str, Any],
@@ -6272,27 +6317,61 @@ class MachineRuntime:
             indexed_reprepare: dict[str, Any] | None = None
             role_master_payload = dict(master_payload)
             previous_command_seq: int | None = None
+            state: dict[str, Any]
+            verify: dict[str, Any]
+            master_reply: dict[str, Any]
             if force_reprepare:
                 previous_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
+                previous_verify = self._verify_wickler_production_state(
+                    role,
+                    previous_state,
+                    require_indexed_mode=True,
+                )
                 previous_telemetry = dict((previous_state or {}).get("telemetry") or {})
                 previous_command_seq = _safe_int(previous_telemetry.get("indexedCommandSeq"), 0)
+                existing_command = self._production_wickler_existing_indexed_command(
+                    previous_state,
+                    previous_verify,
+                    planned_travel_mm=planned_travel_mm,
+                )
                 role_master_payload["indexedForceReprepare"] = "1"
                 indexed_reprepare = {
                     "ok": True,
                     "method": "indexedForceReprepare",
                     "indexed_mode_preserved": True,
                     "previous_command_seq": previous_command_seq,
+                    "existing_command": existing_command,
                 }
-            master_reply = client.post_master(role_master_payload, timeout_s=timeout_s)
-            if not master_reply.get("ok", True):
-                raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
-            state, verify = self._wait_production_wickler_indexed_prepared(
-                client,
-                role,
-                timeout_s=timeout_s,
-                min_command_seq=previous_command_seq if force_reprepare else None,
-                require_armed_command=force_reprepare,
-            )
+                if existing_command.get("ok"):
+                    role_master_payload.pop("indexedForceReprepare", None)
+                    indexed_reprepare["skipped"] = "existing_indexed_command_armed"
+                    indexed_reprepare["method"] = "reuse_existing_indexed_command"
+                    state = previous_state
+                    verify = previous_verify
+                    master_reply = {
+                        "ok": True,
+                        "skipped": "existing_indexed_command_armed",
+                    }
+                else:
+                    master_reply = client.post_master(role_master_payload, timeout_s=timeout_s)
+                    if not master_reply.get("ok", True):
+                        raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
+                    state, verify = self._wait_production_wickler_indexed_prepared(
+                        client,
+                        role,
+                        timeout_s=timeout_s,
+                        min_command_seq=previous_command_seq,
+                        require_armed_command=True,
+                    )
+            else:
+                master_reply = client.post_master(role_master_payload, timeout_s=timeout_s)
+                if not master_reply.get("ok", True):
+                    raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
+                state, verify = self._wait_production_wickler_indexed_prepared(
+                    client,
+                    role,
+                    timeout_s=timeout_s,
+                )
             telemetry = dict((state or {}).get("telemetry") or {})
             master = dict((state or {}).get("master") or {})
             indexed_plan = {
