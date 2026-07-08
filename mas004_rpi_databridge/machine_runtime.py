@@ -6205,16 +6205,41 @@ class MachineRuntime:
         role: str,
         *,
         timeout_s: float,
+        min_command_seq: int | None = None,
+        require_armed_command: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         deadline = time.monotonic() + max(0.2, float(timeout_s))
         last_state: dict[str, Any] = {}
         last_verify: dict[str, Any] = {}
+        last_gate_errors: list[str] = []
         while True:
             last_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
             last_verify = self._verify_wickler_production_state(role, last_state, require_indexed_mode=True)
-            if bool(last_verify.get("ok")) and not bool(last_verify.get("indexed_move_active")):
+            telemetry = dict((last_state or {}).get("telemetry") or {})
+            last_gate_errors = []
+            command_seq = _safe_int(telemetry.get("indexedCommandSeq"), 0)
+            if min_command_seq is not None and command_seq <= int(min_command_seq):
+                last_gate_errors.append(f"indexedCommandSeq<={int(min_command_seq)}")
+            if require_armed_command:
+                if not _truthy(telemetry.get("indexedPrepareFrozen")):
+                    last_gate_errors.append("indexedPrepareFrozen=false")
+                if abs(_safe_int(telemetry.get("indexedMotorPulseDelta"), 0)) <= 0:
+                    last_gate_errors.append("indexedMotorPulseDelta=0")
+                if abs(_safe_float(telemetry.get("indexedMotorSpeedHz"), 0.0)) <= 0.01:
+                    last_gate_errors.append("indexedMotorSpeedHz=0")
+            if bool(last_verify.get("ok")) and not bool(last_verify.get("indexed_move_active")) and not last_gate_errors:
                 return last_state, last_verify
             if time.monotonic() >= deadline:
+                if last_gate_errors:
+                    last_verify = dict(last_verify)
+                    errors = [str(error) for error in last_verify.get("errors") or []]
+                    errors.extend(last_gate_errors)
+                    last_verify["errors"] = errors
+                    last_verify["ok"] = False
+                    last_verify["indexed_prepare_gate_failed"] = True
+                    last_verify["indexed_command_seq"] = command_seq
+                    if min_command_seq is not None:
+                        last_verify["indexed_min_command_seq"] = int(min_command_seq)
                 return last_state, last_verify
             time.sleep(0.05)
 
@@ -6246,12 +6271,17 @@ class MachineRuntime:
                     raise RuntimeError(f"{client.descriptor.label} ready failed before indexed prepare: {ready_reply}")
             indexed_reprepare: dict[str, Any] | None = None
             role_master_payload = dict(master_payload)
+            previous_command_seq: int | None = None
             if force_reprepare:
+                previous_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
+                previous_telemetry = dict((previous_state or {}).get("telemetry") or {})
+                previous_command_seq = _safe_int(previous_telemetry.get("indexedCommandSeq"), 0)
                 role_master_payload["indexedForceReprepare"] = "1"
                 indexed_reprepare = {
                     "ok": True,
                     "method": "indexedForceReprepare",
                     "indexed_mode_preserved": True,
+                    "previous_command_seq": previous_command_seq,
                 }
             master_reply = client.post_master(role_master_payload, timeout_s=timeout_s)
             if not master_reply.get("ok", True):
@@ -6260,6 +6290,8 @@ class MachineRuntime:
                 client,
                 role,
                 timeout_s=timeout_s,
+                min_command_seq=previous_command_seq if force_reprepare else None,
+                require_armed_command=force_reprepare,
             )
             telemetry = dict((state or {}).get("telemetry") or {})
             master = dict((state or {}).get("master") or {})
@@ -6293,6 +6325,12 @@ class MachineRuntime:
                 "verify": verify,
             }
             if indexed_reprepare is not None:
+                indexed_reprepare["confirmed_command_seq"] = indexed_plan["command_seq"]
+                indexed_reprepare["confirmed_armed"] = bool(
+                    indexed_plan["prepare_frozen"]
+                    and abs(_safe_int(telemetry.get("indexedMotorPulseDelta"), 0)) > 0
+                    and abs(_safe_float(telemetry.get("indexedMotorSpeedHz"), 0.0)) > 0.01
+                )
                 result["indexed_reprepare"] = indexed_reprepare
             results.append(result)
             self.logs.log(

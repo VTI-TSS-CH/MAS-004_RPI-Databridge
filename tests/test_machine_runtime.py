@@ -2466,6 +2466,8 @@ class MachineRuntimeTests(unittest.TestCase):
         indexed_enabled = {"unwinder": True, "rewinder": True}
         prepare_frozen = {"unwinder": True, "rewinder": True}
         command_seq = {"unwinder": 38, "rewinder": 39}
+        reprepare_pending = {"unwinder": False, "rewinder": False}
+        reprepare_fetches = {"unwinder": 0, "rewinder": 0}
         plan = {
             "speed_mm_s": 200.0,
             "ramp_mm_s2": 300.0,
@@ -2489,9 +2491,12 @@ class MachineRuntimeTests(unittest.TestCase):
                     prepare_frozen[self.role] = False
                 elif str(payload.get("indexedModeEnabled")) == "1":
                     indexed_enabled[self.role] = True
-                    prepare_frozen[self.role] = True
                     if str(payload.get("indexedForceReprepare")) == "1":
-                        command_seq[self.role] += 1
+                        prepare_frozen[self.role] = False
+                        reprepare_pending[self.role] = True
+                        reprepare_fetches[self.role] = 0
+                    else:
+                        prepare_frozen[self.role] = True
                 return {"ok": True}
 
             def release_for_continuous_motion(self, timeout_s=None):
@@ -2500,6 +2505,14 @@ class MachineRuntimeTests(unittest.TestCase):
 
             def fetch_state(self, timeout_s=None):
                 calls[self.role].append(("fetch", True))
+                if reprepare_pending[self.role]:
+                    reprepare_fetches[self.role] += 1
+                    if reprepare_fetches[self.role] >= 2:
+                        command_seq[self.role] += 1
+                        prepare_frozen[self.role] = True
+                        reprepare_pending[self.role] = False
+                pulse_delta = 1234 if prepare_frozen[self.role] else 0
+                speed_hz = 42.0 if prepare_frozen[self.role] else 0.0
                 return {
                     "master": {
                         "indexedModeEnabled": indexed_enabled[self.role],
@@ -2513,6 +2526,8 @@ class MachineRuntimeTests(unittest.TestCase):
                         "indexedPrepareFrozen": prepare_frozen[self.role],
                         "indexedMoveActive": False,
                         "indexedCommandSeq": command_seq[self.role],
+                        "indexedMotorPulseDelta": pulse_delta,
+                        "indexedMotorSpeedHz": speed_hz,
                         "indexedTravelMm": 80.8,
                         "indexedTrimMm": 0.0,
                         "wipePercent": 50.0,
@@ -2546,16 +2561,21 @@ class MachineRuntimeTests(unittest.TestCase):
         for role in ("unwinder", "rewinder"):
             role_calls = calls[role]
             self.assertEqual("ready", role_calls[0][0])
-            self.assertEqual("master", role_calls[1][0])
-            self.assertEqual("1", role_calls[1][1]["indexedModeEnabled"])
-            self.assertEqual("1", role_calls[1][1]["indexedForceReprepare"])
-            self.assertEqual("80.800", role_calls[1][1]["indexedTravelMm"])
-            self.assertEqual("fetch", role_calls[2][0])
+            self.assertEqual("fetch", role_calls[1][0])
+            self.assertEqual("master", role_calls[2][0])
+            self.assertEqual("1", role_calls[2][1]["indexedModeEnabled"])
+            self.assertEqual("1", role_calls[2][1]["indexedForceReprepare"])
+            self.assertEqual("80.800", role_calls[2][1]["indexedTravelMm"])
+            self.assertEqual("fetch", role_calls[3][0])
+            self.assertEqual("fetch", role_calls[4][0])
             self.assertFalse(any(call[1].get("indexedModeEnabled") == "0" for call in role_calls if call[0] == "master"))
         self.assertEqual(39, result[0]["indexed_plan"]["command_seq"])
         self.assertEqual(40, result[1]["indexed_plan"]["command_seq"])
         self.assertTrue(all(item["indexed_reprepare"]["ok"] for item in result))
         self.assertTrue(all(item["indexed_reprepare"]["indexed_mode_preserved"] for item in result))
+        self.assertEqual([38, 39], [item["indexed_reprepare"]["previous_command_seq"] for item in result])
+        self.assertEqual([39, 40], [item["indexed_reprepare"]["confirmed_command_seq"] for item in result])
+        self.assertTrue(all(item["indexed_reprepare"]["confirmed_armed"] for item in result))
 
     def test_reverse_wickler_prepare_clears_frozen_forward_command(self):
         runtime = self.build_runtime()
