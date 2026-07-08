@@ -8028,6 +8028,39 @@ class MachineRuntime:
             param_map,
             previous_values=previous_sync_values,
         )
+        mark_removed = self._mark_pending_label_removals_on_esp(production_info)
+        if mark_removed is not None and not bool(mark_removed.get("ok")):
+            result = {
+                "ok": False,
+                "resume": "label_removal",
+                "labels_expected_removed": labels,
+                "started_ts": started_ts,
+                "finished_ts": now_ts(),
+                "synced_state": 0,
+                "esp_state_prepared": 5,
+                "skip_fail_stop": True,
+                "skip_fail_stop_reason": "label_removal_resume_mark_removed_failed_no_motion_started",
+                "motion_started": False,
+                "keep_pause": True,
+                "pause_reason": str(production_info.get("pause_reason") or f"label_removal_required:{label_text}"),
+                "error": "Labelentnahme-Resume konnte ESP-Entnahmemarkierung nicht erneuern: "
+                + str(mark_removed.get("error") or mark_removed),
+                "synced_params": list(sync_info.get("synced") or []),
+                "skipped_synced_params": list(sync_info.get("skipped") or []),
+                "synced_param_values": dict(sync_info.get("values") or {}),
+                "param_sync": dict(sync_info),
+                "plan": plan,
+                "mark_removed": mark_removed,
+                "laser_ready": laser_ready,
+                "tto_printer": tto_printer,
+            }
+            self._record_event(
+                "production_label_removal_resume_blocked",
+                "warning",
+                "Label-Entnahme-Resume blockiert: ESP-Entnahmemarkierung konnte nicht erneuert werden",
+                result,
+            )
+            return result
         resume_cleanup = self._label_removal_pause_cleanup_reusable(production_info)
         if not bool(resume_cleanup.get("ok")):
             cleanup_commands: list[dict[str, Any]] = []
@@ -8156,6 +8189,8 @@ class MachineRuntime:
             "response": response,
             "resume_cleanup": resume_cleanup,
         }
+        if mark_removed is not None:
+            result["mark_removed"] = dict(mark_removed)
         if resume_wickler_ready is not None:
             result["resume_wickler_ready"] = dict(resume_wickler_ready)
         if isinstance(production_info.get("label_removal_resume_validation"), dict):
