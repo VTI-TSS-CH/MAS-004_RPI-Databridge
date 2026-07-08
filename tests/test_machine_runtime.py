@@ -779,6 +779,50 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(production["active"])
         self.assertEqual(100.0, production["plan"]["travel_mm"])
 
+    def test_start_from_pause_esp_preflight_failure_returns_to_pause_without_stop(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=7,
+            requested_state=7,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={},
+        )
+        ok, msg = self.params.set_value("MAS0002", "1", actor="microtom")
+        self.assertTrue(ok, msg)
+
+        with patch("mas004_rpi_databridge.machine_runtime.PRODUCTION_START_MOTION_ENABLED", True), patch(
+            "mas004_rpi_databridge.machine_runtime.time.sleep"
+        ), patch.object(runtime, "_production_esp", side_effect=TimeoutError("timed out")) as esp, patch.object(
+            runtime,
+            "_stop_production_motion",
+            side_effect=AssertionError("preflight failure must not run generic production stop"),
+        ), patch.object(
+            runtime,
+            "_sync_selected_printer_for_machine_state",
+            side_effect=AssertionError("preflight failure must not switch printer online"),
+        ):
+            first = runtime.refresh()
+            second = runtime.refresh()
+
+        self.assertEqual(4, first["current_state"])
+        self.assertEqual(7, second["current_state"])
+        self.assertEqual(7, second["requested_state"])
+        self.assertEqual("0", self.params.get_effective_value("MAS0002"))
+        production = second["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertFalse(production["active"])
+        self.assertNotIn("paused", production)
+        self.assertTrue(production["last_start"]["skip_fail_stop"])
+        self.assertEqual(
+            "production_start_esp_preflight_no_motion_started",
+            production["last_stop"]["skipped"],
+        )
+        self.assertIn("ESP-Kommunikation vor Produktionsstart nicht bereit", production["last_start"]["error"])
+        self.assertGreaterEqual(esp.call_count, 1)
+
     def test_start_from_pause_ignores_pending_logfiles_for_resume(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -6317,6 +6361,29 @@ class MachineRuntimeTests(unittest.TestCase):
         runtime.handle_event.assert_not_called()
         commands = [call.args[0] for call in runtime._production_esp_retry.call_args_list]
         self.assertIn("OUTBOUND CLEAR", commands)
+
+    def test_esp_outbound_ready_for_start_does_not_block_on_status_timeout(self):
+        self.cfg.esp_simulation = False
+        runtime = self.build_runtime()
+
+        def fake_retry(command, **_kwargs):
+            if command.startswith("OUTBOUND FETCH_EVENTS"):
+                return 'JSON {"ok":true,"count":0,"remaining":0,"lines":[]}'
+            if command == "OUTBOUND STATUS?":
+                raise TimeoutError("timed out")
+            if command == "OUTBOUND CLEAR":
+                return "ACK_OUTBOUND_CLEAR"
+            raise AssertionError(command)
+
+        runtime._production_esp_retry = Mock(side_effect=fake_retry)
+
+        result = runtime._ensure_esp_outbound_ready_for_start()
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["best_effort"])
+        self.assertTrue(result["skipped_strict_status"])
+        self.assertTrue(result["cleared"])
+        self.assertIn("outbound_status_failed", ";".join(result["warnings"]))
 
     def test_production_esp_monitor_stops_on_runner_last_error(self):
         self.cfg.esp_simulation = False
