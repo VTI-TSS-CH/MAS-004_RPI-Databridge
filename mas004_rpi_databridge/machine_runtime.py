@@ -5224,15 +5224,11 @@ class MachineRuntime:
         elif not refresh_ok:
             status["reason"] = "tto_ready_refresh_failed"
             status["message"] = (
-                f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} konnte nicht live gelesen werden; "
-                "Produktionsresume gesperrt"
+                f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} konnte nicht live gelesen werden"
             )
         elif not ready:
             status["reason"] = "tto_ready_low"
-            status["message"] = (
-                f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} ist LOW; "
-                "Produktionsresume gesperrt"
-            )
+            status["message"] = f"TTO Ready {TTO_READY_DEVICE_CODE} {TTO_READY_PIN} ist LOW"
         return status
 
     def _observe_tto_ready_for_label_removal_resume(self, param_map: dict[str, str] | None = None) -> dict[str, Any]:
