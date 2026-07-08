@@ -6218,6 +6218,49 @@ class MachineRuntime:
                 return last_state, last_verify
             time.sleep(0.05)
 
+    def _force_clear_production_wickler_indexed_prepare(
+        self,
+        client: SmartWicklerClient,
+        role: str,
+        plan: dict[str, Any],
+        *,
+        timeout_s: float,
+    ) -> dict[str, Any]:
+        clear_payload = {
+            **dict(plan.get("wickler_master_thresholds") or self._wickler_master_threshold_payload()),
+            "indexedModeEnabled": "0",
+            "indexedSpeedMmS": f"{float(plan['speed_mm_s']):.3f}",
+            "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
+            "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
+        }
+        clear_reply = client.post_master(clear_payload, timeout_s=timeout_s)
+        if not clear_reply.get("ok", True):
+            raise RuntimeError(f"{client.descriptor.label} indexed clear failed before reprepare: {clear_reply}")
+
+        deadline = time.monotonic() + max(0.2, float(timeout_s))
+        last_state: dict[str, Any] = {}
+        while True:
+            last_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
+            telemetry = dict((last_state or {}).get("telemetry") or {})
+            master = dict((last_state or {}).get("master") or {})
+            indexed_enabled = bool(master.get("indexedModeEnabled")) or bool(telemetry.get("indexedModeEnabled"))
+            prepare_frozen = _truthy(telemetry.get("indexedPrepareFrozen"))
+            if not indexed_enabled and not prepare_frozen:
+                return {
+                    "ok": True,
+                    "reply": clear_reply,
+                    "indexed_mode_enabled": indexed_enabled,
+                    "indexed_prepare_frozen": prepare_frozen,
+                    "command_seq_before_reprepare": _safe_int(telemetry.get("indexedCommandSeq"), 0),
+                }
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"{client.descriptor.label} indexed clear not confirmed before reprepare: "
+                    f"indexed={indexed_enabled}, frozen={prepare_frozen}"
+                )
+            time.sleep(0.03)
+
     def _prepare_production_wicklers(
         self,
         plan: dict[str, Any],
@@ -6227,6 +6270,7 @@ class MachineRuntime:
         reason: str = "production_start",
         timeout_s: float = 5.0,
         ensure_ready: bool = False,
+        force_reprepare: bool = False,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         planned_travel_mm = float(travel_mm if travel_mm is not None else plan.get("first_wickler_travel_mm", plan["travel_mm"]))
@@ -6243,6 +6287,14 @@ class MachineRuntime:
                 ready_reply = client.release_for_continuous_motion(timeout_s=timeout_s)
                 if not ready_reply.get("ok", True):
                     raise RuntimeError(f"{client.descriptor.label} ready failed before indexed prepare: {ready_reply}")
+            indexed_clear: dict[str, Any] | None = None
+            if force_reprepare:
+                indexed_clear = self._force_clear_production_wickler_indexed_prepare(
+                    client,
+                    role,
+                    plan,
+                    timeout_s=timeout_s,
+                )
             master_reply = client.post_master(master_payload, timeout_s=timeout_s)
             if not master_reply.get("ok", True):
                 raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
@@ -6282,6 +6334,8 @@ class MachineRuntime:
                 "master": master_reply,
                 "verify": verify,
             }
+            if indexed_clear is not None:
+                result["indexed_clear"] = indexed_clear
             results.append(result)
             self.logs.log(
                 "machine",
@@ -8589,6 +8643,7 @@ class MachineRuntime:
             travel_source=base_source,
             reason="production_resume_pause",
             ensure_ready=True,
+            force_reprepare=True,
         )
         quick_band_break_bypass = quick_setup_band_break_bypass_active(state_info)
         command = (
@@ -8773,6 +8828,7 @@ class MachineRuntime:
             travel_source=base_source,
             reason="production_resume_label_removal",
             ensure_ready=True,
+            force_reprepare=True,
         )
         pre_resume_wicklers = self._production_wickler_verifications(
             timeout_s=2.0,

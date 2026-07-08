@@ -1406,6 +1406,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(103.25, prepare_indexed.call_args.kwargs["travel_mm"])
         self.assertEqual("last_esp_remaining_label_12", prepare_indexed.call_args.kwargs["travel_source"])
         self.assertEqual("production_resume_pause", prepare_indexed.call_args.kwargs["reason"])
+        self.assertTrue(prepare_indexed.call_args.kwargs["force_reprepare"])
         verify_wicklers.assert_not_called()
         self.assertEqual(103.25, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_12", result["wickler_travel_source"])
@@ -1507,6 +1508,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(104.07, prepare_indexed.call_args.kwargs["travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", prepare_indexed.call_args.kwargs["travel_source"])
         self.assertEqual("production_resume_label_removal", prepare_indexed.call_args.kwargs["reason"])
+        self.assertTrue(prepare_indexed.call_args.kwargs["force_reprepare"])
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
         self.assertEqual(104.07, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
@@ -2457,6 +2459,101 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["1.0", "1.0"], [payload.get("map0025") for payload in master_payloads])
         self.assertEqual(["104.600", "104.600"], [payload.get("indexedTravelMm") for payload in master_payloads])
         self.assertTrue(all(item["ready"]["unchanged"] for item in result))
+
+    def test_indexed_wickler_prepare_force_reprepare_clears_frozen_command(self):
+        runtime = self.build_runtime()
+        calls: dict[str, list[tuple[str, object]]] = {"unwinder": [], "rewinder": []}
+        indexed_enabled = {"unwinder": True, "rewinder": True}
+        prepare_frozen = {"unwinder": True, "rewinder": True}
+        command_seq = {"unwinder": 38, "rewinder": 39}
+        plan = {
+            "speed_mm_s": 200.0,
+            "ramp_mm_s2": 300.0,
+            "wickler_standby_percent": 50.0,
+            "travel_mm": 80.8,
+            "wickler_master_thresholds": {"map0023": "5", "map0024": "95", "map0025": "1.0"},
+        }
+
+        class FakeWicklerClient:
+            def __init__(self, _cfg, role):
+                self.role = role
+                self.descriptor = SimpleNamespace(label=role, simulation_attr=f"{role}_simulation")
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s=None):
+                calls[self.role].append(("master", dict(payload)))
+                if str(payload.get("indexedModeEnabled")) == "0":
+                    indexed_enabled[self.role] = False
+                    prepare_frozen[self.role] = False
+                elif str(payload.get("indexedModeEnabled")) == "1":
+                    indexed_enabled[self.role] = True
+                    prepare_frozen[self.role] = True
+                    command_seq[self.role] += 1
+                return {"ok": True}
+
+            def release_for_continuous_motion(self, timeout_s=None):
+                calls[self.role].append(("ready", True))
+                return {"ok": True, "readyMotion": True}
+
+            def fetch_state(self, timeout_s=None):
+                calls[self.role].append(("fetch", True))
+                return {
+                    "master": {
+                        "indexedModeEnabled": indexed_enabled[self.role],
+                        "indexedTravelMm": 80.8,
+                    },
+                    "telemetry": {
+                        "modeLabel": "Bereit",
+                        "modeCss": "ready",
+                        "externalStopActive": False,
+                        "indexedModeEnabled": indexed_enabled[self.role],
+                        "indexedPrepareFrozen": prepare_frozen[self.role],
+                        "indexedMoveActive": False,
+                        "indexedCommandSeq": command_seq[self.role],
+                        "indexedTravelMm": 80.8,
+                        "indexedTrimMm": 0.0,
+                        "wipePercent": 50.0,
+                        "calibrated": True,
+                        "requiresCalibration": False,
+                    },
+                    "drive": {
+                        "online": True,
+                        "ready": True,
+                        "move": False,
+                        "alarm": False,
+                        "continuousModeReady": not indexed_enabled[self.role],
+                        "lastCommandOk": True,
+                    },
+                    "values": {},
+                }
+
+        with patch("mas004_rpi_databridge.machine_runtime.SmartWicklerClient", FakeWicklerClient), patch(
+            "mas004_rpi_databridge.machine_runtime.time.sleep"
+        ):
+            result = runtime._prepare_production_wicklers(
+                plan,
+                travel_mm=80.8,
+                reason="production_resume_label_removal",
+                timeout_s=0.2,
+                ensure_ready=True,
+                force_reprepare=True,
+            )
+
+        self.assertTrue(all(item["ok"] for item in result), result)
+        for role in ("unwinder", "rewinder"):
+            role_calls = calls[role]
+            self.assertEqual("ready", role_calls[0][0])
+            self.assertEqual("master", role_calls[1][0])
+            self.assertEqual("0", role_calls[1][1]["indexedModeEnabled"])
+            self.assertEqual("fetch", role_calls[2][0])
+            self.assertEqual("master", role_calls[3][0])
+            self.assertEqual("1", role_calls[3][1]["indexedModeEnabled"])
+            self.assertEqual("80.800", role_calls[3][1]["indexedTravelMm"])
+        self.assertEqual(39, result[0]["indexed_plan"]["command_seq"])
+        self.assertEqual(40, result[1]["indexed_plan"]["command_seq"])
+        self.assertTrue(all(item["indexed_clear"]["ok"] for item in result))
 
     def test_reverse_wickler_prepare_clears_frozen_forward_command(self):
         runtime = self.build_runtime()
