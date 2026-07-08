@@ -592,20 +592,20 @@ class IoRuntime:
                 result["skipped"] = "broker_busy"
                 return result
             snapshot_timeout_s = max(
-                0.25,
+                0.2,
                 min(
                     self.cfg.get_float("esp_io_snapshot_timeout_s", 1.5),
                     self.cfg.get_float("esp_read_timeout_s", 2.0),
-                    2.0,
+                    0.5,
                 ),
             )
             snapshot_wait_timeout_s = max(
-                0.5,
+                0.3,
                 min(
                     max(0.25, min(self.cfg.get_float("esp_connect_timeout_s", 1.5), 0.6))
                     + snapshot_timeout_s
-                    + 0.25,
-                    2.5,
+                    + 0.1,
+                    0.9,
                 ),
             )
             raw = client.exchange_line(

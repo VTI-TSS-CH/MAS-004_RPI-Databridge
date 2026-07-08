@@ -708,11 +708,11 @@ class IoMasterImportTests(unittest.TestCase):
 
             self.assertTrue(result["devices"][0]["reachable"])
             self.assertEqual("IO SNAPSHOT?", captured["line"])
-            self.assertEqual(0.75, captured["read_timeout_s"])
-            self.assertLessEqual(captured["wait_timeout_s"], 2.0)
-            self.assertGreaterEqual(captured["wait_timeout_s"], 0.5)
+            self.assertEqual(0.5, captured["read_timeout_s"])
+            self.assertLessEqual(captured["wait_timeout_s"], 0.9)
+            self.assertGreaterEqual(captured["wait_timeout_s"], 0.3)
 
-    def test_esp_io_snapshot_default_allows_slow_field_response(self):
+    def test_esp_io_snapshot_default_uses_short_background_timeout(self):
         io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0
         io_runtime_module._ESP_IO_COOLDOWN_ERROR = ""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -755,8 +755,8 @@ class IoMasterImportTests(unittest.TestCase):
 
             self.assertTrue(result["devices"][0]["reachable"])
             self.assertEqual("IO SNAPSHOT?", captured["line"])
-            self.assertEqual(1.5, captured["read_timeout_s"])
-            self.assertGreaterEqual(captured["wait_timeout_s"], 2.0)
+            self.assertEqual(0.5, captured["read_timeout_s"])
+            self.assertLessEqual(captured["wait_timeout_s"], 0.9)
 
     def test_esp_io_snapshot_timeout_closes_broker_socket_for_reconnect(self):
         io_runtime_module._ESP_IO_COOLDOWN_UNTIL = 0.0

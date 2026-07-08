@@ -4737,11 +4737,20 @@ class MachineRuntime:
             self.cfg.esp_port,
             timeout_s=self.cfg.get_float("esp_connect_timeout_s", 1.5),
         )
+        read_timeout = read_timeout_s or self.cfg.get_float("esp_command_timeout_s", 8.0)
+        wait_timeout = max(
+            0.5,
+            min(
+                self.cfg.get_float("esp_connect_timeout_s", 1.5) + float(read_timeout) + 0.5,
+                12.0 if priority else 4.0,
+            ),
+        )
         response = client.exchange_line(
             command,
-            read_timeout_s=read_timeout_s or self.cfg.get_float("esp_command_timeout_s", 8.0),
+            read_timeout_s=read_timeout,
             read_limit=max(512, int(read_limit or 8192)),
             priority=priority,
+            wait_timeout_s=wait_timeout,
         )
         self.logs.log("esp-plc", "info", f"production motion: {command} -> {response}")
         if str(response or "").strip().upper().startswith("NAK"):

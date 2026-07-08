@@ -2998,11 +2998,16 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 int(cfg2.esp_port),
                 timeout_s=float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5),
             )
+            read_timeout = max(0.2, float(body.read_timeout_s or 2.0))
             reply = client.exchange_line(
                 line,
-                read_timeout_s=max(0.2, float(body.read_timeout_s or 2.0)),
+                read_timeout_s=read_timeout,
                 read_limit=max(128, min(65536, int(body.read_limit or 8192))),
                 priority=bool(body.priority),
+                wait_timeout_s=max(
+                    0.5,
+                    min(float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5) + read_timeout + 0.5, 8.0),
+                ),
             )
             return {"ok": True, "line": line, "reply": reply, "broker": client.diagnostics()}
         except Exception as exc:

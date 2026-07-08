@@ -1066,6 +1066,28 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def test_setup_measurement_slip_tolerance_uses_twenty_mm_floor(self):
         self.assertEqual(20.0, self.controller._slip_tolerance_mm())
 
+    def test_setup_enables_motor_auto_poll_and_restores_previous_state(self):
+        self.controller.cfg.esp_simulation = False
+        commands: list[str] = []
+
+        def fake_esp(line, **_kwargs):
+            commands.append(str(line))
+            if line == "MOTOR POLL?":
+                if commands.count("MOTOR POLL?") == 1:
+                    return 'JSON {"ok":true,"auto_poll":false}'
+                return 'JSON {"ok":true,"auto_poll":true}'
+            if line in {"MOTOR POLL=1", "MOTOR POLL=0"}:
+                return "ACK_" + line.replace(" ", "_")
+            raise AssertionError(line)
+
+        self.controller._esp = Mock(side_effect=fake_esp)
+
+        guard = self.controller._enable_motor_auto_poll_for_setup()
+        self.controller._restore_motor_auto_poll_after_setup(guard)
+
+        self.assertTrue(guard["restore_required"])
+        self.assertEqual(["MOTOR POLL?", "MOTOR POLL=1", "MOTOR POLL?", "MOTOR POLL=0"], commands)
+
     def test_setup_aborts_when_wickler_map0047_sync_is_not_confirmed(self):
         class FakeWicklerClient:
             def post_master(self, payload, timeout_s: float | None = None):

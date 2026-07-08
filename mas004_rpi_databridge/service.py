@@ -378,11 +378,14 @@ def _io_poll_deferred_devices_for_critical_window(db: DB, due_devices: list[str]
             ).fetchone()
         if not row:
             return set()
+        current_state = int(row[0] or 0)
         info = json.loads(row[1] or "{}")
         safety = dict(info.get("safety") or {})
         deferred: set[str] = set()
         if str(safety.get("phase") or "") == "resetting":
             deferred.add("esp32_plc58")
+        if current_state in {2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 16, 17}:
+            deferred.update(FIELD_IO_DEVICE_CODES)
         production = dict(info.get("production_runtime") or {})
         if bool(production.get("pending_start")):
             deferred.add("esp32_plc58")
