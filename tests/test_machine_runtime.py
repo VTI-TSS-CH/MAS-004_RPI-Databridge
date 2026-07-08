@@ -6031,6 +6031,117 @@ class MachineRuntimeTests(unittest.TestCase):
             production_info["label_removal_request"]["stop"]["skipped"],
         )
 
+    def test_label_removal_required_while_paused_updates_without_rewind(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=13,
+            requested_state=13,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=12,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:3,6",
+                    "label_removal_pending_labels": [3, 6],
+                    "label_removal_request": {
+                        "label_no": 3,
+                        "label_nos": [3, 6],
+                        "target_state": 13,
+                        "rewind_required": False,
+                        "rewind_executed": False,
+                    },
+                }
+            },
+        )
+        runtime._execute_label_removal_rewind = Mock(
+            return_value={"ok": True, "label_no": 3, "rewind_executed": True}
+        )
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+
+        result = runtime.handle_event(
+            {
+                "type": "label_removal_required",
+                "label_no": 3,
+                "label_nos": [3, 6],
+                "reason": "verify_bypass_nok",
+                "material_ok": 1,
+                "print_ok": 1,
+                "verify_ok": 0,
+                "quality_ok": 0,
+                "control_seen": 1,
+                "control_bypass": 0,
+                "removed_confirmed": 0,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        runtime._execute_label_removal_rewind.assert_not_called()
+        snapshot = runtime.snapshot()
+        production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertFalse(production_info["label_removal_request"]["rewind_required"])
+        self.assertFalse(production_info["label_removal_request"]["rewind_executed"])
+        self.assertEqual("already_in_label_removal_pause", production_info["label_removal_request"]["rewind"]["skipped"])
+
+    def test_expected_removed_but_seen_while_paused_starts_label_removal_rewind(self):
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=13,
+            requested_state=13,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=12,
+            info={
+                PRODUCTION_RUNTIME_INFO_KEY: {
+                    "active": False,
+                    "paused": True,
+                    "pause_reason": "label_removal_required:3",
+                    "label_removal_pending_labels": [3],
+                    "label_removal_request": {
+                        "label_no": 3,
+                        "target_state": 13,
+                        "rewind_required": False,
+                        "rewind_executed": False,
+                    },
+                }
+            },
+        )
+        runtime._execute_label_removal_rewind = Mock(
+            return_value={"ok": True, "label_no": 3, "distance_mm": 104.5, "rewind_executed": True}
+        )
+        runtime._sync_esp_machine_state = Mock(return_value=True)
+
+        result = runtime.handle_event(
+            {
+                "type": "label_removal_required",
+                "label_no": 3,
+                "reason": "expected_removed_but_seen",
+                "material_ok": 1,
+                "print_ok": 1,
+                "verify_ok": 0,
+                "quality_ok": 0,
+                "control_seen": 1,
+                "control_bypass": 0,
+                "removed_confirmed": 0,
+                "rewind_mode": "tact_after_current_tact",
+                "rewind_distance_mm": 104.5,
+                "rewind_after_label_no": 12,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        runtime._execute_label_removal_rewind.assert_called_once_with(label_no=3, distance_mm=104.5)
+        snapshot = runtime.snapshot()
+        production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
+        self.assertTrue(production_info["label_removal_request"]["rewind_required"])
+        self.assertTrue(production_info["label_removal_request"]["rewind_executed"])
+        self.assertEqual(104.5, production_info["label_removal_request"]["rewind"]["distance_mm"])
+
     def test_label_removal_required_event_merges_visible_label_list(self):
         runtime = self.build_runtime()
         self.mark_production_active(runtime)

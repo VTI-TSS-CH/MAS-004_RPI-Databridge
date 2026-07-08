@@ -3563,6 +3563,17 @@ class MachineRuntime:
             and not _truthy(compact_payload.get("removed_confirmed", 0))
         )
 
+    def _label_removal_required_needs_rewind_while_paused(self, compact_payload: dict[str, Any]) -> bool:
+        if str(compact_payload.get("reason") or "") == "expected_removed_but_seen":
+            return True
+        return (
+            str(compact_payload.get("rewind_mode") or "") == "tact_after_current_tact"
+            and _safe_float(compact_payload.get("rewind_distance_mm"), 0.0) >= 1.0
+            and _safe_int(compact_payload.get("rewind_after_label_no"), 0) > 0
+            and _truthy(compact_payload.get("control_seen", 0))
+            and not _truthy(compact_payload.get("removed_confirmed", 0))
+        )
+
     def _merge_label_removal_request(
         self,
         production_info: dict[str, Any],
@@ -3683,6 +3694,7 @@ class MachineRuntime:
         if not production_label:
             production_label = sanitize_production_label(self.params.get_effective_value("MAS0029"))
         rewind_result: dict[str, Any] = {"ok": True, "skipped": "already_in_label_removal_pause"}
+        rewind_required = self._label_removal_required_needs_rewind_while_paused(compact_payload)
         existing_requests = production_info.get("label_removal_requests")
         already_rewound = False
         if isinstance(existing_requests, list):
@@ -3692,7 +3704,7 @@ class MachineRuntime:
                 if _safe_int(item.get("label_no"), 0) == label_no and bool(item.get("rewind_executed")):
                     already_rewound = True
                     break
-        if not already_rewound:
+        if rewind_required and not already_rewound:
             try:
                 rewind_result = self._execute_label_removal_rewind(
                     label_no=int(label_no),
@@ -3718,7 +3730,7 @@ class MachineRuntime:
             "rewind": dict(rewind_result or {}),
             "target_state": LABEL_REMOVAL_STATE,
             "operator_message": f"Label {label_no} entnehmen",
-            "rewind_required": True,
+            "rewind_required": rewind_required,
             "rewind_executed": bool((rewind_result or {}).get("rewind_executed")),
             "ts": now_ts(),
         }
