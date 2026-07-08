@@ -43,6 +43,23 @@ WICKLER_DIAMETER_FINALIZE_ATTEMPTS = 5
 WICKLER_DIAMETER_FINALIZE_RETRY_BASE_S = 0.4
 INFEED_TEACH_MOXA_TIMEOUT_S = 3.0
 INFEED_TEACH_MOXA_ATTEMPTS = 4
+SEA_VISION_READY_IO_KEY = "esp32_plc58__Q2_3"
+SEA_VISION_MACHINE_RUN_IO_KEY = "esp32_plc58__I2_4"
+SEA_VISION_MACHINE_RUN_PIN = "I2.4"
+SEA_VISION_SETUP_MACHINE_RUN_TIMEOUT_S = 30.0
+SEA_VISION_SETUP_MACHINE_RUN_POLL_S = 0.2
+
+
+def _truthy(raw: Any, default: bool = False) -> bool:
+    if raw is None:
+        return bool(default)
+    text = str(raw).strip().lower()
+    if text == "":
+        return bool(default)
+    if text in ("0", "false", "off", "no", "none", "null"):
+        return False
+    return True
+
 
 @dataclass(frozen=True)
 class SetupWicklerDefaults:
@@ -1803,6 +1820,163 @@ class SetupWicklerOrchestrator:
             self._set_infeed_sensor_teach(False)
         self._abort_if_not_setup_active()
 
+    def _sea_vision_real_camera_required(self) -> bool:
+        material_bypass = _truthy(self._param_text("MAP0036", "1"), default=True)
+        ocr_bypass = _truthy(self._param_text("MAP0037", "1"), default=True)
+        return bool(not material_bypass or not ocr_bypass)
+
+    def _mark_sea_vision_setup_ready_flag(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            with self.params.db._conn() as conn:
+                row = conn.execute(
+                    "SELECT info_json FROM machine_state WHERE singleton_id=1"
+                ).fetchone()
+                if not row:
+                    return {"ok": True, "skipped": "machine_state_missing"}
+                try:
+                    info = json.loads(str(row[0] or "{}"))
+                except Exception:
+                    info = {}
+                if not isinstance(info, dict):
+                    info = {}
+                setup_info = info.get("setup") if isinstance(info.get("setup"), dict) else {}
+                setup_info = dict(setup_info or {})
+                setup_info["sea_vision_ready_after_measurement"] = True
+                setup_info["sea_vision_ready_after_measurement_ts"] = time.time()
+                setup_info["sea_vision_setup_ready"] = dict(payload or {})
+                info["setup"] = setup_info
+                conn.execute(
+                    "UPDATE machine_state SET info_json=?, updated_ts=? WHERE singleton_id=1",
+                    (json.dumps(info, ensure_ascii=False, sort_keys=True), time.time()),
+                )
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _clear_sea_vision_setup_ready_flag(self) -> dict[str, Any]:
+        try:
+            with self.params.db._conn() as conn:
+                row = conn.execute(
+                    "SELECT info_json FROM machine_state WHERE singleton_id=1"
+                ).fetchone()
+                if not row:
+                    return {"ok": True, "skipped": "machine_state_missing"}
+                try:
+                    info = json.loads(str(row[0] or "{}"))
+                except Exception:
+                    info = {}
+                if not isinstance(info, dict):
+                    info = {}
+                setup_info = info.get("setup") if isinstance(info.get("setup"), dict) else {}
+                setup_info = dict(setup_info or {})
+                setup_info.pop("sea_vision_ready_after_measurement", None)
+                setup_info.pop("sea_vision_ready_after_measurement_ts", None)
+                setup_info.pop("sea_vision_setup_ready", None)
+                info["setup"] = setup_info
+                conn.execute(
+                    "UPDATE machine_state SET info_json=?, updated_ts=? WHERE singleton_id=1",
+                    (json.dumps(info, ensure_ascii=False, sort_keys=True), time.time()),
+                )
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _set_sea_vision_ready_after_measurement(self, *, required: bool) -> dict[str, Any]:
+        io_store = IoStore(self.params.db)
+        point = io_store.get_point(SEA_VISION_READY_IO_KEY)
+        result: dict[str, Any] = {
+            "io_key": SEA_VISION_READY_IO_KEY,
+            "pin_label": "Q2.3",
+            "required": bool(required),
+            "target": True,
+        }
+        if not point:
+            result.update({"ok": not bool(required), "skipped": "io_point_missing"})
+            if required:
+                raise RuntimeError("SEA Vision Ready Q2.3 is not defined in IO master")
+            return result
+        write = IoRuntime(self.cfg, io_store).write_output(
+            point["io_key"],
+            True,
+            force=True,
+            source="setup-sea-vision-ready",
+            best_effort=not bool(required),
+        )
+        result.update({"ok": bool(write.get("ok", True)), "write": write})
+        if bool(write.get("overridden")) and not _truthy(write.get("value"), default=False):
+            result["ok"] = False
+            result["error"] = "SEA Vision Ready Q2.3 is held LOW by manual override"
+        if bool(required) and not bool(result.get("ok")):
+            raise RuntimeError(str(result.get("error") or f"SEA Vision Ready Q2.3 write failed: {write}"))
+        return result
+
+    def _wait_sea_vision_machine_run_after_setup(self) -> dict[str, Any]:
+        started = time.time()
+        deadline = started + SEA_VISION_SETUP_MACHINE_RUN_TIMEOUT_S
+        attempts: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            self._abort_if_not_setup_active()
+            io_store = IoStore(self.params.db)
+            point = io_store.get_point(SEA_VISION_MACHINE_RUN_IO_KEY)
+            if not point:
+                raise RuntimeError("SEA Vision Machine RUN I2.4 is not defined in IO master")
+            try:
+                refresh = IoRuntime(self.cfg, io_store)._refresh_device("esp32_plc58", [point])
+            except Exception as exc:
+                refresh = {"ok": False, "error": str(exc)}
+            point = io_store.get_point(SEA_VISION_MACHINE_RUN_IO_KEY) or point
+            value = _truthy(
+                point.get("override_value") if bool(point.get("override_active")) else point.get("value"),
+                default=False,
+            )
+            attempt = {
+                "ts": time.time(),
+                "value": bool(value),
+                "quality": str(point.get("quality") or ""),
+                "refresh_ok": bool(refresh.get("ok", refresh.get("reachable", False))),
+            }
+            if not attempt["refresh_ok"]:
+                attempt["refresh_error"] = str(refresh.get("error") or "")
+            attempts.append(attempt)
+            if bool(value):
+                return {
+                    "ok": True,
+                    "pin_label": SEA_VISION_MACHINE_RUN_PIN,
+                    "value": True,
+                    "duration_s": round(max(0.0, time.time() - started), 3),
+                    "attempts": attempts[-5:],
+                }
+            time.sleep(SEA_VISION_SETUP_MACHINE_RUN_POLL_S)
+        raise RuntimeError(
+            "SEA Vision Machine RUN I2.4 did not become HIGH after setup measurement: "
+            + json.dumps(attempts[-5:], ensure_ascii=False, sort_keys=True)
+        )
+
+    def _prepare_sea_vision_after_setup_measurement(self) -> dict[str, Any]:
+        required = self._sea_vision_real_camera_required()
+        result: dict[str, Any] = {
+            "ok": True,
+            "required": bool(required),
+            "material_bypass": _truthy(self._param_text("MAP0036", "1"), default=True),
+            "ocr_bypass": _truthy(self._param_text("MAP0037", "1"), default=True),
+        }
+        ready = self._set_sea_vision_ready_after_measurement(required=required)
+        result["ready"] = ready
+        flag = self._mark_sea_vision_setup_ready_flag(result)
+        result["machine_state_flag"] = flag
+        if required:
+            machine_run = self._wait_sea_vision_machine_run_after_setup()
+            result["machine_run"] = machine_run
+        else:
+            result["machine_run"] = {"ok": True, "skipped": "sea_vision_bypass_active"}
+        self.logs.log(
+            "machine",
+            "info",
+            "Setup SEA-Vision Ready Q2.3 gesetzt"
+            + (" und Machine RUN I2.4 bestaetigt" if required else " (Bypass aktiv, I2.4 nicht erforderlich)"),
+        )
+        return result
+
     def _setup_measure_status(self) -> dict[str, Any]:
         self._refresh_motor3_for_setup_status()
         return self._json_response(
@@ -2069,17 +2243,18 @@ class SetupWicklerOrchestrator:
     def _run_sensor_referenced_measurement_with_diameter_learning(
         self,
         speed_mm_s: float,
-    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
         self._start_diameter_learning_for_wicklers()
         try:
             measurement = self._run_sensor_referenced_measurement(speed_mm_s)
+            sea_vision_setup = self._prepare_sea_vision_after_setup_measurement()
         except Exception:
             self._cancel_diameter_learning_for_wicklers()
             raise
         time.sleep(1.0)
         travel_mm = self._diameter_learning_travel_mm(measurement)
         diameter_learning = self._finish_and_apply_diameter_learning(travel_mm)
-        return measurement, diameter_learning
+        return measurement, diameter_learning, sea_vision_setup
 
     def run(self, wait_for_format_axes: Callable[[], Any] | None = None) -> dict[str, Any]:
         speed = self._setup_learn_speed_mm_s()
@@ -2088,6 +2263,7 @@ class SetupWicklerOrchestrator:
         motor_poll_setup: dict[str, Any] | None = None
         try:
             self._abort_if_not_setup_active()
+            self._clear_sea_vision_setup_ready_flag()
             self._sync_setup_params_to_esp()
             motor_poll_setup = self._ensure_motor_auto_poll_disabled_for_setup()
             self._configure_motor3(speed, ramp)
@@ -2105,12 +2281,21 @@ class SetupWicklerOrchestrator:
                     format_axes_ok = True
             self._prepare_motor3_for_measurement()
             self._abort_motor3_if_wickler_faulted()
-            measurement, diameter_learning = self._run_sensor_referenced_measurement_with_diameter_learning(speed)
+            measurement, diameter_learning, sea_vision_setup = self._run_sensor_referenced_measurement_with_diameter_learning(speed)
             applied = [
                 f"labels:{int(measurement.get('labels_measured') or 0)}",
                 f"reference:{float(measurement.get('reference_mm') or 0.0):.1f}mm",
                 f"target:{float(measurement.get('target_mm') or 0.0):.1f}mm",
             ]
+            applied.append(
+                "sea_vision:ready"
+                if bool((sea_vision_setup.get("ready") or {}).get("ok", True))
+                else "sea_vision:ready_failed"
+            )
+            if bool((sea_vision_setup.get("machine_run") or {}).get("skipped")):
+                applied.append("sea_vision:machine_run_skipped")
+            else:
+                applied.append("sea_vision:machine_run")
             for role, item in sorted(diameter_learning.items()):
                 applied.append(f"diameter_{role}:{float(item.get('candidate_diameter_mm') or 0.0):.1f}mm")
             production_baseline = self._prepare_production_pause_baseline()
@@ -2124,6 +2309,7 @@ class SetupWicklerOrchestrator:
                 "applied": applied,
                 "measurement": measurement,
                 "diameter_learning": diameter_learning,
+                "sea_vision_setup": sea_vision_setup,
                 "production_baseline": production_baseline,
                 "final_wickler_ready": final_wickler_ready,
                 "speed_mm_s": speed,

@@ -233,12 +233,15 @@ class MachineRuntimeTests(unittest.TestCase):
             ("I0.8", "1"),
             ("I0.11", "0"),
             ("I0.12", "0"),
+            ("I2.4", "0"),
         ):
             _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", pin, "input", value)
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.2", "output", "0")
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q0.3", "output", "0")
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.2", "output", "0")
         _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.3", "output", "0")
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.4", "output", "0")
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.5", "output", "0")
         _insert_io_point(self.db, "moxa_e1213_1", "Moxa ioLogik E1213 #1", "DIO3", "output", "0")
         for pin in ("DIO0", "DIO1", "DIO2"):
             _insert_io_point(self.db, "moxa_e1213_3", "Moxa ioLogik E1213 #3", pin, "output", "0")
@@ -748,8 +751,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_start_from_pause_starts_production_runner_after_transition(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="test",
             warning_active=False,
             purge_active=False,
@@ -782,8 +785,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_start_from_pause_esp_preflight_failure_returns_to_pause_without_stop(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="test",
             warning_active=False,
             purge_active=False,
@@ -809,8 +812,8 @@ class MachineRuntimeTests(unittest.TestCase):
             second = runtime.refresh()
 
         self.assertEqual(4, first["current_state"])
-        self.assertEqual(7, second["current_state"])
-        self.assertEqual(7, second["requested_state"])
+        self.assertEqual(13, second["current_state"])
+        self.assertEqual(13, second["requested_state"])
         self.assertEqual("0", self.params.get_effective_value("MAS0002"))
         production = second["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertFalse(production["active"])
@@ -826,8 +829,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_start_from_pause_ignores_pending_logfiles_for_resume(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -864,8 +867,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_start_from_pause_clears_stale_label_pause_error_before_transition(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="test",
             warning_active=False,
             purge_active=False,
@@ -1126,7 +1129,7 @@ class MachineRuntimeTests(unittest.TestCase):
         ) as set_idle, patch.object(runtime, "_sync_esp_machine_state"), patch.object(
             runtime, "_queue_tto_printer_state_sync", return_value={"ok": True, "skipped": "test"}
         ) as queue_tto, patch("mas004_rpi_databridge.machine_runtime.time.sleep"):
-            result = runtime._pause_production_motion_after_print(reason="label_removal_required:3,6", target_state=7)
+            result = runtime._pause_production_motion_after_print(reason="label_removal_required:3,6", target_state=13)
 
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["monitor_ok"])
@@ -1172,7 +1175,7 @@ class MachineRuntimeTests(unittest.TestCase):
             "_monitor_active_production_esp",
             return_value={
                 "label_removal_pause": True,
-                "target_state": 7,
+                "target_state": 13,
                 "stop": {"ok": True, "reason": "label_removal_required:3,6"},
                 "production_info": {
                     "paused": True,
@@ -1183,13 +1186,13 @@ class MachineRuntimeTests(unittest.TestCase):
         ):
             snapshot = runtime.refresh()
 
-        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(13, snapshot["current_state"])
 
     def test_label_removal_resume_transition_keeps_tto_online(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -1384,8 +1387,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_production_start_after_label_removal_uses_resume_without_reset(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -1476,8 +1479,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_label_removal_resume_blocks_before_esp_when_wicklers_not_ready(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -1552,8 +1555,8 @@ class MachineRuntimeTests(unittest.TestCase):
             second = runtime.refresh()
 
         self.assertEqual(4, first["current_state"])
-        self.assertEqual(7, second["current_state"])
-        self.assertEqual(7, second["requested_state"])
+        self.assertEqual(13, second["current_state"])
+        self.assertEqual(13, second["requested_state"])
         production_info = second["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertTrue(production_info["paused"])
         self.assertEqual("label_removal_required:6,9", production_info["pause_reason"])
@@ -1563,6 +1566,7 @@ class MachineRuntimeTests(unittest.TestCase):
             "label_removal_resume_precheck_no_motion_started",
             production_info["last_stop"]["skipped"],
         )
+        self.assertEqual(13, production_info["last_stop"]["target_state"])
         self.assertEqual(1, verify_wicklers.call_count)
         self.assertFalse(any(command.startswith("PROCESS PRODUCTION RESUME_REMOVED") for command in commands))
         self.assertFalse(any(command.startswith("PROCESS PRODUCTION STOP") for command in commands))
@@ -1612,8 +1616,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_production_start_after_label_removal_resumes_when_esp_register_is_empty(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -1725,6 +1729,34 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("label_removal_pause_keep_wicklers_armed", result["skipped"])
         self.assertEqual([], result["commands"])
+
+    def test_label_removal_request_merge_preserves_completed_rewind(self):
+        runtime = self.build_runtime()
+        existing = {
+            "label_no": 27,
+            "label_nos": [27],
+            "rewind_required": True,
+            "rewind_executed": True,
+            "rewind": {"ok": True, "distance_mm": 105.8, "rewind_executed": True},
+        }
+        production_info = {
+            "label_removal_requests": [existing],
+            "label_removal_request": dict(existing),
+        }
+        incoming = {
+            "label_no": 27,
+            "label_nos": [27],
+            "payload": {"label_no": 27},
+            "rewind_required": False,
+            "rewind_executed": False,
+            "rewind": {"ok": True, "skipped": "operator_removal_pause"},
+        }
+
+        merged = runtime._merge_label_removal_request(production_info, incoming)
+
+        self.assertTrue(merged["rewind_required"])
+        self.assertTrue(merged["rewind_executed"])
+        self.assertEqual(105.8, merged["rewind"]["distance_mm"])
 
     def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
         runtime = self.build_runtime()
@@ -2063,6 +2095,47 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("printer_bypass_active", result["skipped"])
         pulse.assert_not_called()
         bridge_cls.assert_not_called()
+
+    def test_sea_vision_first_label_trigger_uses_tto_or_laser_pin_when_camera_real(self):
+        runtime = self.build_runtime()
+        pulses: list[tuple[str, float, str]] = []
+
+        def fake_pulse(io_key, *, high_s, source):
+            pulses.append((io_key, float(high_s), source))
+            return {"ok": True, "io_key": io_key, "high_s": high_s}
+
+        with patch.object(runtime, "_pulse_io_output", side_effect=fake_pulse):
+            tto = runtime._pulse_sea_vision_first_label_trigger(
+                {"MAP0016": "0", "MAP0035": "0", "MAP0036": "1", "MAP0037": "0"},
+                reason="test_tto",
+            )
+            laser = runtime._pulse_sea_vision_first_label_trigger(
+                {"MAP0016": "1", "MAP0035": "0", "MAP0036": "1", "MAP0037": "0"},
+                reason="test_laser",
+            )
+
+        self.assertTrue(tto["ok"], tto)
+        self.assertTrue(laser["ok"], laser)
+        self.assertEqual(
+            [
+                ("esp32_plc58__Q2_5", 0.1, "sea-vision-first-label-tto"),
+                ("esp32_plc58__Q2_4", 0.1, "sea-vision-first-label-laser"),
+            ],
+            pulses,
+        )
+
+    def test_sea_vision_first_label_trigger_skips_when_all_cameras_bypassed(self):
+        runtime = self.build_runtime()
+
+        with patch.object(runtime, "_pulse_io_output") as pulse:
+            result = runtime._pulse_sea_vision_first_label_trigger(
+                {"MAP0016": "0", "MAP0035": "0", "MAP0036": "1", "MAP0037": "1"},
+                reason="test_bypass",
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("sea_vision_bypass_active", result["skipped"])
+        pulse.assert_not_called()
 
     def test_tto_printer_online_pulses_laser_start_in_parallel_mode(self):
         self.cfg.vj6530_simulation = False
@@ -2433,6 +2506,52 @@ class MachineRuntimeTests(unittest.TestCase):
             self.assertEqual("-1", calls[role][0][1]["indexedDirection"])
             self.assertEqual("-1", calls[role][3][1]["indexedDirection"])
             self.assertEqual(2, len([item for item in result if item["role"] == role][0]["prepare_attempts"]))
+
+    def test_label_removal_rewind_without_distance_uses_format_tact_and_keeps_wicklers_armed(self):
+        runtime = self.build_runtime()
+        commands: list[str] = []
+
+        def fake_esp_retry(command, **_kwargs):
+            commands.append(command)
+            self.assertIn("DISTANCE_MM=100.000", command)
+            if "DRY_RUN=1" in command:
+                return (
+                    'JSON {"ok":true,"label_no":27,"dry_run":true,'
+                    '"distance_mm":100.000,"speed_mm_s":100.000,'
+                    '"backoff_mm":20.000,"distance_override_mm":100.000,"running":false}'
+                )
+            if command.startswith("PROCESS PRODUCTION REWIND_REMOVAL"):
+                return (
+                    'JSON {"ok":true,"label_no":27,"dry_run":false,'
+                    '"distance_mm":100.000,"running":true}'
+                )
+            raise AssertionError(command)
+
+        runtime._production_esp_retry = Mock(side_effect=fake_esp_retry)
+        runtime._prepare_production_wicklers_reverse = Mock(return_value=[{"ok": True, "role": "both"}])
+        runtime._monitor_wickler_hard_endstops = Mock(return_value=None)
+        runtime._read_production_monitor_diag = Mock(
+            return_value={
+                "removal_rewind_running": False,
+                "removal_rewind_completed": True,
+                "removal_rewind_label_no": 27,
+                "removal_rewind_last_error": "complete",
+                "reason": "completed",
+            }
+        )
+        runtime._set_production_wicklers_idle = Mock(return_value=[{"ok": True, "role": "both"}])
+
+        result = runtime._execute_label_removal_rewind(label_no=27, distance_mm=0.0)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(100.0, result["distance_mm"])
+        self.assertEqual("format_tact:format_plan_map0002_plus_map0076", result["distance_source"])
+        self.assertEqual(0.0, result["requested_distance_mm"])
+        self.assertFalse(result["exact_print_correction_required"])
+        self.assertEqual("label_removal_rewind_keep_wicklers_armed", result["idle_wicklers"][0]["skipped"])
+        runtime._set_production_wicklers_idle.assert_not_called()
+        runtime._prepare_production_wicklers_reverse.assert_called_once()
+        self.assertEqual(2, len(commands))
 
     def test_label_removal_rewind_fails_on_wickler_hard_endstop(self):
         runtime = self.build_runtime()
@@ -5460,6 +5579,33 @@ class MachineRuntimeTests(unittest.TestCase):
             writes,
         )
 
+    def test_sea_vision_ready_output_stays_high_in_setup_after_measurement(self):
+        runtime = self.build_runtime()
+        writes: list[tuple[str, bool, bool, str]] = []
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, io_key, enabled, *, force=False, source="runtime", **_kwargs):
+                writes.append((io_key, bool(enabled), bool(force), source))
+                return {"ok": True}
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            result = runtime._apply_sea_vision_ready_output(
+                3,
+                ts=10.0,
+                state_info={"setup": {"sea_vision_ready_after_measurement": True}},
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["desired"])
+        self.assertTrue(result["setup_ready_after_measurement"])
+        self.assertEqual(
+            [("esp32_plc58__Q2_3", True, True, "sea-vision-ready")],
+            writes,
+        )
+
     def test_sea_vision_ready_failure_log_names_q23_not_q02(self):
         runtime = self.build_runtime()
 
@@ -5668,11 +5814,11 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         runtime._pause_production_motion_after_print.assert_called_once_with(
             reason="label_removal_required:10",
-            target_state=7,
+            target_state=13,
         )
         snapshot = runtime.snapshot()
-        self.assertEqual(7, snapshot["current_state"])
-        self.assertEqual(7, snapshot["requested_state"])
+        self.assertEqual(13, snapshot["current_state"])
+        self.assertEqual(13, snapshot["requested_state"])
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertFalse(production_info["active"])
         self.assertTrue(production_info["paused"])
@@ -5688,7 +5834,7 @@ class MachineRuntimeTests(unittest.TestCase):
             production_ok=False,
         )
         self.assertEqual(str(packed), self.params.get_effective_value("MAS0003"))
-        self.assertEqual("7", self.params.get_effective_value("MAS0001"))
+        self.assertEqual("13", self.params.get_effective_value("MAS0001"))
 
     def test_label_removal_required_event_pauses_before_label_complete(self):
         runtime = self.build_runtime()
@@ -5698,6 +5844,7 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         runtime._execute_label_removal_rewind = Mock()
         runtime._sync_esp_machine_state = Mock(return_value=True)
+        runtime._notify_microtom = Mock()
 
         result = runtime.handle_event(
             {
@@ -5718,10 +5865,19 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         runtime._pause_production_motion_after_print.assert_called_once_with(
             reason="label_removal_required:10",
-            target_state=7,
+            target_state=13,
         )
         snapshot = runtime.snapshot()
-        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(13, snapshot["current_state"])
+        mas0001_notifications = [
+            (call.args[0], call.args[1], call.kwargs.get("dedupe_key"))
+            for call in runtime._notify_microtom.call_args_list
+            if call.args and call.args[0] == "MAS0001"
+        ]
+        self.assertEqual(
+            [("MAS0001", "12", None), ("MAS0001", "13", "machine:MAS0001")],
+            mas0001_notifications,
+        )
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertEqual(10, production_info["label_removal_request"]["label_no"])
         self.assertEqual("verify_bypass_nok", production_info["label_removal_request"]["payload"]["reason"])
@@ -5798,7 +5954,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         runtime._pause_production_motion_after_print.assert_called_once_with(
             reason="label_removal_required:10,11",
-            target_state=7,
+            target_state=13,
         )
         snapshot = runtime.snapshot()
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
@@ -5809,8 +5965,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_label_removal_required_during_pause_extends_removal_list(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -5841,6 +5997,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["accepted"])
         snapshot = runtime.snapshot()
+        self.assertEqual(13, snapshot["current_state"])
         production_info = snapshot["info"][PRODUCTION_RUNTIME_INFO_KEY]
         self.assertEqual([5, 9], production_info["label_removal_pending_labels"])
         self.assertEqual("Labels 5, 9 entnehmen", production_info["label_removal_request"]["operator_message"])
@@ -5861,8 +6018,8 @@ class MachineRuntimeTests(unittest.TestCase):
             }
         }
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -5879,8 +6036,8 @@ class MachineRuntimeTests(unittest.TestCase):
     def test_stale_label_complete_after_removal_pause_is_local_only(self):
         runtime = self.build_runtime()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -5919,7 +6076,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertFalse(result["recorded_label_only"]["forwarded_to_microtom"])
         self.assertEqual(before, self.params.get_effective_value("MAS0003"))
         snapshot = runtime.snapshot()
-        self.assertEqual(7, snapshot["current_state"])
+        self.assertEqual(13, snapshot["current_state"])
         self.assertEqual(15, snapshot["last_label_no"])
         with self.db._conn() as c:
             row = c.execute(
@@ -5934,8 +6091,8 @@ class MachineRuntimeTests(unittest.TestCase):
         self.mark_production_active(runtime)
         old_snapshot = runtime._state_row()
         runtime._write_state(
-            current_state=7,
-            requested_state=7,
+            current_state=13,
+            requested_state=13,
             state_source="label_removal_required",
             warning_active=False,
             purge_active=False,
@@ -5954,7 +6111,7 @@ class MachineRuntimeTests(unittest.TestCase):
         superseded = runtime._label_removal_state_superseded_snapshot(old_snapshot, 5)
 
         self.assertIsNotNone(superseded)
-        self.assertEqual(7, superseded["current_state"])
+        self.assertEqual(13, superseded["current_state"])
         self.assertEqual("label_removal_required", superseded["state_source"])
 
     def test_stale_label_complete_after_production_stop_is_not_forwarded(self):
@@ -6569,7 +6726,7 @@ class MachineRuntimeTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertTrue(result["label_removal_pause"])
-        self.assertEqual(7, result["target_state"])
+        self.assertEqual(13, result["target_state"])
         self.assertEqual([3], result["labels"])
         self.assertFalse(production_info["active"])
         self.assertTrue(production_info["paused"])
@@ -6584,7 +6741,18 @@ class MachineRuntimeTests(unittest.TestCase):
         )
         runtime._queue_tto_printer_state_sync.assert_not_called()
         self.assertEqual("label_removal_pause_keep_online", production_info["last_stop"]["tto_printer"]["skipped"])
-        runtime._notify_microtom.assert_not_called()
+        self.assertEqual("13", self.params.get_effective_value("MAS0001"))
+        self.assertEqual(13, production_info["last_stop"]["target_state"])
+        runtime._sync_esp_machine_state.assert_called_with(13, required=False)
+        mas0001_notifications = [
+            (call.args[0], call.args[1], call.kwargs.get("dedupe_key"))
+            for call in runtime._notify_microtom.call_args_list
+            if call.args and call.args[0] == "MAS0001"
+        ]
+        self.assertEqual(
+            [("MAS0001", "12", None), ("MAS0001", "13", "machine:MAS0001")],
+            mas0001_notifications,
+        )
 
     def test_production_esp_monitor_falls_back_to_status_for_old_firmware(self):
         self.cfg.esp_simulation = False

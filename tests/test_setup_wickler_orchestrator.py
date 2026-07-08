@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import unittest
@@ -42,6 +43,46 @@ def _insert_param(db: DB, pkey: str, default_v: str):
         )
 
 
+def _insert_io_point(
+    db: DB,
+    device_code: str,
+    device_label: str,
+    pin_label: str,
+    io_dir: str,
+    value: str = "0",
+):
+    io_key = f"{device_code}__{pin_label.replace('.', '_')}"
+    with db._conn() as conn:
+        conn.execute(
+            """INSERT INTO io_points(
+                io_key, device_code, device_label, sheet_name, zone_label, pin_label, io_dir,
+                channel_no, function_text, is_reserved, is_active, source_row, updated_ts
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                io_key,
+                device_code,
+                device_label,
+                device_label,
+                "",
+                pin_label,
+                io_dir,
+                0,
+                pin_label,
+                0,
+                1,
+                1,
+                now_ts(),
+            ),
+        )
+        conn.execute(
+            """INSERT INTO io_values(io_key, value, quality, source, updated_ts)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(io_key) DO UPDATE SET value=excluded.value, quality=excluded.quality,
+                 source=excluded.source, updated_ts=excluded.updated_ts""",
+            (io_key, value, "simulation", "test", now_ts()),
+        )
+
+
 def _set_machine_state(db: DB, current_state: int, requested_state: int, purge_active: bool = False):
     with db._conn() as conn:
         conn.execute(
@@ -72,7 +113,14 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = DB(str(Path(self.tmp.name) / "test.db"))
-        for key, value in (("MAS0001", "2"), ("MAS0002", "3"), ("MAS0028", "0"), ("MAE0048", "0")):
+        for key, value in (
+            ("MAS0001", "2"),
+            ("MAS0002", "3"),
+            ("MAS0028", "0"),
+            ("MAE0048", "0"),
+            ("MAP0036", "1"),
+            ("MAP0037", "1"),
+        ):
             _insert_param(self.db, key, value)
         self.params = ParamStore(self.db)
         self.logs = LogStore(self.db)
@@ -377,14 +425,53 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         )
 
         with patch("mas004_rpi_databridge.setup_wickler_orchestrator.time.sleep"):
-            measurement, diameter_learning = self.controller._run_sensor_referenced_measurement_with_diameter_learning(100.0)
+            measurement, diameter_learning, sea_vision_setup = (
+                self.controller._run_sensor_referenced_measurement_with_diameter_learning(100.0)
+            )
 
         self.assertEqual(2345.6, measurement["diameter_learn_travel_mm"])
         self.assertEqual({"unwinder", "rewinder"}, set(diameter_learning))
+        self.assertFalse(sea_vision_setup["required"])
+        self.assertEqual("sea_vision_bypass_active", sea_vision_setup["machine_run"]["skipped"])
         for client in clients:
             self.assertTrue(client.started)
             self.assertEqual([(2345.6, False, "motor-accum")], client.finished)
             self.assertEqual([(client.diameter, True)], client.applied)
+
+    def test_sea_vision_setup_ready_waits_for_machine_run_when_ocr_not_bypassed(self):
+        self.params.apply_device_value("MAP0037", "0", promote_default=True)
+        _set_machine_state(self.db, current_state=3, requested_state=3)
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "Q2.3", "output", "0")
+        _insert_io_point(self.db, "esp32_plc58", "ESP32 PLC 58", "I2.4", "input", "0")
+        writes: list[tuple[str, bool, bool, str]] = []
+
+        class FakeIoRuntime:
+            def __init__(self, _cfg, store):
+                self.store = store
+
+            def write_output(self, io_key, enabled, *, force=False, source="runtime", **_kwargs):
+                writes.append((io_key, bool(enabled), bool(force), source))
+                self.store.upsert_value(io_key, "1" if enabled else "0", "live", source)
+                return {"ok": True, "value": 1 if enabled else 0}
+
+            def _refresh_device(self, device_code, points):
+                self.store.upsert_value("esp32_plc58__I2_4", "1", "live", "test")
+                return {"device_code": device_code, "reachable": True, "changed": 1, "point_count": len(points)}
+
+        with patch("mas004_rpi_databridge.setup_wickler_orchestrator.IoRuntime", FakeIoRuntime):
+            result = self.controller._prepare_sea_vision_after_setup_measurement()
+
+        self.assertTrue(result["required"], result)
+        self.assertTrue(result["ready"]["ok"], result)
+        self.assertTrue(result["machine_run"]["ok"], result)
+        self.assertEqual(
+            [("esp32_plc58__Q2_3", True, True, "setup-sea-vision-ready")],
+            writes,
+        )
+        with self.db._conn() as conn:
+            row = conn.execute("SELECT info_json FROM machine_state WHERE singleton_id=1").fetchone()
+        info = json.loads(row[0])
+        self.assertTrue(info["setup"]["sea_vision_ready_after_measurement"])
 
     def test_diameter_apply_retries_transient_wickler_http_refusal(self):
         class FakeDescriptor:
@@ -1019,6 +1106,11 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
             return_value=(
                 {"labels_measured": 3, "reference_mm": 12.0, "target_mm": 2.0},
                 {"unwinder": {"candidate_diameter_mm": 200.0}},
+                {
+                    "ok": True,
+                    "ready": {"ok": True},
+                    "machine_run": {"ok": True, "skipped": "sea_vision_bypass_active"},
+                },
             )
         )
         self.controller._prepare_production_pause_baseline = Mock(return_value={"ok": True})
@@ -1032,7 +1124,10 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.controller._calibrate_motor3_scale_against_infeed_encoder.assert_not_called()
         self.assertNotIn("motor3_scale:31.250000", result["applied"])
         self.assertIn("wicklers:ready", result["applied"])
+        self.assertIn("sea_vision:ready", result["applied"])
+        self.assertIn("sea_vision:machine_run_skipped", result["applied"])
         self.assertNotIn("wicklers:stop", result["applied"])
+        self.assertIn("sea_vision_setup", result)
         self.assertEqual([{"role": "all", "action": "ready_motion", "ok": True}], result["final_wickler_ready"])
         for fake in fake_wicklers:
             self.assertEqual(

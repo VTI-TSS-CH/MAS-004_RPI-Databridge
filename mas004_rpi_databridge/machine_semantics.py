@@ -147,7 +147,7 @@ def state_actions(state: int | str | None) -> dict[str, bool]:
     except Exception:
         code = 0
     actions = {name: False for name in BUTTON_ORDER}
-    if code == 7:
+    if code in (7, 13):
         actions["start"] = True
         actions["stop"] = True
     if code in (2, 3):
@@ -176,7 +176,7 @@ def target_state_for_button(button: str, current_state: int | str | None) -> int
     if btn == "start_pause":
         if code == 5:
             return 7
-        if code == 7:
+        if code in (7, 13):
             return 5
         return None
     if btn == "stop":

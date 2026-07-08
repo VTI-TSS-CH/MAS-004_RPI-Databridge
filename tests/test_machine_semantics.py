@@ -10,6 +10,7 @@ from mas004_rpi_databridge.machine_semantics import (
     parse_button_mask,
     settle_machine_state,
     state_actions,
+    target_state_for_button,
 )
 
 
@@ -39,6 +40,8 @@ class MachineSemanticsTests(unittest.TestCase):
         self.assertEqual(7, command_to_target_state(7, 5))
         self.assertEqual(1, button_to_command("start_pause", 3))
         self.assertEqual(7, button_to_command("start_pause", 5))
+        self.assertEqual(1, button_to_command("start_pause", 13))
+        self.assertEqual(5, target_state_for_button("start_pause", 13))
 
     def test_start_pause_reset_uses_start_mask_action(self):
         self.assertEqual("start", action_for_button("start_pause", 21, reset_context=True))
@@ -60,6 +63,17 @@ class MachineSemanticsTests(unittest.TestCase):
 
     def test_pause_allows_only_start_and_stop(self):
         actions = state_actions(7)
+
+        self.assertTrue(actions["start"])
+        self.assertTrue(actions["stop"])
+        self.assertFalse(actions["pause"])
+        self.assertFalse(actions["setup"])
+        self.assertFalse(actions["sync"])
+        self.assertFalse(actions["empty"])
+        self.assertFalse(actions["rewind"])
+
+    def test_label_removal_allows_only_start_and_stop(self):
+        actions = state_actions(13)
 
         self.assertTrue(actions["start"])
         self.assertTrue(actions["stop"])

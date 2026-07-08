@@ -109,14 +109,30 @@ def _active_mae_keys(param_map: dict[str, str]) -> list[str]:
     return sorted(str(key) for key, value in (param_map or {}).items() if str(key).startswith("MAE") and _truthy(value))
 
 
+LABEL_REMOVAL_TRANSITION_STATE = 12
+LABEL_REMOVAL_STATE = 13
+LABEL_REMOVAL_STATES = {LABEL_REMOVAL_TRANSITION_STATE, LABEL_REMOVAL_STATE}
+LABEL_REMOVAL_RESUME_STATES = {7, LABEL_REMOVAL_STATE}
+
+
 def _is_label_removal_pause_reason(reason: Any) -> bool:
     return str(reason or "").strip().startswith("label_removal_required:")
+
+
+def _production_info_has_label_removal_pause(production_info: dict[str, Any]) -> bool:
+    if not isinstance(production_info, dict):
+        return False
+    return (
+        _is_label_removal_pause_reason(production_info.get("pause_reason"))
+        or isinstance(production_info.get("label_removal_request"), dict)
+        or bool(production_info.get("label_removal_pending_labels"))
+    )
 
 
 def _keep_tto_online_for_pause_reason(machine_state: int, reason: Any) -> bool:
     text = str(reason or "").strip()
     state = int(machine_state or 0)
-    if state not in (4, 7):
+    if state not in (4, 7, *LABEL_REMOVAL_STATES):
         return False
     return (
         _is_label_removal_pause_reason(text)
@@ -199,9 +215,12 @@ ESP_RESET_SAFETY_INPUT_READY_POLL_S = 0.2
 ESP_RESET_IO_KEY = "esp32_plc58__Q0_2"
 SEA_VISION_RESET_IO_KEY = "esp32_plc58__Q2_2"
 SEA_VISION_READY_IO_KEY = "esp32_plc58__Q2_3"
-SEA_VISION_READY_STATES = {4, 5, 6, 7}
+SEA_VISION_TRIGGER_LASER_IO_KEY = "esp32_plc58__Q2_4"
+SEA_VISION_TRIGGER_TTO_IO_KEY = "esp32_plc58__Q2_5"
+SEA_VISION_READY_STATES = {4, 5, 6, 7, *LABEL_REMOVAL_STATES}
 SEA_VISION_READY_FORCE_INTERVAL_S = 2.0
 SEA_VISION_READY_RETRY_BACKOFF_S = 30.0
+SEA_VISION_FIRST_LABEL_TRIGGER_HIGH_S = 0.1
 LASER_SYSTEM_READY_PIN = "I0.12"
 LASER_READY_PIN = "I0.2"
 LASER_START_PIN = "Q0.3"
@@ -607,8 +626,13 @@ def production_start_is_pause_resume(db: DB) -> bool:
     state = _machine_state_row_from_db(db)
     current_state = _safe_int(state.get("current_state"), 1)
     requested_state = _safe_int(state.get("requested_state"), current_state)
-    if current_state != 7 and requested_state != 7:
+    if current_state not in LABEL_REMOVAL_RESUME_STATES and requested_state not in LABEL_REMOVAL_RESUME_STATES:
         return False
+    if current_state == LABEL_REMOVAL_STATE or requested_state == LABEL_REMOVAL_STATE:
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        if not _production_info_has_label_removal_pause(production_info):
+            return False
     return not bool(state.get("purge_active"))
 
 
@@ -1701,6 +1725,12 @@ class MachineRuntime:
                 failure_skips_stop = bool(start_result.get("skip_fail_stop"))
                 failure_keeps_pause = bool(start_result.get("keep_pause"))
                 failure_is_pre_resume_block = failure_skips_stop and failure_keeps_pause
+                failure_pause_state = (
+                    LABEL_REMOVAL_STATE
+                    if str(start_result.get("resume") or "") == "label_removal"
+                    or _production_info_has_label_removal_pause(production_info)
+                    else 7
+                )
                 failure_severity = "warning" if failure_skips_stop else "error"
                 failure_event = "production_resume_blocked" if failure_is_pre_resume_block else "production_start_failed"
                 self.logs.log("machine", failure_severity, f"Produktionsstart fehlgeschlagen: {start_result.get('error')}")
@@ -1715,7 +1745,7 @@ class MachineRuntime:
                         "ok": True,
                         "skipped": str(start_result.get("skip_fail_stop_reason") or "motion_not_started"),
                         "reason": str(start_result.get("error") or "production_resume_blocked"),
-                        "target_state": 7,
+                        "target_state": failure_pause_state,
                         "motion_started": False,
                         "resume": start_result.get("resume"),
                     }
@@ -1727,7 +1757,7 @@ class MachineRuntime:
                             or production_info.get("pause_reason")
                             or "label_removal_required"
                         )
-                        production_info["resume_from_state"] = 7
+                        production_info["resume_from_state"] = failure_pause_state
                     else:
                         production_info.pop("paused", None)
                         production_info.pop("paused_ts", None)
@@ -1743,8 +1773,8 @@ class MachineRuntime:
                     event = self.production_logs.handle_param_change("MAS0002", "2")
                     if event and event.get("event") == "stop":
                         self.logs.log("raspi", "info", f"production logging ready: {event.get('production_label')}")
-                new_state = 7
-                requested_state = 7
+                new_state = failure_pause_state if failure_skips_stop else 7
+                requested_state = new_state
                 state_source = "production_resume_blocked" if failure_is_pre_resume_block else "production_start_failed"
                 purge_active = bool(critical_active or _truthy(param_map.get("MAS0028", "0")))
 
@@ -1933,7 +1963,7 @@ class MachineRuntime:
         # for the HMI/snapshot; writing here as well makes the blink cadence
         # race against the tick when refresh() work takes longer than usual.
         self._apply_status_lamp(new_state, warning_active=warning_active, ts=ts)
-        sea_vision_ready_output = self._apply_sea_vision_ready_output(new_state, ts=ts)
+        sea_vision_ready_output = self._apply_sea_vision_ready_output(new_state, ts=ts, state_info=info)
 
         machine_label = self._current_production_label()
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
@@ -2727,14 +2757,9 @@ class MachineRuntime:
             return None
 
         label_no = _safe_int((payload or {}).get("label_no"), 0)
-        removal_request = production_info.get("label_removal_request")
         removal_pause_active = (
-            current_state == 7
-            and (
-                str(production_info.get("pause_reason") or "").startswith("label_removal_required:")
-                or isinstance(removal_request, dict)
-                or bool(production_info.get("label_removal_pending_labels"))
-            )
+            current_state in LABEL_REMOVAL_RESUME_STATES
+            and _production_info_has_label_removal_pause(production_info)
         )
         if removal_pause_active and event_type == "label_removal_required" and label_no > 0:
             return self._record_label_removal_required_while_paused(
@@ -2748,7 +2773,7 @@ class MachineRuntime:
             try:
                 recorded_label = self._handle_label_complete(
                     dict(payload or {}),
-                    forward_to_microtom=True,
+                    forward_to_microtom=not removal_pause_active,
                     allow_removal_action=False,
                     record_machine_event=False,
                 )
@@ -2820,15 +2845,9 @@ class MachineRuntime:
         ):
             return None
         snapshot_production = dict((snapshot.get("info") or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
-        snapshot_pause_reason = str(snapshot_production.get("pause_reason") or "")
-        snapshot_removal_request = snapshot_production.get("label_removal_request")
         snapshot_is_label_removal_pause = (
-            _safe_int(snapshot.get("current_state"), 0) == 7
-            and (
-                snapshot_pause_reason.startswith("label_removal_required:")
-                or isinstance(snapshot_removal_request, dict)
-                or bool(snapshot_production.get("label_removal_pending_labels"))
-            )
+            _safe_int(snapshot.get("current_state"), 0) in LABEL_REMOVAL_RESUME_STATES
+            and _production_info_has_label_removal_pause(snapshot_production)
         )
         if snapshot_is_label_removal_pause and int(candidate_state or 0) in (4, 5):
             return None
@@ -3338,11 +3357,14 @@ class MachineRuntime:
             return False
         if int((request or {}).get("target_state") or 0) != 5:
             return False
-        if int((snapshot or {}).get("current_state") or 0) != 7:
+        current_state = int((snapshot or {}).get("current_state") or 0)
+        if current_state not in LABEL_REMOVAL_RESUME_STATES:
             return False
         if bool((snapshot or {}).get("purge_active")):
             return False
         production_info = dict((info or {}).get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        if current_state == LABEL_REMOVAL_STATE:
+            return _production_info_has_label_removal_pause(production_info)
         if bool(production_info.get("paused")):
             return True
         last_stop = production_info.get("last_stop")
@@ -3444,6 +3466,22 @@ class MachineRuntime:
                 item_payload["label_no"] = int(incoming_label)
                 item_payload["label_nos"] = list(incoming_labels)
                 item["payload"] = item_payload
+            existing_for_label = next(
+                (
+                    existing
+                    for existing in requests
+                    if isinstance(existing, dict) and _safe_int(existing.get("label_no"), 0) == incoming_label
+                ),
+                None,
+            )
+            if (
+                isinstance(existing_for_label, dict)
+                and bool(existing_for_label.get("rewind_executed"))
+                and not bool(item.get("rewind_executed"))
+            ):
+                item["rewind"] = dict(existing_for_label.get("rewind") or {})
+                item["rewind_required"] = bool(existing_for_label.get("rewind_required", True))
+                item["rewind_executed"] = True
             requests = [existing for existing in requests if _safe_int(existing.get("label_no"), 0) != incoming_label]
             requests.append(item)
         requests.sort(key=lambda item: _safe_int(item.get("label_no"), 0))
@@ -3462,6 +3500,50 @@ class MachineRuntime:
         production_info["label_removal_request"] = primary
         production_info["pause_reason"] = "label_removal_required:" + ",".join(str(label) for label in labels)
         return primary
+
+    def _enter_label_removal_state(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        info: dict[str, Any],
+        production_label: str,
+        last_label_no: int,
+        warning_active: bool,
+        purge_active: bool,
+    ) -> dict[str, Any]:
+        transition_ts = now_ts()
+        info["label_removal_state_transition"] = {
+            "from_state": _safe_int(snapshot.get("current_state"), 1),
+            "transition_state": LABEL_REMOVAL_TRANSITION_STATE,
+            "target_state": LABEL_REMOVAL_STATE,
+            "ts": transition_ts,
+        }
+        self.params.apply_device_value("MAS0001", str(LABEL_REMOVAL_TRANSITION_STATE), promote_default=True)
+        self._notify_microtom("MAS0001", str(LABEL_REMOVAL_TRANSITION_STATE), dedupe_key=None)
+        self._write_state(
+            current_state=LABEL_REMOVAL_TRANSITION_STATE,
+            requested_state=LABEL_REMOVAL_STATE,
+            state_source="label_removal_required",
+            warning_active=warning_active,
+            purge_active=purge_active,
+            production_label=str(production_label or ""),
+            last_label_no=int(last_label_no or 0),
+            info=info,
+        )
+        self.params.apply_device_value("MAS0001", str(LABEL_REMOVAL_STATE), promote_default=True)
+        self._notify_microtom("MAS0001", str(LABEL_REMOVAL_STATE), dedupe_key="machine:MAS0001")
+        self._sync_esp_machine_state(LABEL_REMOVAL_STATE, required=False)
+        self._write_state(
+            current_state=LABEL_REMOVAL_STATE,
+            requested_state=LABEL_REMOVAL_STATE,
+            state_source="label_removal_required",
+            warning_active=warning_active,
+            purge_active=purge_active,
+            production_label=str(production_label or ""),
+            last_label_no=int(last_label_no or 0),
+            info=info,
+        )
+        return dict(info["label_removal_state_transition"])
 
     def _record_label_removal_required_while_paused(
         self,
@@ -3504,9 +3586,13 @@ class MachineRuntime:
             "label_no": int(label_no),
             "production_label": str(production_label or ""),
             "payload": dict(compact_payload),
-            "stop": {"ok": True, "skipped": "already_in_label_removal_pause", "target_state": 7},
+            "stop": {
+                "ok": True,
+                "skipped": "already_in_label_removal_pause",
+                "target_state": LABEL_REMOVAL_STATE,
+            },
             "rewind": dict(rewind_result or {}),
-            "target_state": 7,
+            "target_state": LABEL_REMOVAL_STATE,
             "operator_message": f"Label {label_no} entnehmen",
             "rewind_required": True,
             "rewind_executed": bool((rewind_result or {}).get("rewind_executed")),
@@ -3518,15 +3604,13 @@ class MachineRuntime:
         production_info.pop("pending_start", None)
         merged = self._merge_label_removal_request(production_info, request)
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
-        self._write_state(
-            current_state=7,
-            requested_state=7,
-            state_source="label_removal_required",
+        self._enter_label_removal_state(
+            snapshot=snapshot,
+            info=info,
             warning_active=bool(snapshot.get("warning_active")),
             purge_active=bool(snapshot.get("purge_active")),
             production_label=str(production_label or ""),
             last_label_no=max(_safe_int(snapshot.get("last_label_no"), 0), int(label_no)),
-            info=info,
         )
         event_result = self._record_production_event_once(
             "label_removal_request_updated",
@@ -3536,7 +3620,7 @@ class MachineRuntime:
                 "label_no": label_no,
                 "label_nos": list(merged.get("label_nos") or [label_no]),
                 "reason": compact_payload.get("reason"),
-                "target_state": 7,
+                "target_state": LABEL_REMOVAL_STATE,
             },
             dedupe_window_s=2.0,
         )
@@ -3805,7 +3889,7 @@ class MachineRuntime:
         stop_result: dict[str, Any] = {
             "ok": True,
             "skipped": f"machine_state={current_state}",
-            "target_state": 7,
+            "target_state": LABEL_REMOVAL_STATE,
         }
         pause_labels = _payload_label_nos(compact_payload, label_no)
         pause_label_text = ",".join(str(item) for item in pause_labels) if pause_labels else str(label_no)
@@ -3818,25 +3902,25 @@ class MachineRuntime:
                 "ok": True,
                 "skipped": "esp_runner_deferred_missed_removal_rewind_ready",
                 "reason": f"label_removal_required:{pause_label_text}",
-                "target_state": 7,
+                "target_state": LABEL_REMOVAL_STATE,
                 "controlled": True,
                 "finished_ts": now_ts(),
             }
         elif current_state in (4, 5, 6) or bool(production_info.get("active")):
             stop_result = self._pause_production_motion_after_print(
                 reason=f"label_removal_required:{pause_label_text}",
-                target_state=7,
+                target_state=LABEL_REMOVAL_STATE,
             )
 
-        target_state = 7 if bool(stop_result.get("ok", False)) else 21
+        target_state = LABEL_REMOVAL_STATE if bool(stop_result.get("ok", False)) else 21
         purge_active = bool(snapshot.get("purge_active"))
         if target_state == 21:
             purge_active = True
             self.params.apply_device_value("MAS0028", "1", promote_default=True)
             self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
 
-        rewind_required = target_state == 7
-        if target_state == 7 and str(compact_payload.get("type") or "") == "label_removal_required":
+        rewind_required = False
+        if target_state == LABEL_REMOVAL_STATE:
             rewind_required = self._label_removal_required_needs_rewind(compact_payload)
             rewind_result: dict[str, Any] = (
                 {"ok": True, "skipped": "operator_removal_pause"}
@@ -3845,7 +3929,7 @@ class MachineRuntime:
             )
         else:
             rewind_result = {"ok": True, "skipped": f"target_state={target_state}"}
-        if target_state == 7 and rewind_required:
+        if target_state == LABEL_REMOVAL_STATE and rewind_required:
             try:
                 rewind_result = self._execute_label_removal_rewind(
                     label_no=int(label_no),
@@ -3878,32 +3962,42 @@ class MachineRuntime:
             "ts": now_ts(),
         }
         production_info["active"] = False
-        production_info["paused"] = target_state == 7
+        production_info["paused"] = target_state == LABEL_REMOVAL_STATE
         production_info["last_stop"] = dict(stop_result or {})
         production_info["last_label_removal_rewind"] = dict(rewind_result or {})
         production_info.pop("pending_start", None)
         merged_request = self._merge_label_removal_request(production_info, request)
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
 
-        self.params.apply_device_value("MAS0001", str(target_state), promote_default=True)
-        self._notify_microtom("MAS0001", str(target_state), dedupe_key="machine:MAS0001")
-        self._sync_esp_machine_state(target_state, required=False)
-        self._write_state(
-            current_state=target_state,
-            requested_state=target_state,
-            state_source="label_removal_required",
-            warning_active=bool(snapshot.get("warning_active")),
-            purge_active=purge_active,
-            production_label=str(production_label or ""),
-            last_label_no=max(_safe_int(snapshot.get("last_label_no"), 0), int(label_no)),
-            info=info,
-        )
+        if target_state == LABEL_REMOVAL_STATE:
+            self._enter_label_removal_state(
+                snapshot=snapshot,
+                info=info,
+                warning_active=bool(snapshot.get("warning_active")),
+                purge_active=purge_active,
+                production_label=str(production_label or ""),
+                last_label_no=max(_safe_int(snapshot.get("last_label_no"), 0), int(label_no)),
+            )
+        else:
+            self.params.apply_device_value("MAS0001", str(target_state), promote_default=True)
+            self._notify_microtom("MAS0001", str(target_state), dedupe_key="machine:MAS0001")
+            self._sync_esp_machine_state(target_state, required=False)
+            self._write_state(
+                current_state=target_state,
+                requested_state=target_state,
+                state_source="label_removal_required",
+                warning_active=bool(snapshot.get("warning_active")),
+                purge_active=purge_active,
+                production_label=str(production_label or ""),
+                last_label_no=max(_safe_int(snapshot.get("last_label_no"), 0), int(label_no)),
+                info=info,
+            )
         self._record_event(
             "label_removal_requested",
-            "warning" if target_state == 7 else "error",
+            "warning" if target_state == LABEL_REMOVAL_STATE else "error",
             (
-                f"{merged_request.get('operator_message', f'Label {label_no} entnehmen')} - Produktion in Pause"
-                if target_state == 7
+                f"{merged_request.get('operator_message', f'Label {label_no} entnehmen')} - Etikettenentnahme"
+                if target_state == LABEL_REMOVAL_STATE
                 else f"{merged_request.get('operator_message', f'Label {label_no} entnehmen')} - Stop fehlgeschlagen"
             ),
             merged_request,
@@ -4078,7 +4172,7 @@ class MachineRuntime:
             and isinstance(incoming_production.get("pending_start"), dict)
         )
         stale_start_failure = (
-            int(current_state or 0) == 7
+            int(current_state or 0) in LABEL_REMOVAL_RESUME_STATES
             and str(state_source or "") == "production_start_failed"
             and not bool(incoming_production.get("active"))
         )
@@ -5171,6 +5265,57 @@ class MachineRuntime:
             reason=reason,
             required=required,
         )
+
+    def _sea_vision_real_camera_required_for_format(self, param_map: dict[str, str]) -> bool:
+        material_bypass = _truthy(param_map.get("MAP0036", self.params.get_effective_value("MAP0036")))
+        ocr_bypass = _truthy(param_map.get("MAP0037", self.params.get_effective_value("MAP0037")))
+        return bool(not material_bypass or not ocr_bypass)
+
+    def _pulse_sea_vision_first_label_trigger(
+        self,
+        param_map: dict[str, str],
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        active_printer = "laser" if self._laser_printer_active(param_map) else "tto"
+        io_key = SEA_VISION_TRIGGER_LASER_IO_KEY if active_printer == "laser" else SEA_VISION_TRIGGER_TTO_IO_KEY
+        result: dict[str, Any] = {
+            "ok": True,
+            "active_printer": active_printer,
+            "io_key": io_key,
+            "high_s": SEA_VISION_FIRST_LABEL_TRIGGER_HIGH_S,
+            "reason": str(reason or ""),
+            "material_bypass": _truthy(param_map.get("MAP0036", self.params.get_effective_value("MAP0036"))),
+            "ocr_bypass": _truthy(param_map.get("MAP0037", self.params.get_effective_value("MAP0037"))),
+            "print_bypass": _truthy(param_map.get("MAP0035", self.params.get_effective_value("MAP0035"))),
+        }
+        if not self._sea_vision_real_camera_required_for_format(param_map):
+            return {**result, "skipped": "sea_vision_bypass_active"}
+        if result["print_bypass"]:
+            return {**result, "skipped": "printer_bypass_active"}
+        try:
+            pulse = self._pulse_io_output(
+                io_key,
+                high_s=SEA_VISION_FIRST_LABEL_TRIGGER_HIGH_S,
+                source=f"sea-vision-first-label-{active_printer}",
+            )
+            result["pulse"] = pulse
+            self._record_event(
+                "sea_vision_first_label_trigger",
+                "info",
+                f"SEA-Vision {active_printer.upper()} Trigger fuer erstes Label gepulst",
+                result,
+            )
+            return result
+        except Exception as exc:
+            result.update({"ok": False, "error": str(exc)})
+            self._record_event(
+                "sea_vision_first_label_trigger_failed",
+                "error",
+                f"SEA-Vision {active_printer.upper()} Trigger fuer erstes Label fehlgeschlagen",
+                result,
+            )
+            raise
 
     def _production_esp_sync_values(self, param_map: dict[str, str]) -> dict[str, str]:
         values: dict[str, str] = {}
@@ -6687,10 +6832,10 @@ class MachineRuntime:
                     "ok": True,
                     "skipped": "esp_runner_already_paused_for_label_removal",
                     "reason": last_error,
-                    "target_state": 7,
+                    "target_state": LABEL_REMOVAL_STATE,
                 },
                 "rewind": {"ok": True, "skipped": "operator_removal_pause"},
-                "target_state": 7,
+                "target_state": LABEL_REMOVAL_STATE,
                 "operator_message": f"Label {label_no} entnehmen",
                 "rewind_required": False,
                 "rewind_executed": False,
@@ -6708,11 +6853,10 @@ class MachineRuntime:
                 "reason": last_error,
             }
         ]
-        self._sync_esp_machine_state(7, required=False)
         tto_printer = {
             "ok": True,
             "skipped": "label_removal_pause_keep_online",
-            "machine_state": 7,
+            "machine_state": LABEL_REMOVAL_STATE,
             "reason": f"label_removal_required:{','.join(str(label) for label in labels)}",
         }
 
@@ -6722,7 +6866,7 @@ class MachineRuntime:
         production_info["last_stop"] = {
             "ok": True,
             "reason": last_error,
-            "target_state": 7,
+            "target_state": LABEL_REMOVAL_STATE,
             "skipped": "esp_runner_already_paused_for_label_removal",
             "finished_ts": now_ts(),
             "commands": commands,
@@ -6730,11 +6874,22 @@ class MachineRuntime:
             "tto_printer": tto_printer,
         }
         production_info.pop("pending_start", None)
+        state_snapshot = self._state_row()
+        state_info = dict(state_snapshot.get("info") or {})
+        state_info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        monitor["state_transition"] = self._enter_label_removal_state(
+            snapshot=state_snapshot,
+            info=state_info,
+            warning_active=bool(state_snapshot.get("warning_active")),
+            purge_active=bool(state_snapshot.get("purge_active")),
+            production_label=str(production_label or state_snapshot.get("production_label") or ""),
+            last_label_no=max(_safe_int(state_snapshot.get("last_label_no"), 0), max(labels)),
+        )
 
         monitor["ok"] = True
         monitor["fault"] = last_error
         monitor["label_removal_pause"] = True
-        monitor["target_state"] = 7
+        monitor["target_state"] = LABEL_REMOVAL_STATE
         monitor["labels"] = labels
         monitor["requests"] = compact_requests
         monitor["stop"] = dict(production_info["last_stop"])
@@ -6745,15 +6900,15 @@ class MachineRuntime:
             "label_removal_requested",
             "warning",
             (
-                f"Labels {', '.join(str(label) for label in labels)} entnehmen - Produktion in Pause"
+                f"Labels {', '.join(str(label) for label in labels)} entnehmen - Etikettenentnahme"
                 if len(labels) > 1
-                else f"Label {labels[0]} entnehmen - Produktion in Pause"
+                else f"Label {labels[0]} entnehmen - Etikettenentnahme"
             ),
             {
                 "label_no": int(labels[0]),
                 "label_nos": labels,
                 "reason": last_error,
-                "target_state": 7,
+                "target_state": LABEL_REMOVAL_STATE,
                 "source": "esp_monitor",
             },
             dedupe_window_s=2.0,
@@ -6761,7 +6916,7 @@ class MachineRuntime:
         self._record_event(
             "production_esp_label_removal_pause",
             "info",
-            "ESP-Runner meldet Label-Entnahme; Raspi wechselt kontrolliert in Pause statt Purge",
+            "ESP-Runner meldet Label-Entnahme; Raspi wechselt kontrolliert in Etikettenentnahme statt Purge",
             monitor,
         )
         return monitor
@@ -7428,8 +7583,8 @@ class MachineRuntime:
         last_stop = production_info.get("last_stop")
         if not isinstance(last_stop, dict):
             return {"ok": False, "reason": "missing_last_stop"}
-        if _safe_int(last_stop.get("target_state"), 0) != 7:
-            return {"ok": False, "reason": "last_stop_not_pause"}
+        if _safe_int(last_stop.get("target_state"), 0) not in LABEL_REMOVAL_RESUME_STATES:
+            return {"ok": False, "reason": "last_stop_not_label_removal_state"}
         reason = str(last_stop.get("reason") or production_info.get("pause_reason") or "")
         skipped = str(last_stop.get("skipped") or "")
         if not (
@@ -7763,7 +7918,12 @@ class MachineRuntime:
             rewind_speed_mm_s = float(plan["speed_mm_s"])
         rewind_speed_mm_s = max(5.0, min(250.0, rewind_speed_mm_s))
         backoff_mm = PRODUCTION_REMOVAL_REWIND_BACKOFF_MM
-        distance_mm = _safe_float(distance_mm, 0.0)
+        requested_distance_mm = _safe_float(distance_mm, 0.0)
+        distance_source = "payload"
+        distance_mm = requested_distance_mm
+        if distance_mm < 1.0:
+            distance_mm, distance_source = self._production_wickler_base_travel(plan)
+            distance_source = f"format_tact:{distance_source}"
         base_command = (
             "PROCESS PRODUCTION REWIND_REMOVAL "
             f"LABEL={int(label_no)} "
@@ -7901,7 +8061,19 @@ class MachineRuntime:
                 monitor_snapshots.append({"ts": now_ts(), "ok": False, "error": repr(exc)})
             time.sleep(0.1)
 
-        idle_wicklers = self._set_production_wicklers_idle(target_state=21 if hard_endstop_fault else 7)
+        if hard_endstop_fault is not None:
+            idle_wicklers = self._set_production_wicklers_idle(target_state=21)
+        elif completed:
+            idle_wicklers = [
+                {
+                    "role": "both",
+                    "ok": True,
+                    "skipped": "label_removal_rewind_keep_wicklers_armed",
+                    "reason": f"label_removal_rewind:{label_no}",
+                }
+            ]
+        else:
+            idle_wicklers = self._set_production_wicklers_idle(target_state=7)
         result = {
             "ok": bool(completed),
             "label_no": int(label_no),
@@ -7909,8 +8081,12 @@ class MachineRuntime:
             "finished_ts": now_ts(),
             "rewind_executed": True,
             "distance_mm": distance_mm,
+            "distance_source": distance_source,
+            "requested_distance_mm": requested_distance_mm,
             "speed_mm_s": rewind_speed_mm_s,
             "backoff_mm": backoff_mm,
+            "stop_tolerance_mm": float(STOP_MODE_POSITION_TOLERANCE_TENTHS) / 10.0,
+            "exact_print_correction_required": False,
             "plan": plan_payload,
             "wicklers": wicklers,
             "command": base_command,
@@ -8351,6 +8527,10 @@ class MachineRuntime:
                 reason="production_start",
                 required=True,
             )
+            sea_vision_first_label_trigger = self._pulse_sea_vision_first_label_trigger(
+                param_map,
+                reason="production_start_first_label",
+            )
             # Let the ESP consume the MAS0001 transition reset before the real
             # production start, otherwise pollStateTransitions can clear it again.
             time.sleep(0.05)
@@ -8443,6 +8623,7 @@ class MachineRuntime:
                 "esp_preflight": esp_preflight,
                 "laser_ready": laser_ready,
                 "tto_printer": tto_printer,
+                "sea_vision_first_label_trigger": sea_vision_first_label_trigger,
                 "command": start_command,
                 "response": response,
             }
@@ -8781,7 +8962,7 @@ class MachineRuntime:
         state_info = dict(self._state_row().get("info") or {})
         production_info = dict(state_info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
         keep_tto_online_for_label_removal_context = (
-            int(target_state or 0) == 7
+            int(target_state or 0) in LABEL_REMOVAL_RESUME_STATES
             and (
                 _is_label_removal_pause_reason(str(production_info.get("pause_reason") or ""))
                 or bool(self._pending_label_removal_labels(production_info))
@@ -11871,13 +12052,25 @@ class MachineRuntime:
         if not had_error:
             self._status_lamp_last_plan = dict(lamp)
 
-    def _apply_sea_vision_ready_output(self, state: int, *, ts: float) -> dict[str, Any]:
-        desired = int(state or 0) in SEA_VISION_READY_STATES
+    def _apply_sea_vision_ready_output(
+        self,
+        state: int,
+        *,
+        ts: float,
+        state_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        setup_info = dict((state_info or {}).get("setup") or {})
+        setup_ready_after_measurement = bool(setup_info.get("sea_vision_ready_after_measurement"))
+        state_code = int(state or 0)
+        desired = state_code in SEA_VISION_READY_STATES or (
+            state_code == 3 and setup_ready_after_measurement
+        )
         point = self.io_store.get_point(SEA_VISION_READY_IO_KEY)
         result: dict[str, Any] = {
             "io_key": SEA_VISION_READY_IO_KEY,
             "desired": bool(desired),
-            "state": int(state or 0),
+            "state": state_code,
+            "setup_ready_after_measurement": setup_ready_after_measurement,
             "ts": float(ts),
         }
         if not point:
