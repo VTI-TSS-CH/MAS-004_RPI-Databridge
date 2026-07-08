@@ -580,6 +580,11 @@ class ConfigUpdate(BaseModel):
     vj3350_simulation: Optional[bool] = None
     vj6530_host: Optional[str] = None
     vj6530_port: Optional[int] = None
+    vj6530_ztc_port: Optional[int] = None
+    vj6530_ztc_timeout_s: Optional[float] = None
+    vj6530_first_print_queue_check_timeout_s: Optional[float] = None
+    vj6530_first_print_queue_check_interval_s: Optional[float] = None
+    vj6530_first_print_queue_expected_size: Optional[int] = None
     vj6530_simulation: Optional[bool] = None
     smart_unwinder_host: Optional[str] = None
     smart_unwinder_port: Optional[int] = None

@@ -101,6 +101,11 @@ class Settings:
     vj3350_simulation: bool = True
     vj6530_host: str = "192.168.210.22"
     vj6530_port: int = 3002
+    vj6530_ztc_port: int = 3007
+    vj6530_ztc_timeout_s: float = 2.0
+    vj6530_first_print_queue_check_timeout_s: float = 30.0
+    vj6530_first_print_queue_check_interval_s: float = 5.0
+    vj6530_first_print_queue_expected_size: int = 1
     vj6530_simulation: bool = True
     smart_unwinder_host: str = "192.168.210.23"
     smart_unwinder_port: int = 3011

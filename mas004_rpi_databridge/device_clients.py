@@ -158,6 +158,8 @@ _ULTIMATE_ENDPOINTS_GUARD = threading.Lock()
 _ULTIMATE_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
 _ZBC_ENDPOINTS_GUARD = threading.Lock()
 _ZBC_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
+_ZTC_ENDPOINTS_GUARD = threading.Lock()
+_ZTC_ENDPOINTS: dict[tuple[str, int], _EndpointState] = {}
 
 
 def _endpoint_state(
@@ -636,6 +638,10 @@ def _zbc_endpoint_state(host: str, port: int) -> _EndpointState:
     return _endpoint_state(_ZBC_ENDPOINTS, _ZBC_ENDPOINTS_GUARD, host, port)
 
 
+def _ztc_endpoint_state(host: str, port: int) -> _EndpointState:
+    return _endpoint_state(_ZTC_ENDPOINTS, _ZTC_ENDPOINTS_GUARD, host, port)
+
+
 @dataclass
 class DeviceWatchdog:
     host: str
@@ -884,6 +890,59 @@ class UltimateClient:
             state.close_socket()
 
 
+class ZipherTextClient:
+    def __init__(self, host: str, port: int, timeout_s: float):
+        self.host = (host or "").strip()
+        self.port = int(port or 0)
+        self.timeout_s = float(timeout_s or 1.0)
+
+    def command(self, command: str) -> str:
+        if not self.host or self.port <= 0:
+            raise RuntimeError("ZTC endpoint missing")
+        text = str(command or "").strip()
+        if not text:
+            raise ValueError("ZTC command missing")
+        payload = text.encode("ascii", errors="strict") + b"\r"
+        state = _ztc_endpoint_state(self.host, self.port)
+        with state.lock:
+            last_error: Optional[Exception] = None
+            for _attempt in range(2):
+                try:
+                    with socket.create_connection((self.host, self.port), timeout=self.timeout_s) as sock:
+                        _tune_command_socket(sock)
+                        sock.settimeout(self.timeout_s)
+                        sock.sendall(payload)
+                        raw = _recv_until_eol(sock, limit=8192)
+                    if not raw:
+                        raise RuntimeError("ZTC endpoint empty reply")
+                    state.fail_count = 0
+                    state.next_allowed_at = 0.0
+                    state.exchange_count += 1
+                    state.connect_count += 1
+                    state.last_ok_at = time.monotonic()
+                    state.last_error = ""
+                    return raw.decode("ascii", errors="replace").strip()
+                except Exception as exc:
+                    last_error = exc
+                    state.last_error = repr(exc)
+                    state.fail_count += 1
+                    time.sleep(min(0.2, 0.05 * state.fail_count))
+            assert last_error is not None
+            raise last_error
+
+    def query_queue_size(self) -> dict[str, object]:
+        response = self.command("QSZ")
+        match = re.match(r"^\s*QSZ\|(?P<size>\d+)\|(?P<status>\d+)\|?\s*$", response, re.IGNORECASE)
+        if not match:
+            raise RuntimeError(f"unexpected ZTC QSZ response: {response!r}")
+        return {
+            "ok": True,
+            "queue_size": int(match.group("size")),
+            "queue_status": int(match.group("status")),
+            "response": response,
+        }
+
+
 class ZipherClient:
     def __init__(self, host: str, port: int, timeout_s: float):
         self.host = (host or "").strip()
@@ -985,6 +1044,20 @@ def _recv_until(sock: socket.socket, marker: bytes, limit: int = 65536) -> bytes
         buf.extend(chunk)
         if marker in buf:
             break
+        if len(buf) >= limit:
+            raise RuntimeError("response too large")
+    return bytes(buf)
+
+
+def _recv_until_eol(sock: socket.socket, limit: int = 8192) -> bytes:
+    buf = bytearray()
+    while True:
+        chunk = sock.recv(1)
+        if not chunk:
+            break
+        if chunk in (b"\r", b"\n"):
+            break
+        buf.extend(chunk)
         if len(buf) >= limit:
             raise RuntimeError("response too large")
     return bytes(buf)

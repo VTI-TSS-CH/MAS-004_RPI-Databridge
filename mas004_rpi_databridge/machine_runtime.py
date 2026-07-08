@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 from mas004_rpi_databridge.db import DB, now_ts
 from mas004_rpi_databridge.device_bridge import DeviceBridge
-from mas004_rpi_databridge.device_clients import EspPlcClient, start_esp_command_broker
+from mas004_rpi_databridge.device_clients import EspPlcClient, ZipherTextClient, start_esp_command_broker
 from mas004_rpi_databridge.esp_motors import EspMotorClient
 from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.io_master import IoStore
@@ -392,6 +392,7 @@ TTO_PRINTER_OFFLINE_CODE = "0"
 TTO_PRINTER_ONLINE_CODE = "3"
 TTO_READY_DEVICE_CODE = "raspi_plc21"
 TTO_READY_PIN = "I0.0"
+TTO_FIRST_PRINT_QUEUE_FAULT_MESSAGE = "Keine Daten im TTO"
 WICKLER_HARD_ENDSTOP_LOW_PERCENT = 2.0
 WICKLER_HARD_ENDSTOP_HIGH_PERCENT = 98.0
 WICKLER_HARD_ENDSTOP_MONITOR_INTERVAL_S = 1.0
@@ -2312,6 +2313,11 @@ class MachineRuntime:
                         "skipped": "duplicate_first_print_position_reached",
                         "label_no": label_no,
                     },
+                    "tto_queue": {
+                        "ok": True,
+                        "skipped": "already_handled",
+                        "label_no": label_no,
+                    },
                     "esp_ready": {
                         "ok": True,
                         "skipped": "already_handled",
@@ -2333,6 +2339,33 @@ class MachineRuntime:
                 payload=payload,
                 status="started",
             )
+            tto_queue = self._verify_first_print_tto_queue_data(
+                self._param_values_by_prefix(("MAP", "TTS")),
+                label_no=label_no,
+                payload=payload,
+                reason="first_print_position_reached",
+            )
+            if not bool(tto_queue.get("ok")):
+                wickler_takt = {"ok": False, "skipped": "tto_queue_not_ready", "label_no": label_no}
+                esp_ready = {"ok": False, "skipped": "tto_queue_not_ready", "label_no": label_no}
+                self._remember_first_print_wickler_ready_attempt(
+                    ready_key,
+                    label_no=label_no,
+                    payload=payload,
+                    status="tto_queue_failed",
+                    wickler_takt=wickler_takt,
+                    esp_ready=esp_ready,
+                    tto_queue=tto_queue,
+                )
+                return {
+                    "ok": False,
+                    "accepted": True,
+                    "event": event_type,
+                    "tto_queue": tto_queue,
+                    "wickler_takt": wickler_takt,
+                    "esp_ready": esp_ready,
+                    **event_result,
+                }
             wickler_takt = self._prepare_next_production_wickler_takt(
                 label_no=label_no,
                 reason="first_print_position_reached",
@@ -2369,11 +2402,13 @@ class MachineRuntime:
                 status="finished",
                 wickler_takt=wickler_takt,
                 esp_ready=esp_ready,
+                tto_queue=tto_queue,
             )
             return {
                 "ok": True,
                 "accepted": True,
                 "event": event_type,
+                "tto_queue": tto_queue,
                 "wickler_takt": wickler_takt,
                 "esp_ready": esp_ready,
                 **event_result,
@@ -2932,6 +2967,7 @@ class MachineRuntime:
         status: str,
         wickler_takt: dict[str, Any] | None = None,
         esp_ready: dict[str, Any] | None = None,
+        tto_queue: dict[str, Any] | None = None,
     ) -> None:
         if not ready_key:
             return
@@ -2947,6 +2983,8 @@ class MachineRuntime:
             "ts": now_ts(),
             "wickler_takt_ok": bool((wickler_takt or {}).get("ok")) if wickler_takt is not None else None,
             "esp_ready_ok": bool((esp_ready or {}).get("ok")) if esp_ready is not None else None,
+            "tto_queue_ok": bool((tto_queue or {}).get("ok")) if tto_queue is not None else None,
+            "tto_queue_skipped": str((tto_queue or {}).get("skipped") or "") if tto_queue is not None else "",
         }
         info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
         self._write_state(
@@ -5272,6 +5310,177 @@ class MachineRuntime:
         ocr_bypass = _truthy(param_map.get("MAP0037", self.params.get_effective_value("MAP0037")))
         return bool(not material_bypass or not ocr_bypass)
 
+    def _sea_vision_ocr_camera_required_for_format(self, param_map: dict[str, str]) -> bool:
+        ocr_bypass = _truthy(param_map.get("MAP0037", self.params.get_effective_value("MAP0037")))
+        return not ocr_bypass
+
+    def _first_print_tto_queue_requirement(self, param_map: dict[str, str]) -> dict[str, Any]:
+        active_printer = "laser" if self._laser_printer_active(param_map) else "tto"
+        print_bypass = _truthy(param_map.get("MAP0035", self.params.get_effective_value("MAP0035")))
+        ocr_bypass = _truthy(param_map.get("MAP0037", self.params.get_effective_value("MAP0037")))
+        result = {
+            "active_printer": active_printer,
+            "print_bypass": print_bypass,
+            "ocr_bypass": ocr_bypass,
+            "vj6530_simulation": bool(getattr(self.cfg, "vj6530_simulation", False)),
+        }
+        if active_printer != "tto":
+            return {**result, "required": False, "skipped": "laser_active"}
+        if print_bypass:
+            return {**result, "required": False, "skipped": "printer_bypass_active"}
+        if ocr_bypass or not self._sea_vision_ocr_camera_required_for_format(param_map):
+            return {**result, "required": False, "skipped": "ocr_bypass_active"}
+        if result["vj6530_simulation"]:
+            return {**result, "required": False, "skipped": "vj6530_simulation"}
+        return {**result, "required": True}
+
+    def _verify_first_print_tto_queue_data(
+        self,
+        param_map: dict[str, str],
+        *,
+        label_no: int,
+        payload: dict[str, Any] | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        requirement = self._first_print_tto_queue_requirement(param_map)
+        expected_size = max(0, _safe_int(getattr(self.cfg, "vj6530_first_print_queue_expected_size", 1), 1))
+        result: dict[str, Any] = {
+            "ok": True,
+            "label_no": int(label_no),
+            "expected_size": expected_size,
+            "reason": str(reason or ""),
+            **requirement,
+        }
+        if not bool(requirement.get("required")):
+            return result
+
+        host = str(getattr(self.cfg, "vj6530_host", "") or "").strip()
+        port = _safe_int(getattr(self.cfg, "vj6530_ztc_port", 3007), 3007)
+        query_timeout_s = max(0.1, _safe_float(getattr(self.cfg, "vj6530_ztc_timeout_s", 2.0), 2.0))
+        timeout_s = max(0.0, _safe_float(getattr(self.cfg, "vj6530_first_print_queue_check_timeout_s", 30.0), 30.0))
+        interval_s = max(0.1, _safe_float(getattr(self.cfg, "vj6530_first_print_queue_check_interval_s", 5.0), 5.0))
+        attempts: list[dict[str, Any]] = []
+        started = time.monotonic()
+        deadline = started + timeout_s
+        attempt_no = 0
+        client = ZipherTextClient(host, port, timeout_s=query_timeout_s)
+        while True:
+            attempt_no += 1
+            attempt_started = time.monotonic()
+            attempt: dict[str, Any] = {"attempt": attempt_no, "elapsed_s": round(attempt_started - started, 3)}
+            try:
+                queue = client.query_queue_size()
+                attempt.update(queue)
+                if _safe_int(queue.get("queue_size"), -1) == expected_size:
+                    attempts.append(attempt)
+                    ok_result = {
+                        **result,
+                        "ok": True,
+                        "host": host,
+                        "port": port,
+                        "timeout_s": timeout_s,
+                        "interval_s": interval_s,
+                        "attempts": attempts,
+                        "queue": queue,
+                    }
+                    self._record_production_event_once(
+                        "production_tto_queue_ready",
+                        "info",
+                        f"TTO Queue fuer ersten Druck bereit: {expected_size} Datensatz",
+                        ok_result,
+                        dedupe_window_s=30.0,
+                    )
+                    return ok_result
+            except Exception as exc:
+                attempt.update({"ok": False, "error": repr(exc)})
+            attempts.append(attempt)
+            if time.monotonic() >= deadline:
+                break
+            sleep_s = min(interval_s, max(0.0, deadline - time.monotonic()))
+            if sleep_s > 0.0:
+                time.sleep(sleep_s)
+
+        fault_payload = {
+            **result,
+            "ok": False,
+            "host": host,
+            "port": port,
+            "timeout_s": timeout_s,
+            "interval_s": interval_s,
+            "attempts": attempts,
+            "payload": dict(payload or {}),
+        }
+        return self._latch_first_print_tto_queue_fault(
+            label_no=int(label_no),
+            reason=reason,
+            fault_payload=fault_payload,
+        )
+
+    def _latch_first_print_tto_queue_fault(
+        self,
+        *,
+        label_no: int,
+        reason: str,
+        fault_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        fault = dict(fault_payload or {})
+        fault.update(
+            {
+                "ok": False,
+                "fault": "tto_first_print_queue_missing",
+                "message": TTO_FIRST_PRINT_QUEUE_FAULT_MESSAGE,
+                "label_no": int(label_no),
+                "reason": str(reason or ""),
+            }
+        )
+        try:
+            stop_result = self._stop_production_motion(
+                reason="tto_first_print_queue_missing",
+                target_state=21,
+            )
+        except Exception as exc:
+            stop_result = {"ok": False, "error": repr(exc)}
+        fault["stop"] = stop_result
+        log_event = self._finalize_production_logging_stop("tto_first_print_queue_missing")
+        if log_event:
+            fault["production_log"] = log_event
+
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
+        self.params.apply_device_value("MAS0001", "21", promote_default=True)
+        self._notify_microtom("MAS0001", "21", dedupe_key="machine:MAS0001")
+        try:
+            fault["esp_state"] = self._sync_esp_machine_state(21, required=False)
+        except Exception as exc:
+            fault["esp_state"] = {"ok": False, "error": repr(exc)}
+
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        production_info["active"] = False
+        production_info["last_tto_queue_fault"] = dict(fault)
+        production_info["last_stop"] = dict(stop_result or {})
+        production_info.pop("pending_start", None)
+        info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="tto_first_print_queue_fault",
+            warning_active=bool(state.get("warning_active")),
+            purge_active=True,
+            production_label=str(state.get("production_label") or self._current_production_label()),
+            last_label_no=max(int(state.get("last_label_no") or 0), int(label_no)),
+            info=info,
+        )
+        self._record_event(
+            "production_tto_queue_fault",
+            "error",
+            TTO_FIRST_PRINT_QUEUE_FAULT_MESSAGE,
+            fault,
+        )
+        self.logs.log("vj6530", "error", TTO_FIRST_PRINT_QUEUE_FAULT_MESSAGE)
+        return fault
+
     def _pulse_sea_vision_first_label_trigger(
         self,
         param_map: dict[str, str],
@@ -7053,6 +7262,44 @@ class MachineRuntime:
             status="started_diag_fallback",
         )
 
+        tto_queue = self._verify_first_print_tto_queue_data(
+            self._param_values_by_prefix(("MAP", "TTS")),
+            label_no=label_no,
+            payload=payload,
+            reason="esp_diag_first_print_wait_fallback",
+        )
+        if not bool(tto_queue.get("ok")):
+            wickler_takt = {"ok": False, "skipped": "tto_queue_not_ready", "label_no": label_no}
+            esp_ready = {"ok": False, "skipped": "tto_queue_not_ready", "label_no": label_no}
+            result.update(
+                {
+                    "ok": False,
+                    "status": "tto_queue_failed",
+                    "tto_queue": tto_queue,
+                    "wickler_takt": wickler_takt,
+                    "esp_ready": esp_ready,
+                    "wickler_takt_ok": False,
+                    "esp_ready_ok": False,
+                }
+            )
+            production_info["esp_first_wickler_ready_fallback"] = dict(result)
+            self._remember_first_print_wickler_ready_attempt(
+                ready_key,
+                label_no=label_no,
+                payload=payload,
+                status="tto_queue_failed_diag_fallback",
+                wickler_takt=wickler_takt,
+                esp_ready=esp_ready,
+                tto_queue=tto_queue,
+            )
+            self._record_event(
+                "production_first_print_ready_fallback",
+                "error",
+                TTO_FIRST_PRINT_QUEUE_FAULT_MESSAGE,
+                result,
+            )
+            return result
+
         wickler_takt = self._prepare_next_production_wickler_takt(
             label_no=label_no,
             reason="esp_diag_first_print_wait_fallback",
@@ -7087,6 +7334,7 @@ class MachineRuntime:
             {
                 "ok": bool(wickler_takt.get("ok")) and bool(esp_ready.get("ok")),
                 "status": "finished",
+                "tto_queue": tto_queue,
                 "wickler_takt": wickler_takt,
                 "esp_ready": esp_ready,
                 "wickler_takt_ok": bool(wickler_takt.get("ok")),
@@ -7122,6 +7370,7 @@ class MachineRuntime:
             status="finished_diag_fallback",
             wickler_takt=wickler_takt,
             esp_ready=esp_ready,
+            tto_queue=tto_queue,
         )
         severity = "info" if result["ok"] else "warning"
         message = (

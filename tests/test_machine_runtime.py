@@ -6313,6 +6313,130 @@ class MachineRuntimeTests(unittest.TestCase):
             priority=True,
         )
 
+    def test_first_print_position_waits_for_tto_queue_when_ocr_active(self):
+        self.cfg.vj6530_simulation = False
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+        queue_sizes = [0, 1]
+
+        class FakeZtc:
+            def __init__(self, host, port, timeout_s):
+                self.host = host
+                self.port = port
+                self.timeout_s = timeout_s
+
+            def query_queue_size(self):
+                size = queue_sizes.pop(0)
+                return {"ok": True, "queue_size": size, "queue_status": 4, "response": f"QSZ|{size}|4|"}
+
+        with (
+            patch("mas004_rpi_databridge.machine_runtime.ZipherTextClient", FakeZtc),
+            patch("mas004_rpi_databridge.machine_runtime.time.sleep") as sleep_mock,
+        ):
+            result = runtime.handle_event(
+                {
+                    "type": "production_first_print_position_reached",
+                    "label_no": 1,
+                    "target_error_mm": 0.327,
+                }
+            )
+
+        self.assertTrue(result["tto_queue"]["ok"])
+        self.assertEqual(2, len(result["tto_queue"]["attempts"]))
+        sleep_mock.assert_called_once_with(5.0)
+        runtime._prepare_next_production_wickler_takt.assert_called_once()
+        runtime._production_esp_retry.assert_called_once()
+
+    def test_first_print_position_missing_tto_queue_faults_without_esp_ready(self):
+        self.cfg.vj6530_simulation = False
+        self.cfg.vj6530_first_print_queue_check_timeout_s = 0.0
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+        runtime._stop_production_motion = Mock(return_value={"ok": True, "target_state": 21})
+        runtime._finalize_production_logging_stop = Mock(return_value=None)
+        runtime._sync_esp_machine_state = Mock(return_value={"ok": True})
+
+        class FakeZtc:
+            def __init__(self, host, port, timeout_s):
+                pass
+
+            def query_queue_size(self):
+                return {"ok": True, "queue_size": 0, "queue_status": 0, "response": "QSZ|0|0|"}
+
+        with patch("mas004_rpi_databridge.machine_runtime.ZipherTextClient", FakeZtc):
+            result = runtime.handle_event(
+                {
+                    "type": "production_first_print_position_reached",
+                    "label_no": 1,
+                    "target_error_mm": 0.327,
+                }
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("Keine Daten im TTO", result["tto_queue"]["message"])
+        self.assertEqual("tto_queue_not_ready", result["wickler_takt"]["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_not_called()
+        runtime._production_esp_retry.assert_not_called()
+        runtime._stop_production_motion.assert_called_once_with(
+            reason="tto_first_print_queue_missing",
+            target_state=21,
+        )
+        self.assertEqual("21", self.params.get_effective_value("MAS0001"))
+        self.assertEqual("1", self.params.get_effective_value("MAS0028"))
+
+    def test_first_print_position_skips_tto_queue_when_ocr_bypassed(self):
+        self.cfg.vj6530_simulation = False
+        self.params.set_value("MAP0037", "1", actor="test")
+        runtime = self.build_runtime()
+        runtime._write_state(
+            current_state=5,
+            requested_state=5,
+            state_source="test",
+            warning_active=False,
+            purge_active=False,
+            production_label="JOB_TEST",
+            last_label_no=0,
+            info={PRODUCTION_RUNTIME_INFO_KEY: {"active": True, "active_since_ts": 1234.5}},
+        )
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        with patch("mas004_rpi_databridge.machine_runtime.ZipherTextClient", side_effect=AssertionError("unexpected ZTC")):
+            result = runtime.handle_event(
+                {
+                    "type": "production_first_print_position_reached",
+                    "label_no": 1,
+                    "target_error_mm": 0.327,
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("ocr_bypass_active", result["tto_queue"]["skipped"])
+        runtime._prepare_next_production_wickler_takt.assert_called_once()
+        runtime._production_esp_retry.assert_called_once()
+
     def test_first_print_position_duplicate_does_not_reprepare_wicklers(self):
         runtime = self.build_runtime()
         runtime._write_state(
