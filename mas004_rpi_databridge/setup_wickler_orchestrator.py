@@ -192,37 +192,37 @@ class SetupWicklerOrchestrator:
     def _motor_auto_poll_state(self) -> dict[str, Any]:
         return self._json_response(self._esp("MOTOR POLL?", read_timeout_s=2.0))
 
-    def _enable_motor_auto_poll_for_setup(self) -> dict[str, Any]:
+    def _ensure_motor_auto_poll_disabled_for_setup(self) -> dict[str, Any]:
         if bool(getattr(self.cfg, "esp_simulation", False)):
-            return {"ok": True, "skipped": "simulation", "previous_auto_poll": True}
+            return {"ok": True, "skipped": "simulation"}
         status = self._motor_auto_poll_state()
-        previous_auto_poll = bool(status.get("auto_poll"))
         result: dict[str, Any] = {
             "ok": True,
-            "previous_auto_poll": previous_auto_poll,
             "before": status,
-            "restore_required": not previous_auto_poll,
+            "disabled": False,
         }
-        if previous_auto_poll:
-            self.logs.log("esp-plc", "info", "setup motor auto-poll already enabled")
+        if not bool(status.get("auto_poll")):
+            self.logs.log("esp-plc", "info", "setup motor auto-poll already disabled")
             return result
-        response = self._esp("MOTOR POLL=1", read_timeout_s=2.0)
+        response = self._esp("MOTOR POLL=0", read_timeout_s=2.0)
         verify = self._motor_auto_poll_state()
-        result["enable_response"] = response
-        result["after_enable"] = verify
-        if not bool(verify.get("auto_poll")):
-            raise RuntimeError(f"ESP motor auto-poll could not be enabled for setup: {result}")
-        self.logs.log("esp-plc", "info", "setup motor auto-poll enabled for measurement")
+        result["disable_response"] = response
+        result["after_disable"] = verify
+        result["disabled"] = True
+        if bool(verify.get("auto_poll")):
+            raise RuntimeError(f"ESP motor auto-poll could not be disabled for setup: {result}")
+        self.logs.log("esp-plc", "info", "setup motor auto-poll disabled for measurement")
         return result
 
-    def _restore_motor_auto_poll_after_setup(self, guard: dict[str, Any] | None) -> None:
-        if not guard or not bool(guard.get("restore_required")):
-            return
+    def _refresh_motor3_for_setup_status(self) -> dict[str, Any]:
+        if bool(getattr(self.cfg, "esp_simulation", False)):
+            return {"ok": True, "skipped": "simulation"}
         try:
-            response = self._esp("MOTOR POLL=0", read_timeout_s=2.0)
-            self.logs.log("esp-plc", "info", f"setup motor auto-poll restored after measurement: {response}")
+            payload = self._json_response(self._esp("MOTOR 3 REFRESH", read_timeout_s=2.5))
+            return {"ok": bool(payload.get("ok", True)), "motor": payload.get("motor")}
         except Exception as exc:
-            self.logs.log("esp-plc", "warning", f"setup motor auto-poll restore failed: {repr(exc)}")
+            self.logs.log("esp-plc", "warning", f"setup Motor 3 targeted refresh failed: {repr(exc)}")
+            return {"ok": False, "error": repr(exc)}
 
     def _setup_abort_reason(self) -> str:
         mas0001 = self._param_int("MAS0001", 0)
@@ -1804,6 +1804,7 @@ class SetupWicklerOrchestrator:
         self._abort_if_not_setup_active()
 
     def _setup_measure_status(self) -> dict[str, Any]:
+        self._refresh_motor3_for_setup_status()
         return self._json_response(
             self._esp("PROCESS SETUP_MEASURE STATUS?", read_timeout_s=SETUP_MEASURE_STATUS_READ_TIMEOUT_S)
         )
@@ -2084,11 +2085,11 @@ class SetupWicklerOrchestrator:
         speed = self._setup_learn_speed_mm_s()
         ramp = self.defaults.learn_ramp_mm_s2
         format_axes_ok: bool | None = None
-        motor_poll_guard: dict[str, Any] | None = None
+        motor_poll_setup: dict[str, Any] | None = None
         try:
             self._abort_if_not_setup_active()
             self._sync_setup_params_to_esp()
-            motor_poll_guard = self._enable_motor_auto_poll_for_setup()
+            motor_poll_setup = self._ensure_motor_auto_poll_disabled_for_setup()
             self._configure_motor3(speed, ramp)
 
             self._sync_wickler_setup_master()
@@ -2130,14 +2131,12 @@ class SetupWicklerOrchestrator:
                 "teach_ms": self._sensor_teach_ms(speed),
                 "format_axes_waited": wait_for_format_axes is not None,
                 "format_axes_ok": format_axes_ok,
-                "motor_poll_guard": motor_poll_guard,
+                "motor_poll_setup": motor_poll_setup,
             }
         except Exception:
             self.stop_all_motion()
             self.params.apply_device_value("MAS0028", "1", promote_default=True)
             raise
-        finally:
-            self._restore_motor_auto_poll_after_setup(motor_poll_guard)
 
     def _learn_diameter_pass(self, distance_mm: float, speed_mm_s: float) -> dict[str, float]:
         abs_distance = abs(float(distance_mm))

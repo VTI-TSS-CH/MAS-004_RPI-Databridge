@@ -213,9 +213,9 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def test_motor3_measurement_preparation_captures_current_position_as_zero(self):
         self.controller._esp = Mock(
             side_effect=[
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":false,"feedback_tenths_mm":1631838,"target_tenths_mm":1641838}}}',
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"hwto":false,"feedback_tenths_mm":1631838,"target_tenths_mm":1641838}}}',
                 "ACK_SET_POSITION_MM",
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":false,"feedback_tenths_mm":0,"target_tenths_mm":0}}}',
+                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"hwto":false,"feedback_tenths_mm":0,"target_tenths_mm":0}}}',
             ]
         )
 
@@ -229,19 +229,14 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertIn("MOTOR 3 SET_POSITION_MM=0.000", calls)
 
     def test_motor3_measurement_preparation_rejects_hwto_before_move(self):
-        self.controller._esp = Mock(
-            side_effect=[
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":true,"output_raw_hex":"43"}}}',
-                "ACK_RESET_ALARM",
-                "ACK_RECOVER_ETO",
-            ]
-            + [
-                'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":true,"output_raw_hex":"43"}}}'
-            ]
-            * 30
-        )
+        def fake_esp(line: str, **_kwargs) -> str:
+            if line == "MOTOR 3 REFRESH":
+                return 'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":false,"alarm":false,"hwto":true,"output_raw_hex":"43"}}}'
+            return "ACK_" + line.replace(" ", "_")
 
-        with self.assertRaisesRegex(RuntimeError, "not operable"):
+        self.controller._esp = Mock(side_effect=fake_esp)
+
+        with self.assertRaisesRegex(RuntimeError, "hwto"):
             self.controller._prepare_motor3_for_measurement()
 
         calls = [call.args[0] for call in self.controller._esp.call_args_list]
@@ -253,7 +248,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def test_production_pause_baseline_retries_transient_esp_timeout(self):
         calls: list[str] = []
 
-        def fake_esp(line: str, read_timeout_s: float | None = None) -> str:
+        def fake_esp(line: str, read_timeout_s: float | None = None, **_kwargs) -> str:
             calls.append(line)
             if line == "PROCESS PRODUCTION_RESET" and calls.count(line) == 1:
                 raise TimeoutError("timed out")
@@ -273,7 +268,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def test_production_pause_baseline_accepts_motor3_zero_when_ack_times_out_but_state_is_zero(self):
         calls: list[str] = []
 
-        def fake_esp(line: str, read_timeout_s: float | None = None) -> str:
+        def fake_esp(line: str, read_timeout_s: float | None = None, **_kwargs) -> str:
             calls.append(line)
             if line == "MOTOR 3 SET_POSITION_MM=0.000":
                 raise TimeoutError("timed out")
@@ -437,8 +432,10 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def test_sensor_referenced_measurement_teaches_infeed_before_motor3_motion(self):
         events: list[tuple[str, object]] = []
 
-        def fake_esp(line: str, read_timeout_s: float | None = None) -> str:
+        def fake_esp(line: str, read_timeout_s: float | None = None, **_kwargs) -> str:
             events.append(("esp", line))
+            if line == "MOTOR 3 REFRESH":
+                return 'JSON {"ok":true,"motor":{"state":{"link_ok":true,"ready":true,"alarm":false,"hwto":false,"busy":false,"move":false}}}'
             if line == "PROCESS SETUP_MEASURE STATUS?":
                 return (
                     'JSON {"ok":true,"running":false,"completed":true,"phase":6,'
@@ -865,7 +862,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
 
         self.controller._winder_clients = Mock(
             return_value=[
-                FakeWicklerClient("unwinder", "Abwickler", 6.5),
+                FakeWicklerClient("unwinder", "Abwickler", 4.5),
                 FakeWicklerClient("rewinder", "Aufwickler", 50.0),
             ]
         )
@@ -902,7 +899,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.controller._winder_clients = Mock(
             return_value=[
                 FakeWicklerClient("unwinder", "Abwickler", 50.0),
-                FakeWicklerClient("rewinder", "Aufwickler", 93.0),
+                FakeWicklerClient("rewinder", "Aufwickler", 96.0),
             ]
         )
 
@@ -1066,7 +1063,7 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
     def test_setup_measurement_slip_tolerance_uses_twenty_mm_floor(self):
         self.assertEqual(20.0, self.controller._slip_tolerance_mm())
 
-    def test_setup_enables_motor_auto_poll_and_restores_previous_state(self):
+    def test_setup_disables_motor_auto_poll_without_restoring_it(self):
         self.controller.cfg.esp_simulation = False
         commands: list[str] = []
 
@@ -1074,19 +1071,38 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
             commands.append(str(line))
             if line == "MOTOR POLL?":
                 if commands.count("MOTOR POLL?") == 1:
-                    return 'JSON {"ok":true,"auto_poll":false}'
-                return 'JSON {"ok":true,"auto_poll":true}'
-            if line in {"MOTOR POLL=1", "MOTOR POLL=0"}:
+                    return 'JSON {"ok":true,"auto_poll":true}'
+                return 'JSON {"ok":true,"auto_poll":false}'
+            if line == "MOTOR POLL=0":
                 return "ACK_" + line.replace(" ", "_")
             raise AssertionError(line)
 
         self.controller._esp = Mock(side_effect=fake_esp)
 
-        guard = self.controller._enable_motor_auto_poll_for_setup()
-        self.controller._restore_motor_auto_poll_after_setup(guard)
+        result = self.controller._ensure_motor_auto_poll_disabled_for_setup()
 
-        self.assertTrue(guard["restore_required"])
-        self.assertEqual(["MOTOR POLL?", "MOTOR POLL=1", "MOTOR POLL?", "MOTOR POLL=0"], commands)
+        self.assertTrue(result["disabled"])
+        self.assertEqual(["MOTOR POLL?", "MOTOR POLL=0", "MOTOR POLL?"], commands)
+
+    def test_setup_measurement_status_refreshes_motor3_without_global_poll(self):
+        self.controller.cfg.esp_simulation = False
+        commands: list[str] = []
+
+        def fake_esp(line, **_kwargs):
+            commands.append(str(line))
+            if line == "MOTOR 3 REFRESH":
+                return 'JSON {"ok":true,"motor":{"state":{"ready":true,"busy":false,"move":false}}}'
+            if line == "PROCESS SETUP_MEASURE STATUS?":
+                return 'JSON {"ok":true,"running":false,"completed":true,"phase":6,"last_error":""}'
+            raise AssertionError(line)
+
+        self.controller._esp = Mock(side_effect=fake_esp)
+
+        status = self.controller._setup_measure_status()
+
+        self.assertTrue(status["completed"])
+        self.assertEqual(["MOTOR 3 REFRESH", "PROCESS SETUP_MEASURE STATUS?"], commands)
+        self.assertFalse(any(command.startswith("MOTOR POLL=") for command in commands))
 
     def test_setup_aborts_when_wickler_map0047_sync_is_not_confirmed(self):
         class FakeWicklerClient:

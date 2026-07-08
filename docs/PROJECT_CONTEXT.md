@@ -105,6 +105,7 @@
   - if all visible motors are simulated, the page pauses its background refresh loop to avoid `loading...` flicker and unnecessary overview calls
   - ESP background motor polling intentionally stays off by default (`MOTOR POLL=0`) because the ESP owns a single TCP command socket and Modbus RTU timeouts can otherwise block process/Wickler control
   - the Raspi page therefore keeps the auto-refresh view cache-based, reads only the lightweight `MOTOR POLL?` state automatically and offers an explicit per-motor `Status aktualisieren` action that sends `MOTOR <id> REFRESH` for one AZD controller at a time
+  - setup measurement follows the same rule: it forces global ESP motor polling off before the measuring run and uses targeted `MOTOR 3 REFRESH` reads only when Motor 3 state is needed for setup status decisions
   - motor command actions now surface ESP `NAK` replies directly, update the affected card after successful actions and offer per-card `1s Polling` for commissioning
   - the motor cards can capture the current physical position as an entered absolute millimeter value and can command absolute millimeter target moves
   - motor cards expose separate Fahrstrom/Haltestrom settings; `current_pct` is the AZD Base-current path and `hold_current_pct` is the AZD Stop-current path saved through `MOTOR <id> SAVE`
@@ -351,9 +352,7 @@
 - The LED stripe is now handled by an external ESP32 LED controller. The ESP32-PLC keeps the realtime label shift-register rendering and sends `MAS004-LED-UDP/v1` RGB frames for the shortened `520 mm` strip (`75` LEDs) to `192.168.2.255:3050` by default.
 - The PLC58 must not drive TX1/GPIO17, GPIO0, or another local WS2812 pin while RS485/motor communication is active.
 - Leaving the IO page with active overrides should be a conscious decision; the UI asks whether all active overrides should be released or kept active.
-- The same IO page exposes `ESP Motorpolling` for commissioning:
-  - it maps to `MOTOR POLL=1/0` on the ESP32-PLC
-  - firmware-side polling is intentionally paced as one motor per step, `100 ms` between motor polls, cycling `1..9`
+- Global `ESP Motorpolling` is intentionally kept disabled; commissioning must use targeted per-motor refresh/polling from the Motors page instead of `MOTOR POLL=1`.
 
 ## Machine-Setup Production Format Contract
 - `/ui/machine-setup/production` is the protected commissioning view for format setup.
