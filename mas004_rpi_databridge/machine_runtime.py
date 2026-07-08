@@ -304,8 +304,8 @@ PRODUCTION_START_REQUIRED_RUNTIME = (
 )
 PRODUCTION_MOTOR3_RAMP_MM_S2 = 300.0
 PRODUCTION_WICKLER_STANDBY_PERCENT = 50.0
-PRODUCTION_WICKLER_MIN_PERCENT = 5.0
-PRODUCTION_WICKLER_MAX_PERCENT = 95.0
+PRODUCTION_WICKLER_MIN_PERCENT = 2.0
+PRODUCTION_WICKLER_MAX_PERCENT = 98.0
 PRODUCTION_WICKLER_INDEXED_MAX_TRAVEL_MM = 1200.0
 PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S = 0.35
 PRODUCTION_WICKLER_MONITOR_INTERVAL_S = 0.5
@@ -6218,49 +6218,6 @@ class MachineRuntime:
                 return last_state, last_verify
             time.sleep(0.05)
 
-    def _force_clear_production_wickler_indexed_prepare(
-        self,
-        client: SmartWicklerClient,
-        role: str,
-        plan: dict[str, Any],
-        *,
-        timeout_s: float,
-    ) -> dict[str, Any]:
-        clear_payload = {
-            **dict(plan.get("wickler_master_thresholds") or self._wickler_master_threshold_payload()),
-            "indexedModeEnabled": "0",
-            "indexedSpeedMmS": f"{float(plan['speed_mm_s']):.3f}",
-            "indexedAccelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
-            "indexedDecelMmS2": f"{float(plan['ramp_mm_s2']):.3f}",
-            "indexedStandbyPercent": f"{float(plan['wickler_standby_percent']):.1f}",
-        }
-        clear_reply = client.post_master(clear_payload, timeout_s=timeout_s)
-        if not clear_reply.get("ok", True):
-            raise RuntimeError(f"{client.descriptor.label} indexed clear failed before reprepare: {clear_reply}")
-
-        deadline = time.monotonic() + max(0.2, float(timeout_s))
-        last_state: dict[str, Any] = {}
-        while True:
-            last_state = client.fetch_state(timeout_s=min(max(0.2, float(timeout_s)), 1.0))
-            telemetry = dict((last_state or {}).get("telemetry") or {})
-            master = dict((last_state or {}).get("master") or {})
-            indexed_enabled = bool(master.get("indexedModeEnabled")) or bool(telemetry.get("indexedModeEnabled"))
-            prepare_frozen = _truthy(telemetry.get("indexedPrepareFrozen"))
-            if not indexed_enabled and not prepare_frozen:
-                return {
-                    "ok": True,
-                    "reply": clear_reply,
-                    "indexed_mode_enabled": indexed_enabled,
-                    "indexed_prepare_frozen": prepare_frozen,
-                    "command_seq_before_reprepare": _safe_int(telemetry.get("indexedCommandSeq"), 0),
-                }
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"{client.descriptor.label} indexed clear not confirmed before reprepare: "
-                    f"indexed={indexed_enabled}, frozen={prepare_frozen}"
-                )
-            time.sleep(0.03)
-
     def _prepare_production_wicklers(
         self,
         plan: dict[str, Any],
@@ -6287,15 +6244,16 @@ class MachineRuntime:
                 ready_reply = client.release_for_continuous_motion(timeout_s=timeout_s)
                 if not ready_reply.get("ok", True):
                     raise RuntimeError(f"{client.descriptor.label} ready failed before indexed prepare: {ready_reply}")
-            indexed_clear: dict[str, Any] | None = None
+            indexed_reprepare: dict[str, Any] | None = None
+            role_master_payload = dict(master_payload)
             if force_reprepare:
-                indexed_clear = self._force_clear_production_wickler_indexed_prepare(
-                    client,
-                    role,
-                    plan,
-                    timeout_s=timeout_s,
-                )
-            master_reply = client.post_master(master_payload, timeout_s=timeout_s)
+                role_master_payload["indexedForceReprepare"] = "1"
+                indexed_reprepare = {
+                    "ok": True,
+                    "method": "indexedForceReprepare",
+                    "indexed_mode_preserved": True,
+                }
+            master_reply = client.post_master(role_master_payload, timeout_s=timeout_s)
             if not master_reply.get("ok", True):
                 raise RuntimeError(f"{client.descriptor.label} indexed master failed: {master_reply}")
             state, verify = self._wait_production_wickler_indexed_prepared(
@@ -6334,8 +6292,8 @@ class MachineRuntime:
                 "master": master_reply,
                 "verify": verify,
             }
-            if indexed_clear is not None:
-                result["indexed_clear"] = indexed_clear
+            if indexed_reprepare is not None:
+                result["indexed_reprepare"] = indexed_reprepare
             results.append(result)
             self.logs.log(
                 "machine",

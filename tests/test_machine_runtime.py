@@ -2460,7 +2460,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(["104.600", "104.600"], [payload.get("indexedTravelMm") for payload in master_payloads])
         self.assertTrue(all(item["ready"]["unchanged"] for item in result))
 
-    def test_indexed_wickler_prepare_force_reprepare_clears_frozen_command(self):
+    def test_indexed_wickler_prepare_force_reprepare_keeps_indexed_mode(self):
         runtime = self.build_runtime()
         calls: dict[str, list[tuple[str, object]]] = {"unwinder": [], "rewinder": []}
         indexed_enabled = {"unwinder": True, "rewinder": True}
@@ -2490,7 +2490,8 @@ class MachineRuntimeTests(unittest.TestCase):
                 elif str(payload.get("indexedModeEnabled")) == "1":
                     indexed_enabled[self.role] = True
                     prepare_frozen[self.role] = True
-                    command_seq[self.role] += 1
+                    if str(payload.get("indexedForceReprepare")) == "1":
+                        command_seq[self.role] += 1
                 return {"ok": True}
 
             def release_for_continuous_motion(self, timeout_s=None):
@@ -2546,14 +2547,15 @@ class MachineRuntimeTests(unittest.TestCase):
             role_calls = calls[role]
             self.assertEqual("ready", role_calls[0][0])
             self.assertEqual("master", role_calls[1][0])
-            self.assertEqual("0", role_calls[1][1]["indexedModeEnabled"])
+            self.assertEqual("1", role_calls[1][1]["indexedModeEnabled"])
+            self.assertEqual("1", role_calls[1][1]["indexedForceReprepare"])
+            self.assertEqual("80.800", role_calls[1][1]["indexedTravelMm"])
             self.assertEqual("fetch", role_calls[2][0])
-            self.assertEqual("master", role_calls[3][0])
-            self.assertEqual("1", role_calls[3][1]["indexedModeEnabled"])
-            self.assertEqual("80.800", role_calls[3][1]["indexedTravelMm"])
+            self.assertFalse(any(call[1].get("indexedModeEnabled") == "0" for call in role_calls if call[0] == "master"))
         self.assertEqual(39, result[0]["indexed_plan"]["command_seq"])
         self.assertEqual(40, result[1]["indexed_plan"]["command_seq"])
-        self.assertTrue(all(item["indexed_clear"]["ok"] for item in result))
+        self.assertTrue(all(item["indexed_reprepare"]["ok"] for item in result))
+        self.assertTrue(all(item["indexed_reprepare"]["indexed_mode_preserved"] for item in result))
 
     def test_reverse_wickler_prepare_clears_frozen_forward_command(self):
         runtime = self.build_runtime()
@@ -2983,6 +2985,40 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(1, production_info["wickler_monitor_pending_fault"]["count"])
         runtime._stop_production_motion.assert_not_called()
         runtime._notify_microtom.assert_not_called()
+
+    def test_production_wickler_verify_uses_two_percent_fault_window(self):
+        runtime = self.build_runtime()
+        state = {
+            "master": {"indexedModeEnabled": False},
+            "telemetry": {
+                "modeLabel": "Bereit",
+                "modeCss": "ready",
+                "externalStopActive": False,
+                "indexedModeEnabled": False,
+                "indexedCommandSeq": 0,
+                "wipePercent": 4.7,
+                "calibrated": True,
+                "requiresCalibration": False,
+            },
+            "drive": {
+                "online": True,
+                "ready": True,
+                "move": False,
+                "alarm": False,
+                "continuousModeReady": True,
+                "lastCommandOk": True,
+            },
+            "values": {},
+        }
+
+        allowed = runtime._verify_wickler_production_state("rewinder", state, require_indexed_mode=None)
+        self.assertTrue(allowed["ok"], allowed)
+
+        state["telemetry"]["wipePercent"] = 1.9
+        too_low = runtime._verify_wickler_production_state("rewinder", state, require_indexed_mode=None)
+        self.assertFalse(too_low["ok"], too_low)
+        self.assertIn("Wippe 1.9%", too_low["errors"])
+        self.assertIn("MAE0034", too_low["mae_keys"])
 
     def test_production_wickler_monitor_stops_after_repeated_communication_gap(self):
         runtime = self.build_runtime()
