@@ -1135,6 +1135,9 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(calls[0].startswith("PROCESS PRODUCTION PAUSE_AFTER_PRINT"))
         self.assertNotIn("PROCESS PRODUCTION STOP", calls)
         self.assertNotIn("MOTOR 3 MOVE_VEL_MM_S=0", calls)
+        self.assertNotIn("PROCESS WICKLER CANCEL", calls)
+        self.assertNotIn("PROCESS INDEXED STOP", calls)
+        self.assertNotIn("PROCESS PROFILE STOP", calls)
         set_idle.assert_not_called()
         self.assertEqual("label_removal_pause_keep_wicklers_armed", result["wicklers"][0]["skipped"])
         queue_tto.assert_not_called()
@@ -1699,6 +1702,29 @@ class MachineRuntimeTests(unittest.TestCase):
             ["PROCESS INDEXED STOP", "PROCESS PROFILE STOP", "PROCESS WICKLER CANCEL"],
             result["commands"],
         )
+
+    def test_label_removal_resume_reuses_armed_pause_without_cleanup_commands(self):
+        production_info = {
+            "pause_reason": "label_removal_required:3,6",
+            "last_stop": {
+                "target_state": 7,
+                "reason": "label_removal_required:3,6",
+                "commands": [{"command": "PROCESS PRODUCTION PAUSE_AFTER_PRINT", "ok": True}],
+                "wicklers": [
+                    {
+                        "role": "both",
+                        "ok": True,
+                        "skipped": "label_removal_pause_keep_wicklers_armed",
+                    }
+                ],
+            },
+        }
+
+        result = MachineRuntime._label_removal_pause_cleanup_reusable(production_info)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("label_removal_pause_keep_wicklers_armed", result["skipped"])
+        self.assertEqual([], result["commands"])
 
     def test_production_start_blocks_laser_when_laser_ready_low_before_state_sync(self):
         runtime = self.build_runtime()
@@ -2407,6 +2433,48 @@ class MachineRuntimeTests(unittest.TestCase):
             self.assertEqual("-1", calls[role][0][1]["indexedDirection"])
             self.assertEqual("-1", calls[role][3][1]["indexedDirection"])
             self.assertEqual(2, len([item for item in result if item["role"] == role][0]["prepare_attempts"]))
+
+    def test_label_removal_rewind_fails_on_wickler_hard_endstop(self):
+        runtime = self.build_runtime()
+        commands: list[str] = []
+        fault_ts = now_ts()
+
+        def fake_esp_retry(command, **_kwargs):
+            commands.append(command)
+            if "DRY_RUN=1" in command:
+                return (
+                    'JSON {"ok":true,"label_no":3,"dry_run":true,'
+                    '"distance_mm":104.500,"speed_mm_s":200.000,'
+                    '"backoff_mm":20.000,"running":false}'
+                )
+            if command.startswith("PROCESS PRODUCTION REWIND_REMOVAL"):
+                return (
+                    'JSON {"ok":true,"label_no":3,"dry_run":false,'
+                    '"distance_mm":104.500,"running":true}'
+                )
+            raise AssertionError(command)
+
+        runtime._production_esp_retry = Mock(side_effect=fake_esp_retry)
+        runtime._prepare_production_wicklers_reverse = Mock(return_value=[{"ok": True, "role": "unwinder"}])
+        runtime._monitor_wickler_hard_endstops = Mock(
+            return_value={
+                "ok": False,
+                "ts": fault_ts,
+                "last_fault_ts": fault_ts,
+                "faults": ["Abwickler: Wippe oben 100.0%"],
+            }
+        )
+        runtime._read_production_monitor_diag = Mock()
+        runtime._set_production_wicklers_idle = Mock(return_value=[{"ok": True, "role": "both"}])
+
+        result = runtime._execute_label_removal_rewind(label_no=3, distance_mm=104.5)
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("wickler_hard_endstop", result["error"])
+        self.assertIn("wickler_hard_endstop", result)
+        runtime._read_production_monitor_diag.assert_not_called()
+        runtime._set_production_wicklers_idle.assert_called_once_with(target_state=21)
+        self.assertEqual(2, len(commands))
 
     def test_production_motion_plan_uses_label_length_compensation_for_wickler_travel(self):
         runtime = self.build_runtime()
@@ -6488,8 +6556,6 @@ class MachineRuntimeTests(unittest.TestCase):
                     '"reason":"completed","last_error":"label_removal_required:3",'
                     '"label_no":6,"labels_printed":6}'
                 )
-            if command in ("PROCESS WICKLER CANCEL", "PROCESS INDEXED STOP", "PROCESS PROFILE STOP"):
-                return "ACK"
             raise AssertionError(command)
 
         runtime._production_esp = Mock(side_effect=fake_esp)
@@ -6511,6 +6577,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("0", self.params.get_effective_value("MAS0028"))
         runtime._stop_production_motion.assert_not_called()
         runtime._set_production_wicklers_idle.assert_not_called()
+        self.assertEqual([], production_info["last_stop"]["commands"])
         self.assertEqual(
             "label_removal_pause_keep_wicklers_armed",
             production_info["last_stop"]["wicklers"][0]["skipped"],

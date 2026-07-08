@@ -3859,6 +3859,11 @@ class MachineRuntime:
                     "stage": "exception",
                     "rewind_executed": False,
                 }
+            if not bool((rewind_result or {}).get("ok", False)):
+                target_state = 21
+                purge_active = True
+                self.params.apply_device_value("MAS0028", "1", promote_default=True)
+                self._notify_microtom("MAS0028", "1", dedupe_key="machine:MAS0028")
 
         request = {
             "label_no": int(label_no),
@@ -6695,21 +6700,6 @@ class MachineRuntime:
             self._merge_label_removal_request(production_info, request)
 
         commands: list[dict[str, Any]] = []
-        for command, timeout_s in (
-            ("PROCESS WICKLER CANCEL", 1.0),
-            ("PROCESS INDEXED STOP", 1.0),
-            ("PROCESS PROFILE STOP", 1.0),
-        ):
-            try:
-                commands.append(
-                    {
-                        "command": command,
-                        "ok": True,
-                        "response": self._production_esp(command, read_timeout_s=timeout_s, priority=True),
-                    }
-                )
-            except Exception as exc:
-                commands.append({"command": command, "ok": False, "error": repr(exc)})
         wicklers = [
             {
                 "role": "both",
@@ -7447,6 +7437,17 @@ class MachineRuntime:
             or skipped == "esp_runner_already_paused_for_label_removal"
         ):
             return {"ok": False, "reason": "last_stop_not_label_removal"}
+        wicklers = last_stop.get("wicklers")
+        if isinstance(wicklers, list):
+            for item in wicklers:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("skipped") or "") == "label_removal_pause_keep_wicklers_armed":
+                    return {
+                        "ok": True,
+                        "skipped": "label_removal_pause_keep_wicklers_armed",
+                        "commands": [],
+                    }
         required = {
             "PROCESS WICKLER CANCEL",
             "PROCESS INDEXED STOP",
@@ -7847,8 +7848,37 @@ class MachineRuntime:
         monitor_snapshots: list[dict[str, Any]] = []
         completed = False
         last_error = ""
+        hard_endstop_fault: dict[str, Any] | None = None
         while now_ts() < deadline:
             try:
+                state_row = self._state_row()
+                info = dict(state_row.get("info") or {})
+                hard_monitor = self._monitor_wickler_hard_endstops(info, 7, now_ts())
+                if hard_monitor is not None:
+                    self._write_state(
+                        current_state=_safe_int(state_row.get("current_state"), 7),
+                        requested_state=_safe_int(state_row.get("requested_state"), 7),
+                        state_source=str(state_row.get("state_source") or "label_removal_required"),
+                        warning_active=bool(state_row.get("warning_active")),
+                        purge_active=bool(state_row.get("purge_active")) or not bool(hard_monitor.get("ok", True)),
+                        production_label=str(state_row.get("production_label") or ""),
+                        last_label_no=_safe_int(state_row.get("last_label_no"), 0),
+                        info=info,
+                    )
+                else:
+                    hard_monitor = dict(info.get("wickler_hard_endstop_monitor") or {})
+                hard_fault_ts = max(
+                    _safe_float(hard_monitor.get("ts"), 0.0),
+                    _safe_float(hard_monitor.get("last_fault_ts"), 0.0),
+                )
+                if (
+                    hard_monitor
+                    and not bool(hard_monitor.get("ok", True))
+                    and hard_fault_ts >= (started_ts - 0.5)
+                ):
+                    hard_endstop_fault = hard_monitor
+                    last_error = "wickler_hard_endstop"
+                    break
                 diag = self._read_production_monitor_diag()
                 snapshot = {
                     "ts": now_ts(),
@@ -7871,7 +7901,7 @@ class MachineRuntime:
                 monitor_snapshots.append({"ts": now_ts(), "ok": False, "error": repr(exc)})
             time.sleep(0.1)
 
-        idle_wicklers = self._set_production_wicklers_idle(target_state=7)
+        idle_wicklers = self._set_production_wicklers_idle(target_state=21 if hard_endstop_fault else 7)
         result = {
             "ok": bool(completed),
             "label_no": int(label_no),
@@ -7892,6 +7922,8 @@ class MachineRuntime:
         }
         if not completed:
             result["error"] = last_error or "removal_rewind_timeout"
+        if hard_endstop_fault is not None:
+            result["wickler_hard_endstop"] = hard_endstop_fault
         self._record_event(
             "label_removal_rewind",
             "info" if result["ok"] else "warning",
@@ -8628,18 +8660,19 @@ class MachineRuntime:
                 ("PROCESS INDEXED STOP", 1.0),
                 ("PROCESS PROFILE STOP", 1.0),
             )
-            for command, timeout_s in cleanup_commands:
-                try:
-                    commands.append(
-                        {
-                            "command": command,
-                            "ok": True,
-                            "critical": False,
-                            "response": self._production_esp(command, read_timeout_s=timeout_s),
-                        }
-                    )
-                except Exception as exc:
-                    commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
+            if not label_removal_pause:
+                for command, timeout_s in cleanup_commands:
+                    try:
+                        commands.append(
+                            {
+                                "command": command,
+                                "ok": True,
+                                "critical": False,
+                                "response": self._production_esp(command, read_timeout_s=timeout_s),
+                            }
+                        )
+                    except Exception as exc:
+                        commands.append({"command": command, "ok": False, "critical": False, "error": repr(exc)})
 
             if label_removal_pause:
                 wicklers = [
