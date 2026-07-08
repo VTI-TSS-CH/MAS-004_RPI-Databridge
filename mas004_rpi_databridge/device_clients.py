@@ -148,7 +148,7 @@ _ESP_COMMAND_IDLE_REUSE_S = 0.75
 _ESP_COMMAND_MAX_ATTEMPTS = 5
 _ESP_COMMAND_MAX_CONNECT_REFUSED_ATTEMPTS = 80
 _ESP_COMMAND_CLOSE_AFTER_RESPONSE = True
-_ESP_COMMAND_MIN_SPACING_S = 0.08
+_ESP_COMMAND_MIN_SPACING_S = 0.02
 _ESP_COMMAND_BROKER_ENABLED = True
 _ESP_COMMAND_BROKER_QUEUE_MAX = 256
 _ESP_COMMAND_BROKER_KEEPALIVE_S = 2.0
@@ -320,11 +320,27 @@ def _esp_command_priority(line: str, explicit_priority: bool) -> int:
         return 15
     if text.startswith("SYNC "):
         return 30
+    if (
+        text.startswith("PROCESS SIM ")
+        or text in {"OUTBOUND STATUS?", "MOTOR POLL?", "PROCESS STATUS?", "PROCESS SNAPSHOT?", "IO SNAPSHOT?", "IO LIST?"}
+    ):
+        return 85
     if text in {"PING", "STATUS?", "INFO", "IP?"}:
         return 70
     if text.endswith("LIST?") or text.endswith("SNAPSHOT?") or text.endswith("VISUALIZATION?") or text.endswith("LOG?"):
         return 80
     return 50
+
+
+def _esp_command_max_attempts(priority: int) -> int:
+    priority_value = int(priority or 50)
+    if priority_value >= 80:
+        return 1
+    if priority_value >= 70:
+        return 2
+    if priority_value >= 50:
+        return 3
+    return _ESP_COMMAND_MAX_ATTEMPTS
 
 
 class _EspCommandBroker:
@@ -451,12 +467,13 @@ class _EspCommandBroker:
         last_error: Exception | None = None
         command_attempt = 0
         refused_attempt = 0
+        max_command_attempts = _esp_command_max_attempts(req.priority)
         while time.monotonic() < req.deadline:
             if time.monotonic() >= req.deadline:
                 break
             try:
                 reply = self._exchange_once(req.line, req.read_timeout_s, req.read_limit, req.deadline)
-                if reply.strip().upper() == "NAK_BUSY" and command_attempt < (_ESP_COMMAND_MAX_ATTEMPTS - 1):
+                if reply.strip().upper() == "NAK_BUSY" and command_attempt < (max_command_attempts - 1):
                     raise RuntimeError("ESP endpoint busy")
                 return reply
             except Exception as exc:
@@ -469,15 +486,16 @@ class _EspCommandBroker:
                 with self.state.lock:
                     self.state.last_error = repr(exc)
                     self.state.fail_count += 1
+                    backoff_cap_s = 0.2 if req.priority >= 80 else 0.8
                     self.state.next_allowed_at = time.monotonic() + min(
-                        0.8,
+                        backoff_cap_s,
                         0.15 * (2 ** min(self.state.fail_count, 3)),
                     )
                 self.close_socket()
                 if connect_refused:
                     if refused_attempt >= _ESP_COMMAND_MAX_CONNECT_REFUSED_ATTEMPTS:
                         break
-                elif command_attempt >= _ESP_COMMAND_MAX_ATTEMPTS:
+                elif command_attempt >= max_command_attempts:
                     break
                 delay_s = 0.15 if connect_refused else min(0.15, 0.04 * max(1, command_attempt))
                 time.sleep(min(delay_s, max(0.0, req.deadline - time.monotonic())))
@@ -939,6 +957,19 @@ class ZipherTextClient:
             "ok": True,
             "queue_size": int(match.group("size")),
             "queue_status": int(match.group("status")),
+            "response": response,
+        }
+
+    def query_queue_length(self) -> dict[str, object]:
+        response = self.command("QLN")
+        match = re.match(r"^\s*QLN\|(?P<size>\d+)\|(?P<status>\d+)\|?\s*$", response, re.IGNORECASE)
+        if not match:
+            raise RuntimeError(f"unexpected ZTC QLN response: {response!r}")
+        return {
+            "ok": True,
+            "queue_size": int(match.group("size")),
+            "queue_status": int(match.group("status")),
+            "queue_command": "QLN",
             "response": response,
         }
 

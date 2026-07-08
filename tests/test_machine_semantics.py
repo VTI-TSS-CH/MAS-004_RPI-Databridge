@@ -1,6 +1,7 @@
 import unittest
 
 from mas004_rpi_databridge.machine_semantics import (
+    STATE_LABELS,
     action_for_button,
     button_led_plan,
     button_to_command,
@@ -139,7 +140,9 @@ class MachineSemanticsTests(unittest.TestCase):
             self.assertEqual("requested", source)
 
     def test_transition_states_show_steady_magenta_status_lamp(self):
-        for state in (2, 4, 6, 8, 10, 12, 14, 16, 18):
+        transition_states = [state for state, label in STATE_LABELS.items() if label.startswith("Wechsle zu")]
+        self.assertEqual([2, 4, 6, 8, 10, 12, 14, 16, 18], transition_states)
+        for state in transition_states:
             with self.subTest(state=state):
                 self.assertEqual(
                     {"red": 1, "green": 0, "blue": 1},
@@ -149,6 +152,12 @@ class MachineSemanticsTests(unittest.TestCase):
                     {"red": 1, "green": 0, "blue": 1},
                     lamp_outputs_for_state(state, warning_active=False, ts=0.75),
                 )
+
+    def test_label_removal_state_shows_pause_status_lamp(self):
+        self.assertEqual(
+            lamp_outputs_for_state(7, warning_active=False, ts=0.0),
+            lamp_outputs_for_state(13, warning_active=False, ts=0.0),
+        )
 
     def test_pack_label_status_word_sets_expected_bits(self):
         word = pack_label_status_word(

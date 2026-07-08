@@ -66,6 +66,8 @@ FIELD_IO_DEVICE_CODES = {
     "moxa_e1213_3",
 }
 FIELD_IO_OUTAGE_COOLDOWN_S = 2.0
+FIELD_IO_PROCESS_BUSY_STATES = {2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 16, 17}
+FIELD_IO_IDLE_STANDSTILL_STATES = {1, 9, 20, 21}
 
 
 def resolve_repo_master_ios_xlsx() -> str:
@@ -383,12 +385,12 @@ def _io_poll_deferred_devices_for_critical_window(db: DB, due_devices: list[str]
         safety = dict(info.get("safety") or {})
         deferred: set[str] = set()
         if str(safety.get("phase") or "") == "resetting":
-            deferred.add("esp32_plc58")
-        if current_state in {2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 16, 17}:
+            deferred.update(FIELD_IO_DEVICE_CODES)
+        if current_state in FIELD_IO_PROCESS_BUSY_STATES or current_state in FIELD_IO_IDLE_STANDSTILL_STATES:
             deferred.update(FIELD_IO_DEVICE_CODES)
         production = dict(info.get("production_runtime") or {})
         if bool(production.get("pending_start")):
-            deferred.add("esp32_plc58")
+            deferred.update(FIELD_IO_DEVICE_CODES)
         return {device_code for device_code in due_devices if device_code in deferred}
     except Exception:
         return set()

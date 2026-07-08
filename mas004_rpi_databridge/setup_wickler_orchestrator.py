@@ -89,6 +89,7 @@ class SetupWicklerOrchestrator:
         self.defaults = SetupWicklerDefaults()
         self._wickler_offline_fault_counts: dict[str, int] = {}
         self._esp_status_log_state: dict[str, dict[str, Any]] = {}
+        self._last_setup_wickler_leader_speed: float | None = None
         self._setup_sync_dedupe = ValueDedupeStore(self.params.db)
         self.esp = EspPlcClient(
             cfg.esp_host,
@@ -348,8 +349,8 @@ class SetupWicklerOrchestrator:
             "MAP0045",  # infeed sensor debounce travel
             "MAP0046",  # control sensor debounce travel
             "MAP0076",  # label length compensation
-            "MAP0077",  # infeed encoder effective diameter
-            "MAP0078",  # drive/outfeed encoder effective diameter
+            "MAP0077",  # infeed encoder effective diamete
+            "MAP0078",  # drive/outfeed encoder effective diamete
         )
         for key in keys:
             value = str(self.params.get_effective_value(key) or "").strip()
@@ -415,7 +416,7 @@ class SetupWicklerOrchestrator:
                 "last_error",
                 "last_reply",
             )
-            if key in motor
+            if key in moto
         }
 
     def _motor3_status(self) -> dict[str, Any]:
@@ -623,7 +624,7 @@ class SetupWicklerOrchestrator:
             merged = dict(motor)
             merged.update(state)
             return merged
-        return motor
+        return moto
 
     def _wait_motor3_idle(
         self,
@@ -643,21 +644,21 @@ class SetupWicklerOrchestrator:
                 self._abort_motor3_if_wickler_faulted()
                 next_wickler_check = time.time() + 0.5
             # Global motor polling stays disabled during normal operation.
-            # During a measuring run we need one explicit live refresh for
+            # During a measuring run we need one explicit live refresh fo
             # Motor 3, otherwise STATUS? may only return the cached state.
             payload = self._json_response(self._esp("MOTOR 3 REFRESH", read_timeout_s=5.0))
             motor = self._motor3_state_from_status(payload)
-            last_state = motor
+            last_state = moto
             busy = bool(motor.get("busy")) or bool(motor.get("move"))
             if busy:
                 seen_busy = True
             elapsed = time.time() - started
             if motor and not busy and elapsed >= float(min_wait_s):
                 if seen_busy:
-                    return motor
+                    return moto
                 try:
                     if self._motor3_within_stop_tolerance(motor):
-                        return motor
+                        return moto
                 except RuntimeError:
                     pass
                 # An ACK without MOVE/BUSY and without target progress is a
@@ -690,7 +691,7 @@ class SetupWicklerOrchestrator:
                         "last_reply",
                         "last_error",
                     )
-                    if key in motor
+                    if key in moto
                 }
                 raise RuntimeError(f"Motor 3 move was accepted but did not start/reach target: {details}")
             time.sleep(0.25)
@@ -801,7 +802,7 @@ class SetupWicklerOrchestrator:
             last_start_error: RuntimeError | None = None
             for start_attempt in range(1, MOTOR3_MEASUREMENT_START_MAX_ATTEMPTS + 1):
                 try:
-                    self._set_wicklers_leader_speed(speed_mm_s)
+                    self._set_wicklers_leader_speed(abs(float(speed_mm_s)))
                     self._esp(f"MOTOR 3 MOVE_ABS_MM={target_mm:.3f}", read_timeout_s=5.0)
                     motor_state = self._wait_motor3_idle(
                         timeout_s=max(45.0, expected_move_s + 20.0),
@@ -872,7 +873,7 @@ class SetupWicklerOrchestrator:
                     f"Motor 3 scale correction implausible: factor={factor:.6f}, "
                     f"encoder={encoder_mm:.3f}mm target={target_mm:.3f}mm"
                 )
-            new_steps_per_mm = steps_per_mm * factor
+            new_steps_per_mm = steps_per_mm * facto
             pass_result["new_steps_per_mm"] = new_steps_per_mm
             self.logs.log(
                 "raspi",
@@ -987,7 +988,7 @@ class SetupWicklerOrchestrator:
     def _ensure_motor3_stop_tolerance(self, motor: dict[str, Any]) -> dict[str, Any]:
         if self._motor3_within_stop_tolerance(motor):
             self._set_motor3_postposition_error(False)
-            return motor
+            return moto
 
         self._hold_wicklers_for_motor3_postpositioning()
         state = dict(motor)
@@ -1043,7 +1044,8 @@ class SetupWicklerOrchestrator:
             # MOVE_REL_MM_OP uses the ESP's setup-only Operation-Data start path and
             # avoids the Motor-3 hardware START edge reserved for takt operation.
             try:
-                self._set_wicklers_leader_speed(speed_mm_s)
+                direction = 1.0 if float(distance_mm) >= 0.0 else -1.0
+                self._set_wicklers_leader_speed(abs(float(speed_mm_s)) * direction)
                 self._esp(f"MOTOR 3 MOVE_REL_MM_OP={distance_mm:.3f}", read_timeout_s=5.0)
                 return self._wait_motor3_idle(
                     timeout_s=max(30.0, expected_move_s + 20.0),
@@ -1559,7 +1561,7 @@ class SetupWicklerOrchestrator:
             self.logs.log(
                 "raspi",
                 "info",
-                "Wickler leaderSpeedMmS not sent: continuous Wickler control remains autonomous/dancer-based",
+                f"Wickler leaderSpeedMmS direction hint set to {requested:.3f}mm/s",
             )
         clients = self._winder_clients()
         results: list[dict[str, Any]] = []
@@ -1568,18 +1570,14 @@ class SetupWicklerOrchestrator:
             descriptor = getattr(client, "descriptor", None)
             return str(getattr(descriptor, "role", "") or f"wickler{index + 1}")
 
-        def _noop(client: SmartWicklerClient) -> dict[str, Any]:
+        def _post_leader_hint(client: SmartWicklerClient) -> dict[str, Any]:
             available = getattr(client, "available", None)
             if callable(available) and not available():
                 return {"ok": True, "skipped": "endpoint unavailable or simulated"}
-            return {
-                "ok": True,
-                "autonomous": True,
-                "note": "leaderSpeedMmS intentionally not written in continuous mode",
-            }
+            return client.post_master({"leaderSpeedMmS": f"{requested:.3f}"}, timeout_s=timeout_s)
 
         with ThreadPoolExecutor(max_workers=len(clients)) as executor:
-            futures = {executor.submit(_noop, client): _role(client, index) for index, client in enumerate(clients)}
+            futures = {executor.submit(_post_leader_hint, client): _role(client, index) for index, client in enumerate(clients)}
             for future in as_completed(futures):
                 role = futures[future]
                 try:
@@ -1588,7 +1586,7 @@ class SetupWicklerOrchestrator:
                         {
                             "role": role,
                             "requestedLeaderSpeedMmS": f"{requested:.3f}",
-                            "autonomous": True,
+                            "direction_hint": True,
                             "ok": bool(reply.get("ok", True)),
                             "reply": reply,
                         }
@@ -1598,7 +1596,7 @@ class SetupWicklerOrchestrator:
                         {
                             "role": role,
                             "requestedLeaderSpeedMmS": f"{requested:.3f}",
-                            "autonomous": True,
+                            "direction_hint": True,
                             "ok": False,
                             "error": str(exc),
                         }
@@ -1709,7 +1707,7 @@ class SetupWicklerOrchestrator:
         return max(50.0, self._param_int("MAP0021", 19300) / 10.0)
 
     def _slip_tolerance_mm(self) -> float:
-        # MAP0040 is the label-length tolerance and is intentionally tighter
+        # MAP0040 is the label-length tolerance and is intentionally tighte
         # than the cumulative encoder comparison during the long teach run.
         # The setup run can accumulate several metres of travel while both
         # wicklers settle; keep a small engineering reserve here. The +/-0.05
@@ -1809,7 +1807,7 @@ class SetupWicklerOrchestrator:
         timer = threading.Timer(max(0.1, float(duration_ms) / 1000.0), _release)
         timer.daemon = True
         timer.start()
-        return timer
+        return time
 
     def _teach_infeed_sensor_before_motion(self, duration_ms: int) -> None:
         self._abort_if_not_setup_active()
@@ -1983,7 +1981,30 @@ class SetupWicklerOrchestrator:
             self._esp("PROCESS SETUP_MEASURE STATUS?", read_timeout_s=SETUP_MEASURE_STATUS_READ_TIMEOUT_S)
         )
 
-    def _wait_setup_measurement_complete(self, timeout_s: float = 180.0) -> dict[str, Any]:
+    def _setup_measure_phase_leader_speed(self, status: dict[str, Any], speed_mm_s: float) -> float:
+        phase_name = str(status.get("phase_name") or "").strip().lower()
+        if not bool(status.get("running")) or phase_name in {"", "idle", "complete"}:
+            return 0.0
+        speed = abs(float(speed_mm_s))
+        if phase_name.startswith("rewind") or "backoff" in phase_name:
+            return -speed
+        if phase_name.startswith("forward"):
+            return speed
+        return 0.0
+
+    def _sync_wickler_leader_for_setup_measure_status(self, status: dict[str, Any], speed_mm_s: float) -> None:
+        leader_speed = self._setup_measure_phase_leader_speed(status, speed_mm_s)
+        previous = self._last_setup_wickler_leader_speed
+        if previous is not None and abs(previous - leader_speed) <= 0.001:
+            return
+        self._set_wicklers_leader_speed(leader_speed)
+        self._last_setup_wickler_leader_speed = leader_speed
+
+    def _wait_setup_measurement_complete(
+        self,
+        timeout_s: float = 180.0,
+        speed_mm_s: float | None = None,
+    ) -> dict[str, Any]:
         deadline = time.time() + float(timeout_s)
         last_status: dict[str, Any] = {}
         last_status_ok_at = 0.0
@@ -2030,6 +2051,8 @@ class SetupWicklerOrchestrator:
             consecutive_status_errors = 0
             last_status = status
             last_status_ok_at = time.time()
+            if speed_mm_s is not None:
+                self._sync_wickler_leader_for_setup_measure_status(status, speed_mm_s)
             if status.get("completed") and not status.get("running"):
                 last_error = str(status.get("last_error") or "").strip()
                 if last_error and last_error != "stopped":
@@ -2067,9 +2090,12 @@ class SetupWicklerOrchestrator:
             )
             self.logs.log("esp-plc", "info", f"setup sensor-referenced measurement command: {command}")
             self._abort_if_not_setup_active()
+            self._last_setup_wickler_leader_speed = None
+            self._set_wicklers_leader_speed(abs(float(speed_mm_s)))
             self._esp(command, read_timeout_s=5.0)
             status = self._wait_setup_measurement_complete(
-                timeout_s=max(120.0, (max_forward_mm * 3.0 / max(1.0, speed_mm_s)) + 60.0)
+                timeout_s=max(120.0, (max_forward_mm * 3.0 / max(1.0, speed_mm_s)) + 60.0),
+                speed_mm_s=speed_mm_s,
             )
             self.logs.log(
                 "esp-plc",
@@ -2079,6 +2105,11 @@ class SetupWicklerOrchestrator:
             )
             return status
         finally:
+            try:
+                self._set_wicklers_leader_speed(0.0)
+                self._last_setup_wickler_leader_speed = 0.0
+            except Exception as exc:
+                self.logs.log("raspi", "warning", f"setup wickler leader final clear failed: {repr(exc)}")
             try:
                 self._set_infeed_sensor_teach(False, attempts=INFEED_TEACH_MOXA_ATTEMPTS + 2)
             except Exception as exc:

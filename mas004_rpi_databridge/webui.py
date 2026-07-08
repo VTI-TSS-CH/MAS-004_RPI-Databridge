@@ -40,7 +40,7 @@ from mas004_rpi_databridge.io_master import IoStore
 from mas004_rpi_databridge.io_runtime import IoRuntime
 from mas004_rpi_databridge.machine_runtime import MachineRuntime, mark_external_purge_clear, production_start_is_pause_resume
 from mas004_rpi_databridge.machine_control_ui import build_machine_control_ui_html
-from mas004_rpi_databridge.device_clients import EspPlcClient
+from mas004_rpi_databridge.device_clients import EspPlcClient, _esp_command_priority
 from mas004_rpi_databridge.format_semantics import build_format_plan
 from mas004_rpi_databridge.production_setup_ui import build_production_setup_ui_html
 from mas004_rpi_databridge.production_visualization_ui import build_production_visualization_ui_html
@@ -674,6 +674,7 @@ class EspCommandReq(BaseModel):
     read_timeout_s: float = 2.0
     read_limit: int = 8192
     priority: bool = False
+    wait_timeout_s: Optional[float] = None
 
 
 class IoWriteReq(BaseModel):
@@ -2938,26 +2939,26 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                     "port": cfg2.esp_port,
                     "simulation": cfg2.esp_simulation,
                     "watchdog_host": cfg2.esp_watchdog_host,
-                    "poll_interval_s": float(getattr(cfg2, "esp_io_poll_interval_s", 1.0) or 1.0),
+                    "poll_interval_s": float(getattr(cfg2, "esp_io_poll_interval_s", 5.0) or 5.0),
                     "broker": esp_broker_diag,
                 },
                 "moxa1": {
                     "host": getattr(cfg2, "moxa1_host", ""),
                     "port": int(getattr(cfg2, "moxa1_port", 0) or 0),
                     "simulation": bool(getattr(cfg2, "moxa1_simulation", True)),
-                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
+                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 5.0) or 5.0),
                 },
                 "moxa2": {
                     "host": getattr(cfg2, "moxa2_host", ""),
                     "port": int(getattr(cfg2, "moxa2_port", 0) or 0),
                     "simulation": bool(getattr(cfg2, "moxa2_simulation", True)),
-                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
+                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 5.0) or 5.0),
                 },
                 "moxa3": {
                     "host": getattr(cfg2, "moxa3_host", ""),
                     "port": int(getattr(cfg2, "moxa3_port", 0) or 0),
                     "simulation": bool(getattr(cfg2, "moxa3_simulation", True)),
-                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0),
+                    "poll_interval_s": float(getattr(cfg2, "moxa_poll_interval_s", 5.0) or 5.0),
                 },
                 "vj3350": {
                     "host": cfg2.vj3350_host,
@@ -3003,18 +3004,42 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
                 int(cfg2.esp_port),
                 timeout_s=float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5),
             )
+            command_priority = _esp_command_priority(line, bool(body.priority))
+            broker_diag = client.diagnostics()
+            queue_depth = int(broker_diag.get("queue_depth") or 0)
+            active_line = str(broker_diag.get("active_line") or "").strip()
+            if not bool(body.priority):
+                if queue_depth > 0 or active_line:
+                    raise HTTPException(
+                        status_code=429,
+                        detail={
+                            "error": "ESP non-priority command shed while broker is busy",
+                            "priority": command_priority,
+                            "queue_depth": queue_depth,
+                            "active_line": active_line,
+                        },
+                    )
             read_timeout = max(0.2, float(body.read_timeout_s or 2.0))
+            connect_timeout = float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5)
+            default_wait_timeout = max(
+                connect_timeout + read_timeout + 0.5,
+                float(getattr(cfg2, "esp_command_timeout_s", 8.0) or 8.0),
+            )
+            wait_timeout = (
+                float(body.wait_timeout_s)
+                if body.wait_timeout_s is not None
+                else default_wait_timeout
+            )
             reply = client.exchange_line(
                 line,
                 read_timeout_s=read_timeout,
                 read_limit=max(128, min(65536, int(body.read_limit or 8192))),
                 priority=bool(body.priority),
-                wait_timeout_s=max(
-                    0.5,
-                    min(float(getattr(cfg2, "esp_connect_timeout_s", 1.5) or 1.5) + read_timeout + 0.5, 8.0),
-                ),
+                wait_timeout_s=max(0.5, min(wait_timeout, 60.0)),
             )
             return {"ok": True, "line": line, "reply": reply, "broker": client.diagnostics()}
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"ESP command failed: {exc!r}") from exc
 
@@ -3062,9 +3087,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
         cfg2.ntp_sync_interval_min = max(1, min(24 * 60, cfg2.ntp_sync_interval_min))
 
         try:
-            cfg2.esp_io_poll_interval_s = float(getattr(cfg2, "esp_io_poll_interval_s", 1.0) or 1.0)
+            cfg2.esp_io_poll_interval_s = float(getattr(cfg2, "esp_io_poll_interval_s", 5.0) or 5.0)
         except Exception:
-            cfg2.esp_io_poll_interval_s = 1.0
+            cfg2.esp_io_poll_interval_s = 5.0
         cfg2.esp_io_poll_interval_s = max(0.2, min(60.0, cfg2.esp_io_poll_interval_s))
         try:
             cfg2.esp_io_snapshot_timeout_s = float(getattr(cfg2, "esp_io_snapshot_timeout_s", 0.75) or 0.75)
@@ -3099,9 +3124,9 @@ def build_app(cfg_path: str = DEFAULT_CFG_PATH) -> FastAPI:
             cfg2.raspi_io_poll_interval_s = 1.0
         cfg2.raspi_io_poll_interval_s = max(0.2, min(60.0, cfg2.raspi_io_poll_interval_s))
         try:
-            cfg2.moxa_poll_interval_s = float(getattr(cfg2, "moxa_poll_interval_s", 1.0) or 1.0)
+            cfg2.moxa_poll_interval_s = float(getattr(cfg2, "moxa_poll_interval_s", 5.0) or 5.0)
         except Exception:
-            cfg2.moxa_poll_interval_s = 1.0
+            cfg2.moxa_poll_interval_s = 5.0
         cfg2.moxa_poll_interval_s = max(0.2, min(60.0, cfg2.moxa_poll_interval_s))
         try:
             cfg2.machine_audit_keep_hours = int(float(getattr(cfg2, "machine_audit_keep_hours", 72) or 72))
@@ -6359,7 +6384,7 @@ async function reloadAll(){
   document.getElementById("esp_host").value = c.esp_host || "";
   document.getElementById("esp_port").value = c.esp_port ?? "";
   document.getElementById("esp_watchdog_host").value = c.esp_watchdog_host || "";
-  document.getElementById("esp_io_poll_interval_s").value = c.esp_io_poll_interval_s ?? 1.0;
+  document.getElementById("esp_io_poll_interval_s").value = c.esp_io_poll_interval_s ?? 5.0;
   document.getElementById("esp_simulation").checked = !!c.esp_simulation;
   document.getElementById("light_curtain_auto_reset_enabled").checked = !!(c.light_curtain_auto_reset_enabled ?? true);
   document.getElementById("moxa1_host").value = c.moxa1_host || "";
@@ -6371,7 +6396,7 @@ async function reloadAll(){
   document.getElementById("moxa3_host").value = c.moxa3_host || "";
   document.getElementById("moxa3_port").value = c.moxa3_port ?? 502;
   document.getElementById("moxa3_simulation").checked = !!(c.moxa3_simulation ?? true);
-  document.getElementById("moxa_poll_interval_s").value = c.moxa_poll_interval_s ?? 1.0;
+  document.getElementById("moxa_poll_interval_s").value = c.moxa_poll_interval_s ?? 5.0;
   document.getElementById("vj3350_host").value = c.vj3350_host || "";
   document.getElementById("vj3350_port").value = c.vj3350_port ?? "";
   document.getElementById("vj3350_simulation").checked = !!c.vj3350_simulation;

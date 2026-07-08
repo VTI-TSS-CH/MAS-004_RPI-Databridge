@@ -1199,6 +1199,53 @@ class SetupWicklerOrchestratorTests(unittest.TestCase):
         self.assertEqual(["MOTOR 3 REFRESH", "PROCESS SETUP_MEASURE STATUS?"], commands)
         self.assertFalse(any(command.startswith("MOTOR POLL=") for command in commands))
 
+    def test_wickler_leader_speed_is_sent_as_direction_hint(self):
+        class FakeDescriptor:
+            def __init__(self, role: str):
+                self.role = role
+
+        class FakeWicklerClient:
+            def __init__(self, role: str):
+                self.descriptor = FakeDescriptor(role)
+                self.master_payloads: list[dict[str, str]] = []
+
+            def available(self):
+                return True
+
+            def post_master(self, payload, timeout_s: float | None = None):
+                self.master_payloads.append(dict(payload))
+                return {"ok": True, "payload": payload, "timeout_s": timeout_s}
+
+        clients = [FakeWicklerClient("unwinder"), FakeWicklerClient("rewinder")]
+        self.controller._winder_clients = Mock(return_value=clients)
+
+        result = self.controller._set_wicklers_leader_speed(-200.0, timeout_s=1.25)
+
+        self.assertTrue(all(item["ok"] for item in result))
+        self.assertEqual([{"leaderSpeedMmS": "-200.000"}], clients[0].master_payloads)
+        self.assertEqual([{"leaderSpeedMmS": "-200.000"}], clients[1].master_payloads)
+
+    def test_setup_measurement_phase_syncs_wickler_leader_direction_once_per_change(self):
+        self.controller._set_wicklers_leader_speed = Mock()
+
+        for phase_name in (
+            "forward_500_after_infeed_teach",
+            "forward_500_after_infeed_teach",
+            "rewind_to_zero",
+            "forward_2500_control_teach",
+            "rewind_to_first_label_minus_backoff",
+            "complete",
+        ):
+            self.controller._sync_wickler_leader_for_setup_measure_status(
+                {"running": phase_name != "complete", "phase_name": phase_name},
+                200.0,
+            )
+
+        self.assertEqual(
+            [200.0, -200.0, 200.0, -200.0, 0.0],
+            [call.args[0] for call in self.controller._set_wicklers_leader_speed.call_args_list],
+        )
+
     def test_setup_aborts_when_wickler_map0047_sync_is_not_confirmed(self):
         class FakeWicklerClient:
             def post_master(self, payload, timeout_s: float | None = None):

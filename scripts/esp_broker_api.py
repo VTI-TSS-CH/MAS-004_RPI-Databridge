@@ -24,6 +24,7 @@ def exchange_via_databridge(
     read_timeout_s: float = 2.0,
     read_limit: int = 8192,
     priority: bool = False,
+    wait_timeout_s: float | None = None,
     request_timeout_s: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
     scheme = "https" if bool(getattr(cfg, "webui_https", False)) else "http"
@@ -34,6 +35,8 @@ def exchange_via_databridge(
         "read_limit": int(read_limit or 8192),
         "priority": bool(priority),
     }
+    if wait_timeout_s is not None:
+        payload["wait_timeout_s"] = float(wait_timeout_s)
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         base_url + "/api/esp/command",
@@ -64,6 +67,7 @@ def main() -> int:
     parser.add_argument("--read-timeout", type=float, default=2.0, help="ESP read timeout in seconds")
     parser.add_argument("--read-limit", type=int, default=8192, help="Maximum ESP reply size")
     parser.add_argument("--request-timeout", type=float, default=None, help="HTTP request timeout in seconds")
+    parser.add_argument("--wait-timeout", type=float, default=None, help="Databridge broker wait timeout in seconds")
     parser.add_argument("--priority", action="store_true", help="Use broker priority queue")
     parser.add_argument("--json", action="store_true", help="Print the full API response JSON")
     args = parser.parse_args()
@@ -75,6 +79,7 @@ def main() -> int:
         read_timeout_s=args.read_timeout,
         read_limit=args.read_limit,
         priority=args.priority,
+        wait_timeout_s=args.wait_timeout,
         request_timeout_s=args.request_timeout,
     )
     if args.json:

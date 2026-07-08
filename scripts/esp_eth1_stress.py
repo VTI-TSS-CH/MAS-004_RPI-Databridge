@@ -8,6 +8,7 @@ import statistics
 import sys
 import threading
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,7 @@ def percentile(values: list[float], p: float) -> float:
 
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
-    latencies = [float(r["elapsed_ms"]) for r in results if r.get("class") in ("ok", "busy")]
+    latencies = [float(r["elapsed_ms"]) for r in results if r.get("class") in ("ok", "busy", "shed")]
     classes: dict[str, int] = {}
     for result in results:
         key = str(result.get("class") or "unknown")
@@ -98,6 +99,8 @@ def run_one(
     port: int,
     connect_timeout: float,
     read_timeout: float,
+    broker_wait_timeout: float,
+    request_timeout: float,
     index: int,
     allow_busy: bool,
 ) -> dict[str, Any]:
@@ -112,7 +115,8 @@ def run_one(
                 command,
                 read_timeout_s=read_timeout,
                 read_limit=65536,
-                request_timeout_s=max(3.0, read_timeout + 2.0),
+                wait_timeout_s=max(3.0, float(broker_wait_timeout or 8.0)),
+                request_timeout_s=max(3.0, float(request_timeout or 10.0)),
             )
         elif mode == "locked":
             client = EspPlcClient(host, port, timeout_s=connect_timeout)
@@ -124,6 +128,18 @@ def run_one(
             "class": classify(command, expected, reply, allow_busy=allow_busy),
             "command": command,
             "reply": reply[:200],
+            "elapsed_ms": elapsed_ms,
+        }
+    except urllib.error.HTTPError as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        return {
+            "class": "shed" if int(getattr(exc, "code", 0) or 0) == 429 else "exception",
+            "command": command,
+            "reply": detail[:200],
             "elapsed_ms": elapsed_ms,
         }
     except Exception as exc:
@@ -145,6 +161,8 @@ def run_serial(args: argparse.Namespace, mode: str) -> dict[str, Any]:
             port=args.port,
             connect_timeout=args.connect_timeout,
             read_timeout=args.read_timeout,
+            broker_wait_timeout=args.broker_wait_timeout,
+            request_timeout=args.request_timeout,
             index=i,
             allow_busy=args.allow_busy,
         )
@@ -174,6 +192,8 @@ def run_parallel(args: argparse.Namespace, mode: str) -> dict[str, Any]:
                     port=args.port,
                     connect_timeout=args.connect_timeout,
                     read_timeout=args.read_timeout,
+                    broker_wait_timeout=args.broker_wait_timeout,
+                    request_timeout=args.request_timeout,
                     index=index,
                     allow_busy=args.allow_busy,
                 )
@@ -194,7 +214,7 @@ def run_parallel(args: argparse.Namespace, mode: str) -> dict[str, Any]:
 def sample_failures(results: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
     out = []
     for result in results:
-        if result.get("class") not in ("ok", "busy"):
+        if result.get("class") not in ("ok", "busy", "shed"):
             out.append(result)
         if len(out) >= limit:
             break
@@ -243,6 +263,8 @@ def main() -> int:
     parser.add_argument("--per-worker", type=int, default=100)
     parser.add_argument("--connect-timeout", type=float, default=1.5)
     parser.add_argument("--read-timeout", type=float, default=2.0)
+    parser.add_argument("--broker-wait-timeout", type=float, default=8.0)
+    parser.add_argument("--request-timeout", type=float, default=10.0)
     parser.add_argument("--worker-sleep-ms", type=float, default=0.0)
     parser.add_argument("--line-timeout-wait-s", type=float, default=2.0)
     parser.add_argument("--allow-busy", action="store_true")

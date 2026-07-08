@@ -47,7 +47,7 @@
   "esp_host": "192.168.2.101",
   "esp_port": 3010,
   "esp_watchdog_host": "192.168.2.101",
-  "esp_io_poll_interval_s": 1.0,
+  "esp_io_poll_interval_s": 5.0,
   "esp_simulation": true,
 
   "moxa1_host": "192.168.2.102",
@@ -59,7 +59,7 @@
   "moxa3_host": "192.168.2.104",
   "moxa3_port": 502,
   "moxa3_simulation": true,
-  "moxa_poll_interval_s": 1.0,
+  "moxa_poll_interval_s": 5.0,
 
   "vj3350_host": "192.168.210.21",
   "vj3350_port": 20000,

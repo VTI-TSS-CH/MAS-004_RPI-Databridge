@@ -186,7 +186,8 @@ PROCESS_SENSOR_FAULT_STATES = {2, 3, 4, 5, 10, 11, 12, 13, 16, 17}
 # nicht geteachten Sensorbits verriegeln, bevor der Runner sauber startet bzw.
 # bevor der Setup-to-Pause-Uebergang abgeschlossen ist.
 PROCESS_BAND_BREAK_MONITOR_STATES = {5, 10, 11, 12, 13, 16, 17}
-ESP_CRITICAL_IO_MAX_AGE_S = 0.75
+ESP_CRITICAL_IO_MAX_AGE_S = 2.0
+ESP_CRITICAL_IO_RETRY_COOLDOWN_S = 2.0
 ESP_CRITICAL_IO_PINS = {"I0.4", "I0.7", "I0.8", "I0.11"}
 ESP_BAND_BREAK_IO_PINS = {"I0.4", "I0.11"}
 WICKLER_DANCER_MONITOR_STATES = {2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 16, 17}
@@ -260,6 +261,7 @@ PRODUCTION_RUNTIME_EVENT_TYPES = {
     "production_print_position_commanded",
     "production_print_position_reached",
     "production_wickler_prepare_required",
+    "production_resume_wickler_ready_required",
     "production_wickler_indexed_ready",
     "production_wickler_runline_released",
     "production_print_trigger",
@@ -704,6 +706,7 @@ class MachineRuntime:
         self._sea_vision_ready_force_due_ts: float = 0.0
         self._sea_vision_ready_retry_due_ts: float = 0.0
         self._sea_vision_ready_last_error: str = ""
+        self._esp_critical_io_next_refresh_ts: float = 0.0
         production_log_dir = getattr(getattr(logs, "_production", None), "log_dir", None)
         self.production_logs = ProductionLogManager(
             db,
@@ -720,7 +723,7 @@ class MachineRuntime:
         refresh_entered_ts = now_ts()
         snapshot = self._state_row()
         info = dict(snapshot.get("info") or {})
-        esp_critical_io_refresh = self._refresh_esp_critical_io_if_stale()
+        esp_critical_io_refresh = self._refresh_esp_critical_io_if_stale(info=info)
         if esp_critical_io_refresh:
             info["esp_critical_io_refresh"] = esp_critical_io_refresh
         io_map = self._io_values()
@@ -2498,6 +2501,47 @@ class MachineRuntime:
                 "accepted": True,
                 "event": event_type,
                 "wickler_takt": wickler_takt,
+                "esp_ready": esp_ready,
+                **event_result,
+            }
+        if event_type == "production_resume_wickler_ready_required":
+            label_no = _safe_int(payload.get("label_no"), 0)
+            source = str(payload.get("source") or "resume").strip() or "resume"
+            mode = str(payload.get("mode") or "").strip() or "indexed"
+            event_result = self._record_production_event_once(
+                event_type,
+                "info",
+                f"Wickler-Ready fuer Resume-Label {label_no} angefordert: Modus {mode}, Quelle {source}",
+                dict(payload or {}),
+                dedupe_window_s=30.0,
+            )
+            esp_ready: dict[str, Any]
+            if not bool(event_result.get("recorded")):
+                esp_ready = {
+                    "ok": True,
+                    "skipped": "duplicate_resume_wickler_ready_required",
+                    "label_no": label_no,
+                    "source": source,
+                }
+            elif label_no <= 0:
+                esp_ready = {"ok": False, "error": "missing_label_no", "label_no": label_no, "source": source}
+            else:
+                try:
+                    esp_ready = self._send_resume_wickler_ready(
+                        label_no=label_no,
+                        source=f"production_resume_wickler_ready_required:{source}",
+                    )
+                except Exception as exc:
+                    esp_ready = {"ok": False, "error": repr(exc), "label_no": label_no, "source": source}
+                    self.logs.log(
+                        "esp-plc",
+                        "warning",
+                        f"Resume-Wickler-Ready fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
+                    )
+            return {
+                "ok": True,
+                "accepted": True,
+                "event": event_type,
                 "esp_ready": esp_ready,
                 **event_result,
             }
@@ -5357,7 +5401,7 @@ class MachineRuntime:
         host = str(getattr(self.cfg, "vj6530_host", "") or "").strip()
         port = _safe_int(getattr(self.cfg, "vj6530_ztc_port", 3007), 3007)
         query_timeout_s = max(0.1, _safe_float(getattr(self.cfg, "vj6530_ztc_timeout_s", 2.0), 2.0))
-        timeout_s = max(0.0, _safe_float(getattr(self.cfg, "vj6530_first_print_queue_check_timeout_s", 30.0), 30.0))
+        timeout_s = max(0.0, _safe_float(getattr(self.cfg, "vj6530_first_print_queue_check_timeout_s", 60.0), 60.0))
         interval_s = max(0.1, _safe_float(getattr(self.cfg, "vj6530_first_print_queue_check_interval_s", 5.0), 5.0))
         attempts: list[dict[str, Any]] = []
         started = time.monotonic()
@@ -5369,7 +5413,7 @@ class MachineRuntime:
             attempt_started = time.monotonic()
             attempt: dict[str, Any] = {"attempt": attempt_no, "elapsed_s": round(attempt_started - started, 3)}
             try:
-                queue = client.query_queue_size()
+                queue = client.query_queue_length()
                 attempt.update(queue)
                 if _safe_int(queue.get("queue_size"), -1) == expected_size:
                     attempts.append(attempt)
@@ -7842,6 +7886,12 @@ class MachineRuntime:
             or skipped == "esp_runner_already_paused_for_label_removal"
         ):
             return {"ok": False, "reason": "last_stop_not_label_removal"}
+        if skipped == "esp_runner_already_paused_for_label_removal":
+            return {
+                "ok": True,
+                "skipped": "label_removal_pause_runner_already_paused",
+                "commands": [],
+            }
         wicklers = last_stop.get("wicklers")
         if isinstance(wicklers, list):
             for item in wicklers:
@@ -8431,12 +8481,10 @@ class MachineRuntime:
         resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
         resume_wickler_ready: dict[str, Any] | None = None
         if resume_next_label_no > 0:
-            resume_wickler_ready = {
-                "ok": True,
-                "label_no": int(resume_next_label_no),
-                "skipped": "resume_label_already_position_commanded_by_esp",
-                "source": "process_production_resume",
-            }
+            resume_wickler_ready = self._send_resume_wickler_ready(
+                label_no=int(resume_next_label_no),
+                source="process_production_resume",
+            )
         post_start_wicklers = {
             "ok": True,
             "skipped": "resume_motion_in_progress",
@@ -8625,13 +8673,11 @@ class MachineRuntime:
         resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
         resume_wickler_ready: dict[str, Any] | None = None
         if resume_next_label_no > 0:
-            resume_wickler_ready = {
-                "ok": True,
-                "label_no": int(resume_next_label_no),
-                "labels_removed": list(labels),
-                "skipped": "resume_label_already_position_commanded_by_esp",
-                "source": "process_production_resume_removed",
-            }
+            resume_wickler_ready = self._send_resume_wickler_ready(
+                label_no=int(resume_next_label_no),
+                labels_removed=list(labels),
+                source="process_production_resume_removed",
+            )
         post_start_wicklers = {
             "ok": True,
             "skipped": "resume_motion_in_progress",
@@ -12058,10 +12104,15 @@ class MachineRuntime:
             return {"ok": False, "error": "; ".join(hard_failures[:5]), "details": details}
         return {"ok": True, "details": details}
 
-    def _refresh_esp_critical_io_if_stale(self) -> dict[str, Any] | None:
+    def _refresh_esp_critical_io_if_stale(self, *, info: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if bool(getattr(self.cfg, "esp_simulation", False)):
             return None
         now = now_ts()
+        safety_info = dict((info or {}).get("safety") or {})
+        if str(safety_info.get("phase") or "") == SAFETY_PHASE_RESETTING:
+            return None
+        if now < float(self._esp_critical_io_next_refresh_ts or 0.0):
+            return None
         stale_pins: list[str] = []
         for pin in sorted(ESP_CRITICAL_IO_PINS):
             point = self.io_store.get_point(f"esp32_plc58__{pin.replace('.', '_')}")
@@ -12073,9 +12124,20 @@ class MachineRuntime:
                 stale_pins.append(pin)
         if not stale_pins:
             return None
+        self._esp_critical_io_next_refresh_ts = now + ESP_CRITICAL_IO_RETRY_COOLDOWN_S
         result = self._refresh_single_io_device("esp32_plc58", set(ESP_CRITICAL_IO_PINS))
+        device_result = result.get("device") if isinstance(result, dict) else {}
+        refresh_ok = bool(result.get("ok", False))
+        if isinstance(device_result, dict):
+            refresh_ok = (
+                refresh_ok
+                and bool(device_result.get("reachable", False))
+                and not bool(device_result.get("skipped"))
+            )
+        if refresh_ok:
+            self._esp_critical_io_next_refresh_ts = 0.0
         return {
-            "ok": bool(result.get("ok", False)),
+            "ok": refresh_ok,
             "stale_pins": stale_pins,
             "refresh": result,
             "ts": now,
@@ -12399,8 +12461,12 @@ class MachineRuntime:
         if bool(point.get("override_active")):
             result.update({"ok": True, "skipped": "manual_override_active", "value": bool(current_value)})
             return result
-        force_write_due = bool(force_low) and float(ts) >= float(self._sea_vision_ready_force_due_ts or 0.0)
-        if current_quality == "live" and bool(current_value) == bool(desired) and not force_write_due:
+        force_write_due = (
+            bool(force_low)
+            and float(ts) >= float(self._sea_vision_ready_force_due_ts or 0.0)
+            and not (current_quality == "live" and bool(current_value) == bool(desired))
+        )
+        if current_quality == "live" and bool(current_value) == bool(desired):
             self._sea_vision_ready_last_value = bool(desired)
             self._sea_vision_ready_last_error = ""
             self._sea_vision_ready_retry_due_ts = 0.0
@@ -12412,7 +12478,7 @@ class MachineRuntime:
         )
         live_mismatch = current_quality == "live" and bool(current_value) != bool(desired)
         retry_due = float(ts) >= float(self._sea_vision_ready_retry_due_ts or 0.0)
-        if not state_value_changed and self._sea_vision_ready_last_error and not retry_due and not force_low:
+        if not state_value_changed and self._sea_vision_ready_last_error and not retry_due:
             result.update(
                 {
                     "ok": True,

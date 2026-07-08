@@ -2,7 +2,14 @@ import socket
 import threading
 import unittest
 
-from mas004_rpi_databridge.device_clients import EspPlcClient, motor_setup_write_context
+from mas004_rpi_databridge.device_clients import (
+    _ESP_COMMAND_MIN_SPACING_S,
+    _ESP_COMMAND_MAX_ATTEMPTS,
+    _esp_command_max_attempts,
+    _esp_command_priority,
+    EspPlcClient,
+    motor_setup_write_context,
+)
 
 
 class _LineServer:
@@ -73,6 +80,16 @@ class _LineServer:
 
 
 class EspPlcClientTests(unittest.TestCase):
+    def test_diagnostic_esp_commands_are_low_priority_and_spacing_is_short(self):
+        self.assertLessEqual(_ESP_COMMAND_MIN_SPACING_S, 0.02)
+        self.assertLess(_esp_command_priority("PROCESS PRODUCTION STATUS?", False), _esp_command_priority("PING", False))
+        self.assertGreater(_esp_command_priority("MOTOR POLL?", False), _esp_command_priority("PING", False))
+        self.assertGreater(_esp_command_priority("PROCESS SIM LABEL_START", False), _esp_command_priority("PING", False))
+        self.assertGreater(_esp_command_priority("IO SNAPSHOT?", False), _esp_command_priority("PING", False))
+        self.assertEqual(1, _esp_command_max_attempts(_esp_command_priority("IO SNAPSHOT?", False)))
+        self.assertEqual(2, _esp_command_max_attempts(_esp_command_priority("PING", False)))
+        self.assertEqual(_ESP_COMMAND_MAX_ATTEMPTS, _esp_command_max_attempts(_esp_command_priority("PROCESS PRODUCTION STATUS?", False)))
+
     def test_exchange_line_reads_large_single_line_when_limit_allows_it(self):
         server = _LineServer("JSON " + ("x" * 12000) + "\n")
         try:

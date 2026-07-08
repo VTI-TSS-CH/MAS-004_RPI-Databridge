@@ -109,7 +109,7 @@ STATE_COLOR_MAP: dict[int, tuple[tuple[int, int, int], str]] = {
     10: ((1, 0, 1), PHASE_STEADY),
     11: ((1, 0, 1), PHASE_STEADY),
     12: ((1, 0, 1), PHASE_STEADY),
-    13: ((0, 0, 1), PHASE_STEADY),
+    13: ((1, 1, 0), PHASE_STEADY),
     14: ((1, 0, 1), PHASE_STEADY),
     15: ((0, 1, 1), PHASE_STEADY),
     16: ((1, 0, 1), PHASE_STEADY),

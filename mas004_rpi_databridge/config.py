@@ -70,7 +70,7 @@ class Settings:
     esp_connect_timeout_s: float = 1.5
     esp_read_timeout_s: float = 2.0
     esp_command_timeout_s: float = 8.0
-    esp_io_poll_interval_s: float = 1.0
+    esp_io_poll_interval_s: float = 5.0
     esp_io_snapshot_timeout_s: float = 1.5
     esp_io_error_cooldown_s: float = 5.0
     raspi_plc_model: str = "RPIPLC_21"
@@ -89,7 +89,7 @@ class Settings:
     moxa3_host: str = "192.168.2.104"
     moxa3_port: int = 502
     moxa3_simulation: bool = True
-    moxa_poll_interval_s: float = 1.0
+    moxa_poll_interval_s: float = 5.0
     moxa_timeout_s: float = 1.5
     moxa_error_cooldown_s: float = 5.0
     field_io_offline_debounce_failures: int = 60
@@ -103,7 +103,7 @@ class Settings:
     vj6530_port: int = 3002
     vj6530_ztc_port: int = 3007
     vj6530_ztc_timeout_s: float = 2.0
-    vj6530_first_print_queue_check_timeout_s: float = 30.0
+    vj6530_first_print_queue_check_timeout_s: float = 60.0
     vj6530_first_print_queue_check_interval_s: float = 5.0
     vj6530_first_print_queue_expected_size: int = 1
     vj6530_simulation: bool = True

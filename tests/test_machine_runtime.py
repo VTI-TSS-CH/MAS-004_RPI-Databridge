@@ -252,6 +252,33 @@ class MachineRuntimeTests(unittest.TestCase):
     def build_runtime(self) -> MachineRuntime:
         return MachineRuntime(self.cfg, self.db, self.params, self.io_store, self.logs, self.outbox)
 
+    def test_esp_critical_io_refresh_is_skipped_during_safety_reset(self):
+        runtime = self.build_runtime()
+        runtime.cfg.esp_simulation = False
+
+        with patch.object(runtime, "_refresh_single_io_device") as refresh:
+            result = runtime._refresh_esp_critical_io_if_stale(info={"safety": {"phase": "resetting"}})
+
+        self.assertIsNone(result)
+        refresh.assert_not_called()
+
+    def test_esp_critical_io_refresh_uses_retry_cooldown_after_broker_skip(self):
+        runtime = self.build_runtime()
+        runtime.cfg.esp_simulation = False
+
+        with patch.object(
+            runtime,
+            "_refresh_single_io_device",
+            return_value={"ok": True, "device": {"reachable": False, "skipped": "broker_busy"}},
+        ) as refresh:
+            first = runtime._refresh_esp_critical_io_if_stale(info={})
+            second = runtime._refresh_esp_critical_io_if_stale(info={})
+
+        self.assertIsNotNone(first)
+        self.assertFalse(first["ok"])
+        self.assertIsNone(second)
+        self.assertEqual(1, refresh.call_count)
+
     @contextmanager
     def patched_runtime_external_io(self, runtime: MachineRuntime):
         with (
@@ -1369,11 +1396,10 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual([], result["synced_params"])
         self.assertTrue(result["param_sync"]["resume_reuse"])
         self.assertIn("PROCESS PRODUCTION RESUME SPEED_MM_S=100.000 RAMP_MM_S2=300.000", result["command"])
-        self.assertNotIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=13", commands)
         self.assertEqual(13, result["resume_wickler_ready"]["label_no"])
         self.assertTrue(result["resume_wickler_ready"]["ok"])
         self.assertEqual("process_production_resume", result["resume_wickler_ready"]["source"])
-        self.assertEqual("resume_label_already_position_commanded_by_esp", result["resume_wickler_ready"]["skipped"])
+        self.assertIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=13", commands)
         self.assertEqual("resume_motion_in_progress", result["post_start_wicklers"]["skipped"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
@@ -1402,7 +1428,14 @@ class MachineRuntimeTests(unittest.TestCase):
                     "label_removal_pending_labels": [6, 9],
                     "label_removal_request": {"label_no": 6, "label_nos": [6, 9]},
                     "last_start": {"ok": True, "started_ts": now_ts() - 60.0},
-                    "last_stop": {"reason": "label_removal_required:6", "finished_ts": now_ts() - 1.0},
+                    "last_stop": {
+                        "ok": True,
+                        "reason": "label_removal_required:6,9",
+                        "target_state": 13,
+                        "skipped": "esp_runner_already_paused_for_label_removal",
+                        "finished_ts": now_ts() - 1.0,
+                        "commands": [],
+                    },
                     "last_wickler_observed_travel": {"label_no": 9, "travel_mm": 104.07},
                 }
             },
@@ -1460,11 +1493,14 @@ class MachineRuntimeTests(unittest.TestCase):
             commands.index("PROCESS PRODUCTION MARK_REMOVED LABELS=6,9"),
             commands.index(result["command"]),
         )
-        self.assertNotIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
+        self.assertNotIn("PROCESS WICKLER CANCEL", commands)
+        self.assertNotIn("PROCESS PROFILE STOP", commands)
+        self.assertNotIn("PROCESS INDEXED STOP", commands)
+        self.assertEqual("label_removal_pause_runner_already_paused", result["resume_cleanup"]["skipped"])
+        self.assertIn("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", commands)
         self.assertEqual(11, result["resume_wickler_ready"]["label_no"])
         self.assertTrue(result["resume_wickler_ready"]["ok"])
         self.assertEqual("process_production_resume_removed", result["resume_wickler_ready"]["source"])
-        self.assertEqual("resume_label_already_position_commanded_by_esp", result["resume_wickler_ready"]["skipped"])
         self.assertEqual("resume_motion_in_progress", result["post_start_wicklers"]["skipped"])
         self.assertNotIn("motor3_zero", result)
         prepare_indexed.assert_called_once()
@@ -1474,7 +1510,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual(True, verify_wicklers.call_args.kwargs["require_indexed_mode"])
         self.assertEqual(104.07, result["wickler_travel_mm"])
         self.assertEqual("last_esp_remaining_label_9", result["wickler_travel_source"])
-        self.assertNotIn("command", result["resume_wickler_ready"])
+        self.assertEqual("PROCESS PRODUCTION WICKLER_READY LABEL_NO=11", result["resume_wickler_ready"]["command"])
 
     def test_label_removal_resume_blocks_before_esp_when_wicklers_not_ready(self):
         runtime = self.build_runtime()
@@ -5647,6 +5683,26 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("already_live", result["skipped"])
         self.assertTrue(result["value"])
 
+    def test_sea_vision_ready_force_low_does_not_rewrite_live_low_output(self):
+        runtime = self.build_runtime()
+        runtime._sea_vision_ready_force_due_ts = 1.0
+        self.io_store.upsert_value("esp32_plc58__Q2_3", "0", "live", "esp32")
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, *_args, **_kwargs):
+                raise AssertionError("Q2.3 already live/low must not be rewritten")
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            result = runtime._apply_sea_vision_ready_output(9, ts=10.0)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["force_low"])
+        self.assertEqual("already_live", result["skipped"])
+        self.assertFalse(result["value"])
+
     def test_sea_vision_ready_timeout_uses_retry_backoff(self):
         runtime = self.build_runtime()
         calls: list[tuple[str, bool]] = []
@@ -5667,7 +5723,7 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("retry_backoff", backed_off["skipped"])
         self.assertEqual([("esp32_plc58__Q2_3", True)], calls)
 
-    def test_sea_vision_ready_forced_low_states_ignore_backoff_and_stale_io(self):
+    def test_sea_vision_ready_forced_low_states_respect_backoff_after_timeout(self):
         runtime = self.build_runtime()
         runtime._sea_vision_ready_last_value = False
         runtime._sea_vision_ready_last_error = "timed out"
@@ -5690,15 +5746,11 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertTrue(fault["ok"])
         self.assertFalse(fault["desired"])
         self.assertTrue(fault["force_low"])
+        self.assertEqual("retry_backoff", fault["skipped"])
         self.assertTrue(rewind["ok"])
         self.assertTrue(rewind["force_low"])
-        self.assertEqual(
-            [
-                ("esp32_plc58__Q2_3", False, True, "sea-vision-ready"),
-                ("esp32_plc58__Q2_3", False, True, "sea-vision-ready"),
-            ],
-            writes,
-        )
+        self.assertEqual("retry_backoff", rewind["skipped"])
+        self.assertEqual([], writes)
 
     def test_sea_vision_ready_force_low_helper_keeps_manual_override_absolute(self):
         runtime = self.build_runtime()
@@ -6273,6 +6325,31 @@ class MachineRuntimeTests(unittest.TestCase):
             priority=True,
         )
 
+    def test_production_resume_wickler_ready_required_sends_label_bound_ready(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        result = runtime.handle_event(
+            {
+                "type": "production_resume_wickler_ready_required",
+                "label_no": 11,
+                "mode": "indexed",
+                "source": "resume_removed",
+            }
+        )
+
+        self.assertTrue(result["recorded"])
+        self.assertTrue(result["esp_ready"]["ok"])
+        self.assertEqual(11, result["esp_ready"]["label_no"])
+        runtime._production_esp_retry.assert_called_once_with(
+            "PROCESS PRODUCTION WICKLER_READY LABEL_NO=11",
+            read_timeout_s=8.0,
+            attempts=5,
+            settle_s=0.15,
+            priority=True,
+        )
+
     def test_first_print_position_prepares_wicklers_before_esp_ready(self):
         runtime = self.build_runtime()
         runtime._write_state(
@@ -6336,9 +6413,15 @@ class MachineRuntimeTests(unittest.TestCase):
                 self.port = port
                 self.timeout_s = timeout_s
 
-            def query_queue_size(self):
+            def query_queue_length(self):
                 size = queue_sizes.pop(0)
-                return {"ok": True, "queue_size": size, "queue_status": 4, "response": f"QSZ|{size}|4|"}
+                return {
+                    "ok": True,
+                    "queue_size": size,
+                    "queue_status": 4,
+                    "queue_command": "QLN",
+                    "response": f"QLN|{size}|4|",
+                }
 
         with (
             patch("mas004_rpi_databridge.machine_runtime.ZipherTextClient", FakeZtc),
@@ -6382,8 +6465,14 @@ class MachineRuntimeTests(unittest.TestCase):
             def __init__(self, host, port, timeout_s):
                 pass
 
-            def query_queue_size(self):
-                return {"ok": True, "queue_size": 0, "queue_status": 0, "response": "QSZ|0|0|"}
+            def query_queue_length(self):
+                return {
+                    "ok": True,
+                    "queue_size": 0,
+                    "queue_status": 0,
+                    "queue_command": "QLN",
+                    "response": "QLN|0|0|",
+                }
 
         with patch("mas004_rpi_databridge.machine_runtime.ZipherTextClient", FakeZtc):
             result = runtime.handle_event(
