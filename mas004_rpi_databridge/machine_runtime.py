@@ -2375,29 +2375,36 @@ class MachineRuntime:
             )
             esp_ready: dict[str, Any] = {"ok": False, "skipped": "wickler_takt_not_ready"}
             if bool(wickler_takt.get("ok")):
-                try:
-                    response = self._production_esp_retry(
-                        f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
-                        read_timeout_s=8.0,
-                        attempts=5,
-                        settle_s=0.2,
-                        priority=True,
-                    )
-                    esp_ready = {"ok": True, "response": response}
-                    self._remember_first_print_wickler_ready_sent(
-                        ready_key,
-                        label_no=label_no,
-                        payload=payload,
-                        wickler_takt=wickler_takt,
-                        esp_ready=esp_ready,
-                    )
-                except Exception as exc:
-                    esp_ready = {"ok": False, "error": repr(exc)}
-                    self.logs.log(
-                        "esp-plc",
-                        "warning",
-                        f"Wickler-Takt bereit, aber ESP-Freigabe fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
-                    )
+                blocker = self._production_gate_fault_blocker(
+                    label_no=label_no,
+                    source="first_print_position_reached",
+                )
+                if blocker is not None:
+                    esp_ready = blocker
+                else:
+                    try:
+                        response = self._production_esp_retry(
+                            f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
+                            read_timeout_s=8.0,
+                            attempts=5,
+                            settle_s=0.2,
+                            priority=True,
+                        )
+                        esp_ready = {"ok": True, "response": response}
+                        self._remember_first_print_wickler_ready_sent(
+                            ready_key,
+                            label_no=label_no,
+                            payload=payload,
+                            wickler_takt=wickler_takt,
+                            esp_ready=esp_ready,
+                        )
+                    except Exception as exc:
+                        esp_ready = {"ok": False, "error": repr(exc)}
+                        self.logs.log(
+                            "esp-plc",
+                            "warning",
+                            f"Wickler-Takt bereit, aber ESP-Freigabe fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
+                        )
             self._remember_first_print_wickler_ready_attempt(
                 ready_key,
                 label_no=label_no,
@@ -2420,6 +2427,22 @@ class MachineRuntime:
             label_no = _safe_int(payload.get("label_no"), 0)
             target = _safe_float(payload.get("target_abs_mm"), 0.0)
             remaining = _safe_float(payload.get("remaining_mm"), 0.0)
+            blocker = self._production_gate_fault_blocker(
+                label_no=label_no,
+                source="production_print_position_commanded",
+            )
+            if blocker is not None:
+                return {
+                    "ok": False,
+                    "accepted": False,
+                    "event": event_type,
+                    "blocked_by_fault": blocker,
+                    "wickler_reprepare": {
+                        "ok": False,
+                        "skipped": "fault_active",
+                        "label_no": label_no,
+                    },
+                }
             event_result = self._record_production_event_once(
                 event_type,
                 "info",
@@ -2480,22 +2503,29 @@ class MachineRuntime:
                     reason=f"prepare_required:{reason}",
                 )
                 if bool(wickler_takt.get("ok")):
-                    try:
-                        response = self._production_esp_retry(
-                            f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
-                            read_timeout_s=8.0,
-                            attempts=5,
-                            settle_s=0.15,
-                            priority=True,
-                        )
-                        esp_ready = {"ok": True, "response": response}
-                    except Exception as exc:
-                        esp_ready = {"ok": False, "error": repr(exc)}
-                        self.logs.log(
-                            "esp-plc",
-                            "warning",
-                            f"Wickler-Takt bereit, aber ESP-Freigabe fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
-                        )
+                    blocker = self._production_gate_fault_blocker(
+                        label_no=label_no,
+                        source=f"production_wickler_prepare_required:{reason}",
+                    )
+                    if blocker is not None:
+                        esp_ready = blocker
+                    else:
+                        try:
+                            response = self._production_esp_retry(
+                                f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={int(label_no)}",
+                                read_timeout_s=8.0,
+                                attempts=5,
+                                settle_s=0.15,
+                                priority=True,
+                            )
+                            esp_ready = {"ok": True, "response": response}
+                        except Exception as exc:
+                            esp_ready = {"ok": False, "error": repr(exc)}
+                            self.logs.log(
+                                "esp-plc",
+                                "warning",
+                                f"Wickler-Takt bereit, aber ESP-Freigabe fuer Label {label_no} fehlgeschlagen: {repr(exc)}",
+                            )
             return {
                 "ok": True,
                 "accepted": True,
@@ -2548,6 +2578,17 @@ class MachineRuntime:
         if event_type == "production_wickler_indexed_ready":
             label_no = _safe_int(payload.get("label_no"), 0)
             error_mm = _safe_float(payload.get("target_error_mm"), 0.0)
+            blocker = self._production_gate_fault_blocker(
+                label_no=label_no,
+                source="production_wickler_indexed_ready",
+            )
+            if blocker is not None:
+                return {
+                    "ok": False,
+                    "accepted": False,
+                    "event": event_type,
+                    "blocked_by_fault": blocker,
+                }
             event_result = self._record_production_event_once(
                 event_type,
                 "info",
@@ -4981,6 +5022,12 @@ class MachineRuntime:
         label = int(label_no or 0)
         if label <= 0:
             return {"ok": True, "skipped": "missing_next_label_no", "label_no": label, "source": source}
+        blocker = self._production_gate_fault_blocker(
+            label_no=label,
+            source=f"resume_wickler_ready:{source}",
+        )
+        if blocker is not None:
+            return blocker
         command = f"PROCESS PRODUCTION WICKLER_READY LABEL_NO={label}"
         response = self._production_esp_retry(
             command,
@@ -5003,6 +5050,81 @@ class MachineRuntime:
             payload,
         )
         return {"ok": True, **payload}
+
+    def _production_gate_fault_blocker(
+        self,
+        *,
+        label_no: int,
+        source: str,
+    ) -> dict[str, Any] | None:
+        state = self._state_row()
+        info = dict(state.get("info") or {})
+        param_map = self._param_values_by_prefix(("MAP", "MAS", "MAE", "MAW"))
+        machine_state = _safe_int(
+            param_map.get("MAS0001", state.get("current_state")),
+            _safe_int(state.get("current_state"), 0),
+        )
+        io_map = self._io_values()
+        critical_active, critical_reasons = self._critical_state(
+            io_map,
+            param_map,
+            band_break_bypass=quick_setup_band_break_bypass_active(info),
+        )
+        reasons: list[str] = []
+        if critical_active:
+            reasons.extend(str(reason) for reason in critical_reasons if str(reason).strip())
+        if _truthy(param_map.get("MAS0028", "0")):
+            reasons.append("MAS0028")
+        for key in sorted(WICKLER_DANCER_ERROR_KEYS):
+            if _truthy(param_map.get(key, "0")):
+                reasons.append(key)
+        if int(machine_state or 0) == 21 and not reasons:
+            reasons.append("state_21")
+        reasons = sorted({str(reason).strip() for reason in reasons if str(reason).strip()})
+        if not reasons:
+            return None
+
+        ts = now_ts()
+        self._force_stop_process_motion_on_fault(info, reasons, ts)
+        production_info = dict(info.get(PRODUCTION_RUNTIME_INFO_KEY) or {})
+        if production_info:
+            production_info["active"] = False
+            production_info["last_gate_block"] = {
+                "label_no": int(label_no or 0),
+                "source": str(source or ""),
+                "reasons": reasons,
+                "ts": float(ts),
+            }
+            info[PRODUCTION_RUNTIME_INFO_KEY] = production_info
+        self._write_state(
+            current_state=21,
+            requested_state=21,
+            state_source="production_gate_fault_blocked",
+            warning_active=False,
+            purge_active=True,
+            production_label=str(state.get("production_label") or ""),
+            last_label_no=_safe_int(state.get("last_label_no"), 0),
+            info=info,
+        )
+        result = {
+            "ok": False,
+            "blocked": True,
+            "error": "production_gate_blocked_by_fault",
+            "label_no": int(label_no or 0),
+            "source": str(source or ""),
+            "machine_state": int(machine_state or 0),
+            "reasons": reasons,
+            "fault_motion_stop_state": dict(info.get("fault_motion_stop_state") or {}),
+            "ts": float(ts),
+        }
+        self._record_event(
+            "production_gate_blocked_by_fault",
+            "warning",
+            f"Produktions-Gate fuer Label {int(label_no or 0)} blockiert: "
+            + self._describe_runtime_reasons(reasons),
+            result,
+        )
+        return result
 
     def _production_status_after_start_error(self, start_command: str, exc: Exception) -> tuple[bool, str]:
         errors: list[str] = [repr(exc)]
@@ -8485,6 +8607,41 @@ class MachineRuntime:
                 label_no=int(resume_next_label_no),
                 source="process_production_resume",
             )
+            if not bool(resume_wickler_ready.get("ok", True)):
+                result = {
+                    "ok": False,
+                    "resume": "pause",
+                    "pause_reason": pause_reason,
+                    "started_ts": started_ts,
+                    "finished_ts": now_ts(),
+                    "synced_state": 21 if bool(resume_wickler_ready.get("blocked")) else 0,
+                    "esp_state_prepared": 5,
+                    "motion_started": True,
+                    "skip_fail_stop": bool(resume_wickler_ready.get("blocked")),
+                    "skip_fail_stop_reason": "pause_resume_wickler_ready_blocked_after_runner_start",
+                    "error": "Pause-Resume blockiert: Wickler-Ready nach ESP-Resume nicht zulaessig",
+                    "synced_params": list(sync_info.get("synced") or []),
+                    "skipped_synced_params": list(sync_info.get("skipped") or []),
+                    "synced_param_values": dict(sync_info.get("values") or {}),
+                    "param_sync": dict(sync_info),
+                    "plan": plan,
+                    "band_break_bypass": quick_band_break_bypass,
+                    "wicklers": wicklers,
+                    "wickler_travel_mm": base_travel_mm,
+                    "wickler_travel_source": base_source,
+                    "laser_ready": laser_ready,
+                    "tto_printer": tto_printer,
+                    "command": command,
+                    "response": response,
+                    "resume_wickler_ready": dict(resume_wickler_ready),
+                }
+                self._record_event(
+                    "production_resume_blocked",
+                    "warning",
+                    "Pause-Resume blockiert: Wickler-Ready nach ESP-Resume nicht zulaessig",
+                    result,
+                )
+                return result
         post_start_wicklers = {
             "ok": True,
             "skipped": "resume_motion_in_progress",
@@ -8678,6 +8835,47 @@ class MachineRuntime:
                 labels_removed=list(labels),
                 source="process_production_resume_removed",
             )
+            if not bool(resume_wickler_ready.get("ok", True)):
+                result = {
+                    "ok": False,
+                    "resume": "label_removal",
+                    "labels_expected_removed": labels,
+                    "started_ts": started_ts,
+                    "finished_ts": now_ts(),
+                    "synced_state": 21 if bool(resume_wickler_ready.get("blocked")) else 0,
+                    "esp_state_prepared": 5,
+                    "motion_started": True,
+                    "skip_fail_stop": bool(resume_wickler_ready.get("blocked")),
+                    "skip_fail_stop_reason": "label_removal_resume_wickler_ready_blocked_after_runner_start",
+                    "keep_pause": not bool(resume_wickler_ready.get("blocked")),
+                    "pause_reason": str(production_info.get("pause_reason") or f"label_removal_required:{label_text}"),
+                    "error": "Label-Entnahme-Resume blockiert: Wickler-Ready nach ESP-Resume nicht zulaessig",
+                    "synced_params": list(sync_info.get("synced") or []),
+                    "skipped_synced_params": list(sync_info.get("skipped") or []),
+                    "synced_param_values": dict(sync_info.get("values") or {}),
+                    "param_sync": dict(sync_info),
+                    "plan": plan,
+                    "band_break_bypass": quick_band_break_bypass,
+                    "wicklers": wicklers,
+                    "wickler_travel_mm": base_travel_mm,
+                    "wickler_travel_source": base_source,
+                    "pre_resume_wicklers": pre_resume_wicklers,
+                    "laser_ready": laser_ready,
+                    "tto_printer": tto_printer,
+                    "command": command,
+                    "response": response,
+                    "resume_cleanup": resume_cleanup,
+                    "resume_wickler_ready": dict(resume_wickler_ready),
+                }
+                if mark_removed is not None:
+                    result["mark_removed"] = dict(mark_removed)
+                self._record_event(
+                    "production_label_removal_resume_blocked",
+                    "warning",
+                    "Label-Entnahme-Resume blockiert: Wickler-Ready nach ESP-Resume nicht zulaessig",
+                    result,
+                )
+                return result
         post_start_wicklers = {
             "ok": True,
             "skipped": "resume_motion_in_progress",

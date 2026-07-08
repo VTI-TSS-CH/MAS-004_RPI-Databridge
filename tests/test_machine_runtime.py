@@ -6325,6 +6325,39 @@ class MachineRuntimeTests(unittest.TestCase):
             priority=True,
         )
 
+    def test_production_wickler_prepare_required_blocks_ready_when_fault_latched(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        self.params.apply_device_value("MAS0001", "5", promote_default=True)
+        self.params.apply_device_value("MAE0029", "1", promote_default=True)
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        runtime._prepare_next_production_wickler_takt = Mock(return_value={"ok": True, "prepared": True})
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        result = runtime.handle_event(
+            {
+                "type": "production_wickler_prepare_required",
+                "label_no": 14,
+                "after_label_no": 13,
+                "reason": "print_position_reached",
+            }
+        )
+
+        self.assertTrue(result["recorded"])
+        self.assertTrue(result["wickler_takt"]["ok"])
+        self.assertFalse(result["esp_ready"]["ok"])
+        self.assertTrue(result["esp_ready"]["blocked"])
+        self.assertIn("MAE0029", result["esp_ready"]["reasons"])
+        self.assertIn("MAS0028", result["esp_ready"]["reasons"])
+        runtime._production_esp_retry.assert_not_called()
+        snapshot = runtime._state_row()
+        self.assertEqual(21, snapshot["current_state"])
+        with self.db._conn() as c:
+            rows = c.execute(
+                "SELECT event_type FROM machine_events WHERE event_type='production_gate_blocked_by_fault'"
+            ).fetchall()
+        self.assertEqual(1, len(rows))
+
     def test_production_resume_wickler_ready_required_sends_label_bound_ready(self):
         runtime = self.build_runtime()
         self.mark_production_active(runtime)
@@ -6349,6 +6382,61 @@ class MachineRuntimeTests(unittest.TestCase):
             settle_s=0.15,
             priority=True,
         )
+
+    def test_production_resume_wickler_ready_required_blocks_when_fault_latched(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        self.params.apply_device_value("MAS0001", "5", promote_default=True)
+        self.params.apply_device_value("MAE0029", "1", promote_default=True)
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+        runtime._production_esp_retry = Mock(return_value="ACK_PROCESS_PRODUCTION_WICKLER_READY")
+
+        result = runtime.handle_event(
+            {
+                "type": "production_resume_wickler_ready_required",
+                "label_no": 13,
+                "mode": "indexed",
+                "source": "resume_removed",
+            }
+        )
+
+        self.assertTrue(result["recorded"])
+        self.assertFalse(result["esp_ready"]["ok"])
+        self.assertTrue(result["esp_ready"]["blocked"])
+        self.assertIn("MAE0029", result["esp_ready"]["reasons"])
+        self.assertIn("MAS0028", result["esp_ready"]["reasons"])
+        runtime._production_esp_retry.assert_not_called()
+        snapshot = runtime._state_row()
+        self.assertEqual(21, snapshot["current_state"])
+
+    def test_production_wickler_indexed_ready_is_rejected_when_fault_latched(self):
+        runtime = self.build_runtime()
+        self.mark_production_active(runtime)
+        self.params.apply_device_value("MAS0001", "5", promote_default=True)
+        self.params.apply_device_value("MAE0029", "1", promote_default=True)
+        self.params.apply_device_value("MAS0028", "1", promote_default=True)
+
+        result = runtime.handle_event(
+            {
+                "type": "production_wickler_indexed_ready",
+                "label_no": 13,
+                "target_error_mm": 82.48,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["accepted"])
+        self.assertTrue(result["blocked_by_fault"]["blocked"])
+        self.assertIn("MAE0029", result["blocked_by_fault"]["reasons"])
+        with self.db._conn() as c:
+            indexed_rows = c.execute(
+                "SELECT event_type FROM machine_events WHERE event_type='production_wickler_indexed_ready'"
+            ).fetchall()
+            blocked_rows = c.execute(
+                "SELECT event_type FROM machine_events WHERE event_type='production_gate_blocked_by_fault'"
+            ).fetchall()
+        self.assertEqual(0, len(indexed_rows))
+        self.assertEqual(1, len(blocked_rows))
 
     def test_first_print_position_prepares_wicklers_before_esp_ready(self):
         runtime = self.build_runtime()
