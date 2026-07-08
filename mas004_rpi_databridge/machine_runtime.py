@@ -7932,35 +7932,17 @@ class MachineRuntime:
         resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
         resume_wickler_ready: dict[str, Any] | None = None
         if resume_next_label_no > 0:
-            try:
-                resume_wickler_ready = self._send_resume_wickler_ready(
-                    label_no=resume_next_label_no,
-                    source="process_production_resume",
-                )
-            except Exception as exc:
-                stop_result = self._stop_production_motion(
-                    reason="production_pause_resume_wickler_ready_failed",
-                    target_state=7,
-                )
-                raise RuntimeError(
-                    f"Wickler-Freigabe nach Pause-Resume fuer Label {resume_next_label_no} fehlgeschlagen: {repr(exc)}; "
-                    f"stop={stop_result}"
-                ) from exc
-        time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
-        post_start_wicklers = self._production_wickler_verifications(
-            timeout_s=2.0,
-            require_indexed_mode=True,
-        )
-        if not post_start_wicklers.get("ok"):
-            stop_result = self._stop_production_motion(
-                reason="production_pause_resume_wickler_verify_failed",
-                target_state=7,
-            )
-            post_start_wicklers["stop"] = stop_result
-            raise RuntimeError(
-                "Wickler nach Pause-Resume nicht stabil: "
-                + "; ".join(str(error) for error in post_start_wicklers.get("errors") or ["unknown"])
-            )
+            resume_wickler_ready = {
+                "ok": True,
+                "label_no": int(resume_next_label_no),
+                "skipped": "resume_label_already_position_commanded_by_esp",
+                "source": "process_production_resume",
+            }
+        post_start_wicklers = {
+            "ok": True,
+            "skipped": "resume_motion_in_progress",
+            "reason": "pre_resume_wickler_prepare_verified",
+        }
         result = {
             "ok": True,
             "resume": "pause",
@@ -8111,36 +8093,18 @@ class MachineRuntime:
         resume_next_label_no = _safe_int(response_payload.get("next_label_no"), 0)
         resume_wickler_ready: dict[str, Any] | None = None
         if resume_next_label_no > 0:
-            try:
-                resume_wickler_ready = self._send_resume_wickler_ready(
-                    label_no=resume_next_label_no,
-                    source="process_production_resume_removed",
-                    labels_removed=labels,
-                )
-            except Exception as exc:
-                stop_result = self._stop_production_motion(
-                    reason="production_label_removal_resume_wickler_ready_failed",
-                    target_state=7,
-                )
-                raise RuntimeError(
-                    f"Wickler-Freigabe nach Entnahme-Resume fuer Label {resume_next_label_no} fehlgeschlagen: {repr(exc)}; "
-                    f"stop={stop_result}"
-                ) from exc
-        time.sleep(PRODUCTION_WICKLER_POST_START_VERIFY_DELAY_S)
-        post_start_wicklers = self._production_wickler_verifications(
-            timeout_s=2.0,
-            require_indexed_mode=True,
-        )
-        if not post_start_wicklers.get("ok"):
-            stop_result = self._stop_production_motion(
-                reason="production_label_removal_resume_wickler_verify_failed",
-                target_state=7,
-            )
-            post_start_wicklers["stop"] = stop_result
-            raise RuntimeError(
-                "Wickler nach Entnahme-Resume nicht stabil: "
-                + "; ".join(str(error) for error in post_start_wicklers.get("errors") or ["unknown"])
-            )
+            resume_wickler_ready = {
+                "ok": True,
+                "label_no": int(resume_next_label_no),
+                "labels_removed": list(labels),
+                "skipped": "resume_label_already_position_commanded_by_esp",
+                "source": "process_production_resume_removed",
+            }
+        post_start_wicklers = {
+            "ok": True,
+            "skipped": "resume_motion_in_progress",
+            "reason": "pre_resume_wickler_prepare_verified",
+        }
         result = {
             "ok": True,
             "resume": "label_removal",
