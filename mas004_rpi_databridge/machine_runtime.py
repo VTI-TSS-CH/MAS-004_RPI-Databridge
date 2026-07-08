@@ -218,6 +218,7 @@ SEA_VISION_READY_IO_KEY = "esp32_plc58__Q2_3"
 SEA_VISION_TRIGGER_LASER_IO_KEY = "esp32_plc58__Q2_4"
 SEA_VISION_TRIGGER_TTO_IO_KEY = "esp32_plc58__Q2_5"
 SEA_VISION_READY_STATES = {4, 5, 6, 7, *LABEL_REMOVAL_STATES}
+SEA_VISION_READY_FORCE_LOW_STATES = {8, 9, 10, 11, 20, 21}
 SEA_VISION_READY_FORCE_INTERVAL_S = 2.0
 SEA_VISION_READY_RETRY_BACKOFF_S = 30.0
 SEA_VISION_FIRST_LABEL_TRIGGER_HIGH_S = 0.1
@@ -7970,6 +7971,9 @@ class MachineRuntime:
                 "rewind_executed": False,
             }
 
+        sea_vision_ready_low = self._force_sea_vision_ready_low(
+            reason=f"label_removal_rewind:{int(label_no)}",
+        )
         wicklers = self._prepare_production_wicklers_reverse(
             plan,
             travel_mm=distance_mm,
@@ -7998,6 +8002,7 @@ class MachineRuntime:
                 "finished_ts": now_ts(),
                 "stage": "start",
                 "plan": plan_payload,
+                "sea_vision_ready_low": sea_vision_ready_low,
                 "wicklers": wicklers,
                 "command": base_command,
                 "response": start_response,
@@ -8088,6 +8093,7 @@ class MachineRuntime:
             "stop_tolerance_mm": float(STOP_MODE_POSITION_TOLERANCE_TENTHS) / 10.0,
             "exact_print_correction_required": False,
             "plan": plan_payload,
+            "sea_vision_ready_low": sea_vision_ready_low,
             "wicklers": wicklers,
             "command": base_command,
             "response": start_response,
@@ -12052,6 +12058,57 @@ class MachineRuntime:
         if not had_error:
             self._status_lamp_last_plan = dict(lamp)
 
+    def _force_sea_vision_ready_low(self, *, reason: str, ts: float | None = None) -> dict[str, Any]:
+        ts_value = now_ts() if ts is None else float(ts)
+        point = self.io_store.get_point(SEA_VISION_READY_IO_KEY)
+        result: dict[str, Any] = {
+            "io_key": SEA_VISION_READY_IO_KEY,
+            "desired": False,
+            "reason": str(reason or "force_low"),
+            "ts": ts_value,
+        }
+        if not point:
+            result.update({"ok": False, "skipped": "io_point_missing"})
+            return result
+        current_value = _truthy(point.get("override_value") if bool(point.get("override_active")) else point.get("value"))
+        result.update(
+            {
+                "current_value": bool(current_value),
+                "current_quality": str(point.get("quality") or "").lower(),
+                "override_active": bool(point.get("override_active")),
+            }
+        )
+        if bool(point.get("override_active")):
+            result.update({"ok": True, "skipped": "manual_override_active", "value": bool(current_value)})
+            return result
+        try:
+            write_result = IoRuntime(self.cfg, self.io_store).write_output(
+                point["io_key"],
+                False,
+                force=True,
+                source=f"sea-vision-ready:{str(reason or 'force_low')}",
+                best_effort=True,
+            )
+            if not bool(write_result.get("ok", True)):
+                raise RuntimeError(str(write_result.get("error") or write_result))
+            self._sea_vision_ready_last_value = False
+            self._sea_vision_ready_force_due_ts = ts_value + SEA_VISION_READY_FORCE_INTERVAL_S
+            self._sea_vision_ready_retry_due_ts = 0.0
+            self._sea_vision_ready_last_error = ""
+            result.update({"ok": True, "value": False, "write": write_result})
+        except Exception as exc:
+            self._sea_vision_ready_last_value = False
+            self._sea_vision_ready_last_error = str(exc)
+            self._sea_vision_ready_retry_due_ts = ts_value + SEA_VISION_READY_RETRY_BACKOFF_S
+            result.update({"ok": False, "error": str(exc), "retry_due_ts": self._sea_vision_ready_retry_due_ts})
+            pin_label = str(point.get("pin_label") or SEA_VISION_READY_IO_KEY)
+            self.logs.log(
+                "machine",
+                "warning",
+                f"SEA-Vision Ready {pin_label} konnte nicht auf LOW gesetzt werden ({reason}): {exc}",
+            )
+        return result
+
     def _apply_sea_vision_ready_output(
         self,
         state: int,
@@ -12062,14 +12119,18 @@ class MachineRuntime:
         setup_info = dict((state_info or {}).get("setup") or {})
         setup_ready_after_measurement = bool(setup_info.get("sea_vision_ready_after_measurement"))
         state_code = int(state or 0)
-        desired = state_code in SEA_VISION_READY_STATES or (
-            state_code == 3 and setup_ready_after_measurement
+        force_low = state_code in SEA_VISION_READY_FORCE_LOW_STATES
+        desired = False if force_low else (
+            state_code in SEA_VISION_READY_STATES or (
+                state_code == 3 and setup_ready_after_measurement
+            )
         )
         point = self.io_store.get_point(SEA_VISION_READY_IO_KEY)
         result: dict[str, Any] = {
             "io_key": SEA_VISION_READY_IO_KEY,
             "desired": bool(desired),
             "state": state_code,
+            "force_low": bool(force_low),
             "setup_ready_after_measurement": setup_ready_after_measurement,
             "ts": float(ts),
         }
@@ -12089,7 +12150,8 @@ class MachineRuntime:
         if bool(point.get("override_active")):
             result.update({"ok": True, "skipped": "manual_override_active", "value": bool(current_value)})
             return result
-        if current_quality == "live" and bool(current_value) == bool(desired):
+        force_write_due = bool(force_low) and float(ts) >= float(self._sea_vision_ready_force_due_ts or 0.0)
+        if current_quality == "live" and bool(current_value) == bool(desired) and not force_write_due:
             self._sea_vision_ready_last_value = bool(desired)
             self._sea_vision_ready_last_error = ""
             self._sea_vision_ready_retry_due_ts = 0.0
@@ -12101,7 +12163,7 @@ class MachineRuntime:
         )
         live_mismatch = current_quality == "live" and bool(current_value) != bool(desired)
         retry_due = float(ts) >= float(self._sea_vision_ready_retry_due_ts or 0.0)
-        if not state_value_changed and self._sea_vision_ready_last_error and not retry_due:
+        if not state_value_changed and self._sea_vision_ready_last_error and not retry_due and not force_low:
             result.update(
                 {
                     "ok": True,
@@ -12112,10 +12174,10 @@ class MachineRuntime:
                 }
             )
             return result
-        if not state_value_changed and not live_mismatch:
+        if not state_value_changed and not live_mismatch and not force_write_due:
             result.update({"ok": True, "skipped": "cached", "value": bool(desired)})
             return result
-        if not state_value_changed and current_quality != "live":
+        if not state_value_changed and current_quality != "live" and not force_write_due:
             self._sea_vision_ready_retry_due_ts = float(ts) + SEA_VISION_READY_RETRY_BACKOFF_S
             result.update(
                 {

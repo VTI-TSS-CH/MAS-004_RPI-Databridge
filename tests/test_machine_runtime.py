@@ -5667,6 +5667,57 @@ class MachineRuntimeTests(unittest.TestCase):
         self.assertEqual("retry_backoff", backed_off["skipped"])
         self.assertEqual([("esp32_plc58__Q2_3", True)], calls)
 
+    def test_sea_vision_ready_forced_low_states_ignore_backoff_and_stale_io(self):
+        runtime = self.build_runtime()
+        runtime._sea_vision_ready_last_value = False
+        runtime._sea_vision_ready_last_error = "timed out"
+        runtime._sea_vision_ready_retry_due_ts = 999.0
+        self.io_store.upsert_value("esp32_plc58__Q2_3", "1", "stale", "test")
+        writes: list[tuple[str, bool, bool, str]] = []
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, io_key, enabled, *, force=False, source="runtime", **_kwargs):
+                writes.append((io_key, bool(enabled), bool(force), source))
+                return {"ok": True}
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            fault = runtime._apply_sea_vision_ready_output(21, ts=10.0)
+            rewind = runtime._apply_sea_vision_ready_output(10, ts=13.0)
+
+        self.assertTrue(fault["ok"])
+        self.assertFalse(fault["desired"])
+        self.assertTrue(fault["force_low"])
+        self.assertTrue(rewind["ok"])
+        self.assertTrue(rewind["force_low"])
+        self.assertEqual(
+            [
+                ("esp32_plc58__Q2_3", False, True, "sea-vision-ready"),
+                ("esp32_plc58__Q2_3", False, True, "sea-vision-ready"),
+            ],
+            writes,
+        )
+
+    def test_sea_vision_ready_force_low_helper_keeps_manual_override_absolute(self):
+        runtime = self.build_runtime()
+        self.io_store.set_override("esp32_plc58__Q2_3", "1")
+
+        class FakeIoRuntime:
+            def __init__(self, *_args):
+                pass
+
+            def write_output(self, *_args, **_kwargs):
+                raise AssertionError("manual override must not be overwritten")
+
+        with patch("mas004_rpi_databridge.machine_runtime.IoRuntime", FakeIoRuntime):
+            result = runtime._force_sea_vision_ready_low(reason="unit_test", ts=10.0)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("manual_override_active", result["skipped"])
+        self.assertTrue(result["value"])
+
     def test_reset_waits_for_esp_safety_inputs_after_pulse_sequence(self):
         runtime = self.build_runtime()
         self.io_store.upsert_value("esp32_plc58__I0_7", "0", "live", "test")
